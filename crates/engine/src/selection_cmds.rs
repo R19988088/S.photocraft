@@ -347,6 +347,9 @@ impl ColorRangeSamples {
 fn color_range(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "select.colorRange";
     let bad = |msg: String| EngineError::BadParams { cmd: CMD.into(), msg };
+    if p.get("softSelection").is_some_and(|v| !v.is_boolean()) {
+        return Err(bad("`softSelection` must be a boolean".into()));
+    }
     let preset = p.get("select").map_or(Some("sampledColors"), Value::as_str).ok_or_else(|| bad("`select` must be a string".into()))?;
     let invert = b(p, "invert", false);
     let selection_mode = mode(p);
@@ -421,6 +424,11 @@ fn color_range(s: &mut Session, p: &Value) -> Result<Value> {
             )));
         }
     };
+    if p.get("softSelection").and_then(Value::as_bool) == Some(false) {
+        for v in &mut mask {
+            *v = if *v > 0.0 { 1.0 } else { 0.0 };
+        }
+    }
     if invert {
         for v in &mut mask {
             *v = 1.0 - *v;
@@ -667,7 +675,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "select.colorRange",
             "Color Range…",
             ["Select"],
-            r##"{"select":"sampledColors|reds|yellows|greens|cyans|blues|magentas|highlights|midtones|shadows|skinTones|outOfGamut"="sampledColors","color":"#rrggbb"=foreground,"colors":["#rrggbb",…]?,"points":[[x,y],…]? (eyedropper samples),"subtractPoints":[[x,y],…]? (minus eyedropper),"order":["+"|"-",…]? (click order of points and subtractPoints; default all points first),"fuzziness":0..200=40 (tones: 0..100 %=20),"detectFaces":bool=false (not available yet: refused),"localized":bool=false,"range":0..100=100 (% of the longer side),"tonalRange":level|[lo,hi] (shadows 65, highlights 190, midtones [105,150]),"invert":bool=false,"sampleAllLayers":bool=true,"mode":"replace|add|subtract|intersect"="replace"}"##,
+            r##"{"select":"sampledColors|reds|yellows|greens|cyans|blues|magentas|highlights|midtones|shadows|skinTones|outOfGamut"="sampledColors","color":"#rrggbb"=foreground,"colors":["#rrggbb",…]?,"points":[[x,y],…]? (eyedropper samples),"subtractPoints":[[x,y],…]? (minus eyedropper),"order":["+"|"-",…]? (click order of points and subtractPoints; default all points first),"fuzziness":0..200=40 (tones: 0..100 %=20),"softSelection":bool=true (graded coverage; false selects matching pixels fully),"detectFaces":bool=false (not available yet: refused),"localized":bool=false,"range":0..100=100 (% of the longer side),"tonalRange":level|[lo,hi] (shadows 65, highlights 190, midtones [105,150]),"invert":bool=false,"sampleAllLayers":bool=true,"mode":"replace|add|subtract|intersect"="replace"}"##,
             has_doc,
             color_range
         ),
@@ -1009,6 +1017,26 @@ mod tests {
         s.execute("select.colorRange", json!({"color": "#ff0000", "fuzziness": 100})).unwrap();
         assert_eq!(coverage(&s, 10, 10), 1.0);
         assert_eq!(coverage(&s, 20, 20), 0.0);
+    }
+
+    #[test]
+    fn color_range_soft_selection_can_be_disabled() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 2, "height": 1})).unwrap();
+        s.edit("paint", |doc, _| {
+            let surface = doc.layers[0].surface_mut().unwrap();
+            surface.fill_rect(Rect::new(0, 0, 1, 1), &[0.78, 0.55, 0.47, 1.0]);
+            surface.fill_rect(Rect::new(1, 0, 2, 1), &[0.86, 0.63, 0.55, 1.0]);
+            Ok(())
+        })
+        .unwrap();
+        s.execute("select.colorRange", json!({"points": [[0, 0]], "fuzziness": 40, "softSelection": true})).unwrap();
+        let soft = coverage(&s, 1, 0);
+        assert!(soft > 0.0 && soft < 1.0, "{soft}");
+        s.execute("select.deselect", json!({})).unwrap();
+        s.execute("select.colorRange", json!({"points": [[0, 0]], "fuzziness": 40, "softSelection": false})).unwrap();
+        assert_eq!(coverage(&s, 1, 0), 1.0);
+        assert!(s.execute("select.colorRange", json!({"softSelection": "false"})).is_err());
     }
 
     #[test]

@@ -932,3 +932,15 @@ fn tablet_pressure_preferences_default_and_persist() {
     let older: Preferences = serde_json::from_str(r#"{"tools":{"useTabletPressure":true}}"#).unwrap();
     assert_eq!(older.tools.tablet_pressure, photocraft_paint::TabletPressureSettings::default());
 }
+
+#[test]
+fn painting_color_controls_validate_and_persist() {
+    let mut s = Session::new();
+    s.execute("prefs.set",json!({"values":{"painting.pigmentMixStrength":65,"painting.saturationMemory":80,"painting.hueSliderLoopEnabled":false,"painting.translucentSelection":true}})).unwrap();
+    let mut restored = Session::new();
+    restored.load_prefs_json(&s.prefs_to_json()).unwrap();
+    assert_eq!(restored.prefs().painting, s.prefs().painting);
+    assert!(s.execute("prefs.set", json!({"path":"painting.pigmentMixStrength","value":101})).is_err());
+    let brush = crate::brush_cmds::resolve_brush(&s, &json!({}), "paint.stroke").unwrap();
+    assert!((brush.pigment_mix_strength - 0.65).abs() < 1e-6);
+}

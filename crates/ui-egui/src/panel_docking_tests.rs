@@ -638,21 +638,22 @@ fn explicit_reveal_activates_existing_tab_and_expands_custom_group() {
     assert_eq!(app.ui.docking, before);
 }
 
-// #2455 in a custom workspace: the pro Color field fills a tall floating group, not 120 pt.
+// Color geometry follows C2 proportions even in a tall floating group.
 #[test]
-fn pro_color_field_fills_a_tall_custom_group() {
+fn pro_color_field_stays_square_in_a_tall_custom_group() {
     let mut app = app();
     app.run("window.panel.float", json!({"panel":"color","x":40,"y":60,"width":320,"height":560})).unwrap();
     assert!(app.ui.docking.is_some());
     let h = harness(app, vec2(1280.0, 800.0));
-    // The SV field and the 14 pt hue strip beside it are draggable, equally tall and 8 pt apart.
+    // The SV field is square and its hue strip has the C2 25:168 width ratio.
     let drags: Vec<egui::Rect> =
         h.ctx.viewport(|v| v.this_pass.widgets.layers().flat_map(|(_, w)| w).filter(|w| w.sense.senses_drag()).map(|w| w.rect).collect());
     let field = drags
         .iter()
-        .find(|f| drags.iter().any(|s| s.width() == 14.0 && s.top() == f.top() && s.height() == f.height() && (s.left() - f.right() - 8.0).abs() < 0.5))
+        .find(|f| drags.iter().any(|s| (s.width() / f.width() - 25.0 / 168.0).abs() < 0.01 && s.top() == f.top() && s.height() == f.height()))
         .expect("Color field with its hue strip");
-    assert!(field.height() > 300.0, "field stays short in a 560 pt group: {field:?}");
+    assert!((field.height() - field.width()).abs() < 1.0, "{field:?}");
+    assert!(field.height() < 250.0, "must not stretch with group height: {field:?}");
 }
 
 // #4028: in a custom workspace too, a new adjustment layer brings Properties to the front.

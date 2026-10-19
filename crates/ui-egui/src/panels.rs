@@ -427,7 +427,7 @@ pub fn paint_toolbar_flyout_indicator(ui: &mut egui::Ui, tokens: &Tokens, resp: 
     ui.painter().add(egui::Shape::convex_polygon(tri, tokens.text_faint, Stroke::NONE));
 }
 
-fn c32(c: [f32; 4]) -> Color32 {
+pub(crate) fn c32(c: [f32; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8, (c[3] * 255.0) as u8)
 }
 
@@ -2388,42 +2388,9 @@ fn empty(ui: &mut egui::Ui, s: &str) {
     ui.add_space(6.0);
 }
 
-/// The Color tab of the themes other than Photoshop's: the same spectrum field (chips, saturation
-/// and brightness field, hue strip and readout) with HSB sliders under it (#4367).
+/// Every theme uses the shared C3 color panel.
 fn color_picker(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     color_field(app, ui);
-    ui.add_space(8.0);
-    hsb_sliders(app, ui);
-}
-
-/// Hue, Saturation and Brightness sliders for the foreground colour.
-fn hsb_sliders(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    let fg = app.session.tools.foreground;
-    // Keep the last edited HSB while it still gives the foreground: black and greys have no hue or
-    // saturation of their own, so recomputing them from RGB would reset what was just typed to 0.
-    let key = egui::Id::new("color-picker-hsva");
-    let stored: Option<egui::ecolor::Hsva> = ui.data(|d| d.get_temp(key));
-    let hsva0 = stored.filter(|h| srgb_bytes(hsva_srgb(*h)) == srgb_bytes(fg)).unwrap_or_else(|| srgb_hsva(fg));
-    let mut h = hsva0.h * 360.0;
-    let mut s = hsva0.s * 100.0;
-    let mut v = hsva0.v * 100.0;
-    let hue = widgets::hue_stops();
-    // Preferences ▸ Interface ▸ Dynamic Color Sliders: off, the tracks are the plain ones.
-    let dynamic = app.session.prefs().interface.dynamic_color_sliders;
-    let mut changed = widgets::slider_row(ui, tl!("Hue"), &mut h, 0.0..=360.0, "°", dynamic.then_some(&hue)).changed();
-    let sat_stops =
-        [egui::ecolor::Hsva::new(hsva0.h, 0.0, hsva0.v.max(0.2), 1.0), egui::ecolor::Hsva::new(hsva0.h, 1.0, hsva0.v.max(0.2), 1.0)].map(hsva_color32);
-    changed |= widgets::slider_row(ui, tl!("Saturation"), &mut s, 0.0..=100.0, "%", dynamic.then_some(&sat_stops)).changed();
-    let val_stops = [Color32::BLACK, hsva_color32(egui::ecolor::Hsva::new(hsva0.h, hsva0.s, 1.0, 1.0))];
-    changed |= widgets::slider_row(ui, tl!("Brightness"), &mut v, 0.0..=100.0, "%", dynamic.then_some(&val_stops)).changed();
-    let hsva = egui::ecolor::Hsva::new(h / 360.0, s / 100.0, v / 100.0, 1.0);
-    // Only an edit counts: the h/s/v round trip isn't exact, so comparing values would rewrite
-    // the foreground (and recolour selected type) every frame.
-    if changed {
-        app.session.tools.foreground = hsva_srgb(hsva);
-        ui.data_mut(|d| d.insert_temp(key, hsva));
-        crate::type_tool::foreground_changed(app);
-    }
 }
 
 // ----------------------------------------------------------------------------- layers
@@ -3871,183 +3838,14 @@ fn adjustments_grid(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The Color panel's foreground and background chips. A click picks the colour the field edits,
-/// framed; a double-click opens the Color Picker on it.
-fn field_chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, chips: Rect) {
-    let t = Tokens::get(ui.ctx());
-    let bgr = Rect::from_min_size(chips.min + vec2(13.0, 13.0), vec2(22.0, 22.0));
-    let fgr = Rect::from_min_size(chips.min + vec2(3.0, 3.0), vec2(22.0, 22.0));
-    let frame = Stroke::new(1.0, t.text_dim);
-    let bg_active = app.ui.color_panel.background;
-    let p = ui.painter();
-    p.rect_filled(bgr, 2.0, c32(app.session.tools.background));
-    p.rect_stroke(bgr, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
-    if bg_active {
-        p.rect_stroke(bgr.expand(2.0), 2.0, frame, StrokeKind::Outside);
-    }
-    p.rect_filled(fgr, 2.0, c32(app.session.tools.foreground));
-    p.rect_stroke(fgr, 2.0, Stroke::new(1.0, Color32::from_gray(210)), StrokeKind::Outside);
-    if !bg_active {
-        p.rect_stroke(fgr.expand(2.0), 2.0, frame, StrokeKind::Outside);
-    }
-    // The foreground is on top, so it takes the clicks where the two overlap.
-    let bg_resp = ui.interact(bgr, ui.id().with("field-bg"), Sense::click());
-    let fg_resp = ui.interact(fgr, ui.id().with("field-fg"), Sense::click());
-    let picked = if fg_resp.clicked() { false } else { bg_resp.clicked() || bg_active };
-    app.ui.color_panel.background = picked;
-    if fg_resp.double_clicked() || bg_resp.double_clicked() {
-        crate::color_picker_ui::open(app, if picked { "background" } else { "foreground" });
-    }
-}
-
-/// Where the dock tells the Color field how tall its group body is.
-fn color_field_fill_id() -> egui::Id {
-    egui::Id::new("color-field-fill-height")
-}
-
-/// The pro Color field stretches to its dock group's height instead of a fixed 120 pt: a dock
-/// calls this with the group body's `ui` before drawing the tab.
-pub(crate) fn offer_color_field_fill(ui: &egui::Ui, pro: bool, group: crate::dock::Group, tab: usize) {
-    if pro && group == crate::dock::Group::Color && tab == 0 {
-        let inner = ui.available_height().max(0.0);
-        ui.data_mut(|d| d.insert_temp(color_field_fill_id(), inner));
-    }
-}
-
-/// Height of the Color field: the group body's height (when docked) less the hex/RGB readout,
-/// which folds onto a second line in a narrow dock. 120 pt when nothing sets a height.
-fn color_field_height(avail: Option<f32>, width: f32) -> f32 {
-    let reserve = 32.0 + if width < 280.0 { 26.0 } else { 0.0 };
-    avail.filter(|a| a.is_finite()).map_or(120.0, |a| (a - reserve).clamp(120.0, 2000.0))
-}
-
-/// The colour the SV field draws for `hsva`, with what the field showed last (`hue`, `saturation`)
-/// filling in what the colour itself cannot carry: a grey has no hue of its own, and black has
-/// neither hue nor saturation — so a drag that bottoms out into black would otherwise round-trip
-/// through RGB as `s = 0` and drop the knob from the bottom-right corner to the bottom-left one
-/// (#3228).
-fn field_hsva(mut hsva: egui::ecolor::Hsva, remembered: (f32, f32)) -> egui::ecolor::Hsva {
-    if hsva.v < 0.01 {
-        hsva.h = remembered.0;
-        hsva.s = remembered.1;
-    } else if hsva.s < 0.01 {
-        // A grey: the saturation really is zero (that is where the knob belongs), only the hue
-        // is undefined.
-        hsva.h = remembered.0;
-    }
-    hsva
-}
-
 /// Photoshop Color panel: saturation/brightness field + hue strip, drawn as shaded meshes.
 fn color_field(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    let t = Tokens::get(ui.ctx());
-    let bg_active = app.ui.color_panel.background;
-    let key = egui::Id::new(("color-field-hue", bg_active));
-    let mut hsva = srgb_hsva(if bg_active { app.session.tools.background } else { app.session.tools.foreground });
-    // What the field showed last: a grey carries no hue, black neither hue nor saturation (#3228).
-    let remembered: (f32, f32) = ui.data(|d| d.get_temp(key)).unwrap_or((hsva.h, hsva.s));
-    hsva = field_hsva(hsva, remembered);
-    let w = ui.available_width();
-    let strip_w = 14.0;
-    // Photoshop's Color panel field fills the panel: take the height the dock offers, less the
-    // hex/RGB readout (which folds onto a second line in a narrow dock). Without a dock, 120 pt.
-    // Only Photoshop's themes stretch it over the group: the other themes put sliders under it.
-    let fill = if t.pro { ui.data(|d| d.get_temp::<f32>(color_field_fill_id())) } else { None };
-    let h = color_field_height(fill, w);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let (chips, _) = ui.allocate_exact_size(vec2(38.0, h), Sense::hover());
-        field_chips(app, ui, chips);
-        // SV field.
-        let field_w = w - 38.0 - strip_w - 16.0;
-        let (field, fresp) = ui.allocate_exact_size(vec2(field_w, h), Sense::click_and_drag());
-        let mut mesh = egui::Mesh::default();
-        let n = 16;
-        for j in 0..=n {
-            for i in 0..=n {
-                let (sx, vy) = (i as f32 / n as f32, j as f32 / n as f32);
-                let c = hsva_color32(egui::ecolor::Hsva::new(hsva.h, sx, 1.0 - vy, 1.0));
-                mesh.colored_vertex(pos2(field.left() + sx * field.width(), field.top() + vy * field.height()), c);
-            }
-        }
-        for j in 0..n {
-            for i in 0..n {
-                let a = (j * (n + 1) + i) as u32;
-                let b = a + 1;
-                let c = a + (n + 1) as u32;
-                let d = c + 1;
-                mesh.add_triangle(a, b, d);
-                mesh.add_triangle(a, d, c);
-            }
-        }
-        ui.painter().add(mesh);
-        ui.painter().rect_stroke(field, 0.0, Stroke::new(1.0, t.separator), StrokeKind::Outside);
-        if (fresp.dragged() || fresp.clicked())
-            && let Some(p) = fresp.interact_pointer_pos()
-        {
-            hsva.s = ((p.x - field.left()) / field.width()).clamp(0.0, 1.0);
-            hsva.v = 1.0 - ((p.y - field.top()) / field.height()).clamp(0.0, 1.0);
-        }
-        let knob = pos2(field.left() + hsva.s * field.width(), field.top() + (1.0 - hsva.v) * field.height());
-        ui.painter().circle_stroke(knob, 5.0, Stroke::new(1.5, Color32::WHITE));
-        ui.painter().circle_stroke(knob, 6.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
-        // Hue strip.
-        let (strip, sresp) = ui.allocate_exact_size(vec2(strip_w, h), Sense::click_and_drag());
-        let mut m2 = egui::Mesh::default();
-        let steps = 24;
-        for k in 0..=steps {
-            let f = k as f32 / steps as f32;
-            let c = hsva_color32(egui::ecolor::Hsva::new(1.0 - f, 1.0, 1.0, 1.0));
-            m2.colored_vertex(pos2(strip.left(), strip.top() + f * strip.height()), c);
-            m2.colored_vertex(pos2(strip.right(), strip.top() + f * strip.height()), c);
-        }
-        for k in 0..steps {
-            let a = (k * 2) as u32;
-            m2.add_triangle(a, a + 1, a + 3);
-            m2.add_triangle(a, a + 3, a + 2);
-        }
-        ui.painter().add(m2);
-        if (sresp.dragged() || sresp.clicked())
-            && let Some(p) = sresp.interact_pointer_pos()
-        {
-            hsva.h = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 0.9999);
-        }
-        let y = strip.top() + (1.0 - hsva.h) * strip.height();
-        let tri = vec![pos2(strip.right() + 1.0, y), pos2(strip.right() + 6.0, y - 4.0), pos2(strip.right() + 6.0, y + 4.0)];
-        ui.painter().add(egui::Shape::convex_polygon(tri, t.text, Stroke::NONE));
-        if fresp.dragged() || fresp.clicked() || sresp.dragged() || sresp.clicked() {
-            if bg_active {
-                app.session.tools.background = hsva_srgb(hsva);
-            } else {
-                app.session.tools.foreground = hsva_srgb(hsva);
-                crate::type_tool::foreground_changed(app);
-            }
-            ui.data_mut(|d| d.insert_temp(key, (hsva.h, hsva.s)));
-        }
-    });
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let mut c = if bg_active { app.session.tools.background } else { app.session.tools.foreground };
-        if color_readout(ui, ui.id().with(("color-field", bg_active)), &mut c) {
-            if bg_active {
-                app.session.tools.background = c;
-            } else {
-                app.session.tools.foreground = c;
-                crate::type_tool::foreground_changed(app);
-            }
-            // Keep the hue for greys, so the field marker doesn't jump to red; the saturation with
-            // it, so a later black lands on the corner it was last dragged to (#3228).
-            let h = srgb_hsva(c);
-            if h.s >= 0.01 && h.v >= 0.01 {
-                ui.data_mut(|d| d.insert_temp(key, (h.h, h.s)));
-            }
-        }
-    });
+    crate::color_panel::show(app, ui);
 }
 
 /// Tool colours are sRGB-encoded floats; egui's Hsva works on sRGB bytes via these helpers
 /// (its `from_rgba_unmultiplied` expects *linear* RGB, which gave wrong readouts).
-fn srgb_bytes(c: [f32; 4]) -> [u8; 3] {
+pub(crate) fn srgb_bytes(c: [f32; 4]) -> [u8; 3] {
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     [q(c[0]), q(c[1]), q(c[2])]
 }
@@ -4055,18 +3853,18 @@ fn srgb_bytes(c: [f32; 4]) -> [u8; 3] {
 /// The Color panel's HSB, as Photoshop's and the Color Picker's: on the sRGB-encoded values,
 /// so a 50% grey has Brightness 50%. egui's `Hsva` conversions work in linear light, which put
 /// that grey at 22% and drew the field's middle as 188 (#3323); `Hsva` only holds the numbers.
-fn srgb_hsva(c: [f32; 4]) -> egui::ecolor::Hsva {
+pub(crate) fn srgb_hsva(c: [f32; 4]) -> egui::ecolor::Hsva {
     let [h, s, v] = crate::color_picker_ui::rgb_to_hsv([c[0], c[1], c[2]].map(|v| v.clamp(0.0, 1.0)));
     egui::ecolor::Hsva::new(h / 360.0, s, v, 1.0)
 }
 
-fn hsva_srgb(h: egui::ecolor::Hsva) -> [f32; 4] {
+pub(crate) fn hsva_srgb(h: egui::ecolor::Hsva) -> [f32; 4] {
     let [r, g, b] = crate::color_picker_ui::hsv_to_rgb(h.h * 360.0, h.s.clamp(0.0, 1.0), h.v.clamp(0.0, 1.0));
     [r, g, b, 1.0]
 }
 
 /// The colour to draw for Color panel HSB `h` (see [`srgb_hsva`]).
-fn hsva_color32(h: egui::ecolor::Hsva) -> Color32 {
+pub(crate) fn hsva_color32(h: egui::ecolor::Hsva) -> Color32 {
     let [r, g, b] = srgb_bytes(hsva_srgb(h));
     Color32::from_rgb(r, g, b)
 }
@@ -4074,7 +3872,7 @@ fn hsva_color32(h: egui::ecolor::Hsva) -> Color32 {
 /// The Color panel's editable colour readout: a hex field and R, G, B fields, all drawn like the
 /// dock's [`widgets::value_field`] so they sit in the theme. Editing any of them sets `color`
 /// (sRGB-encoded floats) and returns `true`.
-fn color_readout(ui: &mut egui::Ui, id: egui::Id, color: &mut [f32; 4]) -> bool {
+pub(crate) fn color_readout(ui: &mut egui::Ui, id: egui::Id, color: &mut [f32; 4]) -> bool {
     let t = Tokens::get(ui.ctx());
     let mut changed = false;
     // Wrapped so the fields fold onto a second line in a narrow dock instead of being clipped.
@@ -4777,42 +4575,25 @@ mod color_tests {
         let mut h = egui_kittest::Harness::builder().with_size(vec2(300.0, 300.0)).build_ui_state(
             |ui, app: &mut PhotocraftApp| {
                 if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
-                    hsb_sliders(app, ui);
+                    app.ui.color_panel.mode = crate::state::PaletteMode::Hsb;
+                    color_field(app, ui);
                 }
             },
             app,
         );
         PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
         h.run_steps(2);
-        // Hue, Saturation, Brightness, typed one key per frame. Black has no hue or saturation of its
-        // own, so the first two used to reset to 0 and this ended on white.
-        for (field, typed) in [(0, "120"), (1, "100"), (2, "100")] {
-            h.query_all_by_role(egui::accesskit::Role::SpinButton).nth(field).unwrap().click();
-            h.run_steps(1);
-            for ch in typed.chars() {
-                h.event(egui::Event::Text(ch.to_string()));
-                h.run_steps(1);
-            }
-            h.key_press(egui::Key::Tab);
-            h.run_steps(2);
+        // Black must retain hue and saturation selected before brightness rises.
+        for (field, fraction) in [(0, 1. / 3.), (1, 1.), (2, 1.)] {
+            let r = h.query_all_by_role(egui::accesskit::Role::Slider).nth(field).unwrap().rect();
+            click(&mut h, pos2(r.left() + fraction * r.width(), r.center().y));
         }
         assert_eq!(srgb_bytes(h.state().session.tools.foreground), [0, 255, 0]);
     }
 
-    /// The Color field fills the dock group, never shrinks below 120 pt, and ignores a bad height.
-    #[test]
-    fn color_field_height_fills_the_group() {
-        assert_eq!(color_field_height(None, 300.0), 120.0);
-        assert_eq!(color_field_height(Some(500.0), 300.0), 468.0);
-        assert_eq!(color_field_height(Some(500.0), 200.0), 442.0);
-        assert_eq!(color_field_height(Some(60.0), 300.0), 120.0);
-        assert_eq!(color_field_height(Some(f32::NAN), 300.0), 120.0);
-        assert_eq!(color_field_height(Some(1.0e9), 300.0), 2000.0);
-    }
-
     fn field_harness(app: PhotocraftApp) -> egui_kittest::Harness<'static, PhotocraftApp> {
         // 60 fps steps, so two clicks a frame apart are a double-click.
-        let mut h = egui_kittest::Harness::builder().with_size(vec2(300.0, 200.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(300.0, 400.0)).with_step_dt(1.0 / 60.0).build_ui_state(
             |ui, app: &mut PhotocraftApp| {
                 if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     color_field(app, ui);
@@ -4837,15 +4618,15 @@ mod color_tests {
     /// A click on the background chip makes the field edit the background, not the foreground.
     #[test]
     fn background_chip_retargets_the_color_field() {
+        use egui_kittest::kittest::Queryable;
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.session.tools.foreground = [0.2, 0.4, 0.6, 1.0];
         app.session.tools.background = [0.0, 0.0, 0.0, 1.0];
         let mut h = field_harness(app);
-        let min = h.ctx.input(|i| i.viewport_rect()).min;
-        // The background chip's corner that the foreground chip doesn't cover.
-        click(&mut h, min + vec2(40.0, 40.0));
-        // The field's top-left: no saturation, full brightness.
-        click(&mut h, min + vec2(60.0, 10.0));
+        let bg = h.get_by_label("Background Color").rect().center();
+        click(&mut h, bg);
+        let field = h.get_by_label("Saturation / Brightness").rect();
+        click(&mut h, field.left_top() + vec2(1., 1.));
         assert!(h.state().ui.color_panel.background);
         let tools = &h.state().session.tools;
         assert_eq!(tools.foreground, [0.2, 0.4, 0.6, 1.0]);
@@ -4858,7 +4639,7 @@ mod color_tests {
         let mut h = field_harness(app);
         let min = h.ctx.input(|i| i.viewport_rect()).min;
         // The foreground point is where the chips overlap: the foreground is on top there.
-        for (p, target) in [(vec2(40.0, 40.0), "background"), (vec2(30.0, 30.0), "foreground")] {
+        for (p, target) in [(vec2(20.0, 75.0), "background"), (vec2(30.0, 30.0), "foreground")] {
             h.state_mut().ui.dialogs.clear();
             // Past the last double-click, so this one isn't counted as a triple-click.
             h.run_steps(40);
@@ -4890,14 +4671,14 @@ mod color_tests {
     #[test]
     fn field_hsva_keeps_black_where_it_was_and_leaves_a_real_colour_alone() {
         // Read back from black, as every frame does: nothing of the drag survives the RGB trip.
-        let black = field_hsva(egui::ecolor::Hsva::new(0.0, 0.0, 0.0, 1.0), (0.6, 1.0));
+        let black = crate::color_panel::remember_hsva(egui::ecolor::Hsva::new(0.0, 0.0, 0.0, 1.0), (0.6, 1.0), 1.0);
         assert_eq!((black.h, black.s), (0.6, 1.0), "the corner the drag ended in");
         // A grey: the saturation is genuinely zero — that is where the knob belongs — only the
         // hue was undefined.
-        let grey = field_hsva(egui::ecolor::Hsva::new(0.0, 0.0, 0.5, 1.0), (0.6, 1.0));
+        let grey = crate::color_panel::remember_hsva(egui::ecolor::Hsva::new(0.0, 0.0, 0.5, 1.0), (0.6, 1.0), 1.0);
         assert_eq!((grey.h, grey.s), (0.6, 0.0), "the grey stays on the left edge");
         // An ordinary colour is left as it is.
-        let red = field_hsva(egui::ecolor::Hsva::new(0.1, 0.8, 0.9, 1.0), (0.6, 1.0));
+        let red = crate::color_panel::remember_hsva(egui::ecolor::Hsva::new(0.1, 0.8, 0.9, 1.0), (0.6, 1.0), 1.0);
         assert_eq!((red.h, red.s), (0.1, 0.8));
     }
 
@@ -4914,13 +4695,13 @@ mod color_tests {
         // Into the far bottom-right corner of the SV field: full saturation, no value. The end
         // point lies past the corner on purpose — a real drag goes there too, and the widget
         // clamps it to the field.
-        drag(&mut h, min + vec2(200.0, 60.0), min + vec2(280.0, 170.0));
+        drag(&mut h, min + vec2(200.0, 60.0), min + vec2(280.0, 260.0));
         assert_eq!(srgb_bytes(h.state().session.tools.foreground), [0, 0, 0], "both corners are black");
         // What the knob is drawn from on the very next frame: the field kept the saturation the
         // drag ended at (not the zero black reads back as), together with the hue.
         let remembered: (f32, f32) = h.ctx.data(|d| d.get_temp(egui::Id::new(("color-field-hue", false)))).expect("the field remembers what it showed");
         assert!(remembered.1 > 0.9, "the saturation the corner was dragged to: {remembered:?}");
-        let shown = field_hsva(egui::ecolor::Hsva::new(0.0, 0.0, 0.0, 1.0), remembered);
+        let shown = crate::color_panel::remember_hsva(egui::ecolor::Hsva::new(0.0, 0.0, 0.0, 1.0), remembered, 1.0);
         assert!(shown.s > 0.9, "the knob stays at the right edge, not the left: {remembered:?}");
         assert!(shown.v < 0.01, "still black: {shown:?}");
     }
@@ -4928,19 +4709,20 @@ mod color_tests {
     /// Black has no hue of its own, so each chip remembers the hue last picked for it.
     #[test]
     fn each_chip_keeps_its_own_hue_on_black() {
+        use egui_kittest::kittest::Queryable;
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.session.tools.foreground = [0.0, 0.0, 0.0, 1.0];
         app.session.tools.background = [0.0, 0.0, 0.0, 1.0];
         let mut h = field_harness(app);
-        let min = h.ctx.input(|i| i.viewport_rect()).min;
-        // The hue strip runs from red at the top through blue (a third down) and green (two thirds).
-        let (strip_x, green, blue) = (285.0, 88.0, 48.0);
-        click(&mut h, min + vec2(strip_x, green));
-        click(&mut h, min + vec2(40.0, 40.0));
-        click(&mut h, min + vec2(strip_x, blue));
-        click(&mut h, min + vec2(16.0, 16.0));
-        // Near the field's top-right: high saturation and brightness.
-        click(&mut h, min + vec2(265.0, 10.0));
+        let strip = h.get_by_label("Hue").rect();
+        click(&mut h, pos2(strip.center().x, strip.top() + strip.height() / 3.));
+        let bg = h.get_by_label("Background Color").rect().center();
+        click(&mut h, bg);
+        click(&mut h, pos2(strip.center().x, strip.top() + strip.height() * 2. / 3.));
+        let fg = h.get_by_label("Foreground Color").rect().center();
+        click(&mut h, fg);
+        let field = h.get_by_label("Saturation / Brightness").rect();
+        click(&mut h, field.right_top() + vec2(-1., 1.));
         let [r, g, b] = srgb_bytes(h.state().session.tools.foreground);
         assert!(g > 200 && r < 64 && b < 64, "the foreground's green, not the background's blue: {:?}", [r, g, b]);
     }

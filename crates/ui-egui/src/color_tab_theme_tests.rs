@@ -1,5 +1,4 @@
-//! The Color panel tab draws Photoshop's spectrum field in every theme (#4367): the light themes
-//! used to show HSB sliders only. Those themes keep the sliders, under the field.
+//! Every theme uses the same C3 spectrum panel without a second set of HSB sliders.
 
 use egui::{Rect, pos2};
 use egui_kittest::kittest::Queryable;
@@ -36,10 +35,8 @@ fn color_tab(kind: ThemeKind) -> egui_kittest::Harness<'static, PhotocraftApp> {
 fn every_theme_shows_the_spectrum_field() {
     for kind in ThemeKind::ALL {
         let mut h = color_tab(kind);
-        let origin = h.ctx.data(|d| d.get_temp::<Rect>(left_top())).unwrap().min;
-        // Left edge of the saturation/brightness field (after the 38 pt chips and the 8 pt gap),
-        // halfway down its 120 pt: no saturation, half brightness.
-        let p = pos2(origin.x + 38.0 + 8.0 + 1.0, origin.y + 60.0);
+        let field = h.get_by_label("Saturation / Brightness").rect();
+        let p = pos2(field.left() + 1., field.center().y);
         h.hover_at(p);
         h.run_steps(1);
         h.drag_at(p);
@@ -49,7 +46,7 @@ fn every_theme_shows_the_spectrum_field() {
         let [r, g, b, _] = h.state().session.tools.foreground;
         assert!((r - g).abs() < 0.02 && (g - b).abs() < 0.02 && (0.3..0.7).contains(&r), "{kind:?}: the field picks a mid grey, got {r} {g} {b}");
         if !Tokens::for_kind(kind).pro {
-            assert!(h.query_by_label("Saturation").is_some(), "{kind:?}: the sliders stay under the field");
+            assert!(h.query_by_label("Saturation").is_none(), "{kind:?}: no extra sliders below the field");
         }
     }
 }

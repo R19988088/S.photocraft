@@ -22,11 +22,12 @@ use crate::PhotocraftApp;
 use crate::state::DialogKind;
 use crate::theme::{ThemeKind, Tokens};
 
-const PREF_SECTIONS: [(&str, &str); 19] = [
+const PREF_SECTIONS: [(&str, &str); 20] = [
     ("general", "General"),
     ("interface", "Interface"),
     ("workspace", "Workspace"),
     ("tools", "Tools"),
+    ("painting", "Painting"),
     ("tablet", "Tablet"),
     ("historyLog", "History Log"),
     ("fileHandling", "File Handling"),
@@ -1125,6 +1126,10 @@ fn gpu_memory_lines(app: &PhotocraftApp) -> Vec<String> {
 
 fn humanize(key: &str) -> String {
     match key {
+        "pigmentMixStrength" => return "Mixing Strength".into(),
+        "saturationMemory" => return "Eyedropper Saturation Protection".into(),
+        "hueSliderLoopEnabled" => return "Loop Hue Slider".into(),
+        "translucentSelection" => return "Translucent Selection".into(),
         "appearanceMode" => return "Appearance Mode".into(),
         "exrAcesCg" => return "Open color-less EXR as ACEScg".into(),
         "darkTheme" => return "Dark Theme".into(),
@@ -1601,7 +1606,7 @@ fn ctx_take_pick(ui: &egui::Ui) -> Option<(String, String)> {
 /// by their own widgets; their stored values pass through untouched.
 fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, query: &str) -> bool {
     let path = format!("{section}.{k}");
-    let drawn_elsewhere = (section == "interface" && matches!(k, "theme" | "appearanceMode" | "darkTheme" | "lightTheme" | "favoriteThemes"))
+    let drawn_elsewhere = (section == "painting" && k == "pigmentMixStrength") || (section == "interface" && matches!(k, "theme" | "appearanceMode" | "darkTheme" | "lightTheme" | "favoriteThemes"))
         // View › Rulers (⌘R) sets it, as in Photoshop.
         || path == "unitsAndRulers.showRulers"
         || (section == "performance" && matches!(k, "useGpu" | "gpuBackend" | "renderingMode"))

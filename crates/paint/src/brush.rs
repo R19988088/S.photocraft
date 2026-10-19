@@ -477,6 +477,8 @@ impl Default for Smoothing {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BrushSettings {
+    /// C3 pigment response, 0 = ordinary blending, 1 = full Kubelka-Munk response.
+    pub pigment_mix_strength: f32,
     /// Diameter in pixels.
     pub size: f32,
     /// 0 (soft) ..1 (hard). Computed tips only.
@@ -560,6 +562,7 @@ pub struct BrushSettings {
 impl Default for BrushSettings {
     fn default() -> Self {
         Self {
+            pigment_mix_strength: 0.0,
             size: 20.0,
             hardness: 1.0,
             spacing: 0.1,

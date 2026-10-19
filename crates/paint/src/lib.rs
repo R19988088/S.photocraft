@@ -25,6 +25,7 @@ pub mod dynamics;
 pub mod material;
 pub mod mixer;
 pub mod outline;
+pub mod pigment;
 pub mod presets;
 pub mod procedural;
 pub mod render;
@@ -286,6 +287,48 @@ mod tests {
         assert!(dmg.contains(50, 10));
         assert_eq!(s.pixel(50, 10), vec![0.0, 0.0, 0.0, 1.0]);
         assert_eq!(s.pixel(50, 30)[3], 0.0);
+    }
+
+    #[test]
+    fn pigment_stroke_mixes_overlap_and_keeps_coverage() {
+        let mut base = Surface::new(PixelFormat::RGBA8);
+        base.fill_rect(Rect::new(0, 0, 32, 32), &[1.0, 1.0, 0.0, 1.0]);
+        let mut st = stroke(&[(8.0, 16.0), (24.0, 16.0)], 8.0);
+        st.brush.color = [0.0, 0.0, 1.0, 1.0];
+        st.brush.opacity = 0.5;
+        let pre = base.clone();
+        let mut normal = base.clone();
+        apply_stroke(&mut normal, &st, None, false);
+        st.brush.pigment_mix_strength = 1.0;
+        apply_stroke(&mut base, &st, None, false);
+        let mut live = pre.clone();
+        let mut renderer = crate::render::StrokeRenderer::on_surface(&st.brush, &pre, 1.0);
+        for point in &st.points {
+            renderer.push(&[*point]);
+            renderer.composite(&pre, &mut live, None, false, false);
+        }
+        renderer.finish();
+        renderer.composite(&pre, &mut live, None, false, false);
+        assert_eq!(base.read_region(Rect::new(0, 0, 32, 32)), live.read_region(Rect::new(0, 0, 32, 32)));
+        let mixed = base.pixel(16, 16);
+        assert!(mixed[1] > mixed[0] && mixed[1] > mixed[2], "{mixed:?}");
+        assert_ne!(mixed, normal.pixel(16, 16));
+        assert_eq!(mixed[3], normal.pixel(16, 16)[3]);
+        let mut empty = Surface::new(PixelFormat::RGBA8);
+        apply_stroke(&mut empty, &st, None, false);
+        assert!((empty.pixel(16, 16)[3] - 0.5).abs() < 0.02);
+        let mut transparent = pre.clone();
+        st.brush.color[3] = 0.0;
+        apply_stroke(&mut transparent, &st, None, false);
+        assert_eq!(transparent.pixel(16, 16), pre.pixel(16, 16));
+        st.brush.color[3] = 0.5;
+        let mut half_alpha = pre.clone();
+        apply_stroke(&mut half_alpha, &st, None, false);
+        st.brush.color[3] = 1.0;
+        st.brush.opacity *= 0.5;
+        let mut half_opacity = pre.clone();
+        apply_stroke(&mut half_opacity, &st, None, false);
+        assert_eq!(half_alpha.pixel(16, 16), half_opacity.pixel(16, 16));
     }
 
     #[test]

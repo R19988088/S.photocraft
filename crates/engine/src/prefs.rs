@@ -923,6 +923,22 @@ pub struct ToolbarCustomization {
     pub order: Vec<String>,
 }
 
+/// Painting colour controls (percentages use 0..100).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Painting {
+    pub pigment_mix_strength: f32,
+    pub saturation_memory: f32,
+    pub hue_slider_loop_enabled: bool,
+    pub translucent_selection: bool,
+}
+
+impl Default for Painting {
+    fn default() -> Self {
+        Self { pigment_mix_strength: 0.0, saturation_memory: 100.0, hue_slider_loop_enabled: true, translucent_selection: false }
+    }
+}
+
 /// All preferences. JSON keys are the `edit.preferences.<section>` ids.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -931,6 +947,7 @@ pub struct Preferences {
     pub interface: Interface,
     pub workspace: Workspace,
     pub tools: Tools,
+    pub painting: Painting,
     pub history_log: HistoryLog,
     pub file_handling: FileHandling,
     pub export: Export,
@@ -997,11 +1014,12 @@ pub struct Preferences {
 }
 
 /// Preferences dialog sections in Photoshop's order: (id, title).
-pub const SECTIONS: [(&str, &str); 18] = [
+pub const SECTIONS: [(&str, &str); 19] = [
     ("general", "General"),
     ("interface", "Interface"),
     ("workspace", "Workspace"),
     ("tools", "Tools"),
+    ("painting", "Painting"),
     ("historyLog", "History Log"),
     ("fileHandling", "File Handling"),
     ("export", "Export"),
@@ -1107,6 +1125,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
 /// Valid range of a numeric preference.
 pub fn range(path: &str) -> Option<(f64, f64)> {
     Some(match path {
+        "painting.pigmentMixStrength" | "painting.saturationMemory" => (0.0, 100.0),
         "fileHandling.autosaveMinutes" => (1.0, 240.0),
         "fileHandling.recentFileCount" => (0.0, 100.0),
         "tools.nudgeBundlePauseMs" => (100.0, 10_000.0),
@@ -2474,6 +2493,7 @@ pub fn specs() -> Vec<CommandSpec> {
         section!("edit.preferences.interface", "Interface…"),
         section!("edit.preferences.workspace", "Workspace…"),
         section!("edit.preferences.tools", "Tools…"),
+        section!("edit.preferences.painting", "Painting…"),
         section!("edit.preferences.historyLog", "History Log…"),
         section!("edit.preferences.fileHandling", "File Handling…"),
         section!("edit.preferences.export", "Export…"),

@@ -93,6 +93,7 @@ pub fn open(app: &mut PhotocraftApp) -> u64 {
     f.insert("__colorRange".into(), json!(true));
     f.insert("__label".into(), json!(label));
     f.insert("select".into(), json!("sampledColors"));
+    f.insert("softSelection".into(), json!(app.session.prefs().painting.translucent_selection));
     f.insert("fuzziness".into(), json!(40.0));
     f.insert("localized".into(), json!(false));
     f.insert("range".into(), json!(100.0));
@@ -123,6 +124,9 @@ pub fn params(f: &Map<String, Value>) -> Value {
     let mut p = Map::new();
     p.insert("select".into(), json!(select));
     p.insert("invert".into(), json!(flag(f, "invert")));
+    if let Some(soft) = f.get("softSelection") {
+        p.insert("softSelection".into(), soft.clone());
+    }
     if c.sampling {
         p.insert("fuzziness".into(), json!(num(f, "fuzziness", 40.0)));
         let (add, sub) = (points(f, "points"), points(f, "subtractPoints"));
@@ -243,6 +247,7 @@ fn proxy_mask(app: &PhotocraftApp, proxy: &Document, k: u32, params: &Value) -> 
             .coverage(&px, area.width() as usize, k as f32, [0.0, 0.0])
             .into_iter()
             .map(|v| {
+                let v = if params.get("softSelection").and_then(Value::as_bool) == Some(false) { if v > 0.0 { 1.0 } else { 0.0 } } else { v };
                 let v = if invert { 1.0 - v } else { v };
                 // Match the command's GRAY8 mask rounding, before display interpolation.
                 (v.clamp(0.0, 1.0) * 255.0 + 0.5).floor() / 255.0
@@ -1031,7 +1036,9 @@ mod tests {
 
     #[test]
     fn eyedroppers_pick_on_the_preview() {
-        let mut h = harness(app_with_doc());
+        let mut app = app_with_doc();
+        app.run("prefs.set", json!({"path":"painting.translucentSelection", "value":true})).unwrap();
+        let mut h = harness(app);
         open(h.state_mut());
         h.run_steps(4);
         // 40 × 30 at 200 pt: 5 pt per pixel; the image is centred vertically (150 pt tall).
@@ -1231,7 +1238,7 @@ mod tests {
         let mut app = app_with_doc();
         let id = open(&mut app);
         let mut f = app.ui.dialog_mut(id).unwrap().fields.clone();
-        assert_eq!(params(&f), json!({"select": "sampledColors", "invert": false, "fuzziness": 40.0}));
+        assert_eq!(params(&f), json!({"select": "sampledColors", "invert": false, "softSelection": false, "fuzziness": 40.0}));
         // Localized needs a picked point.
         f.insert("localized".into(), json!(true));
         assert!(params(&f).get("localized").is_none());
@@ -1240,15 +1247,15 @@ mod tests {
         pick(&app, &mut f, [1.0, 1.0], egui::Modifiers::ALT);
         assert_eq!(
             params(&f),
-            json!({"select": "sampledColors", "invert": false, "fuzziness": 40.0, "points": [[3.0, 4.0], [39.0, 0.0]], "subtractPoints": [[1.0, 1.0]], "order": ["+", "+", "-"], "localized": true, "range": 100.0})
+            json!({"select": "sampledColors", "invert": false, "softSelection": false, "fuzziness": 40.0, "points": [[3.0, 4.0], [39.0, 0.0]], "subtractPoints": [[1.0, 1.0]], "order": ["+", "+", "-"], "localized": true, "range": 100.0})
         );
         f.insert("select".into(), json!("midtones"));
         f.insert("midtonesLow".into(), json!(160.0));
-        assert_eq!(params(&f), json!({"select": "midtones", "invert": false, "fuzziness": 20.0, "tonalRange": [150.0, 160.0]}));
+        assert_eq!(params(&f), json!({"select": "midtones", "invert": false, "softSelection": false, "fuzziness": 20.0, "tonalRange": [150.0, 160.0]}));
         f.insert("select".into(), json!("highlights"));
         assert_eq!(params(&f)["tonalRange"], json!(190.0));
         f.insert("select".into(), json!("cyans"));
-        assert_eq!(params(&f), json!({"select": "cyans", "invert": false}));
+        assert_eq!(params(&f), json!({"select": "cyans", "invert": false, "softSelection": false}));
         // Every Select entry is accepted by the engine.
         for (v, _) in SELECTS {
             f.insert("select".into(), json!(v));

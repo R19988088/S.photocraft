@@ -721,7 +721,9 @@ fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: &str) {
     if group.scrolls_itself(tab) {
         crate::panels::dock_body(app, ui, *group, tab);
     } else {
-        crate::panels::offer_color_field_fill(ui, pro, *group, tab);
+        if id == "color" {
+            ui.spacing_mut().scroll.floating_allocated_width = 0.0;
+        }
         egui::ScrollArea::vertical()
             .id_salt(("shared-panel-body", id))
             .auto_shrink([false, false])
@@ -1021,6 +1023,10 @@ struct PanelContent<'a> {
 
 fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, panel: &str) {
     match panel {
+        "color" => {
+            crate::color_panel::menu(app, ui);
+            ui.separator();
+        }
         "layers" => {
             crate::layer_row_ui::panel_menu(app, ui);
             ui.separator();

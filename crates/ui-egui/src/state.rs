@@ -1048,8 +1048,19 @@ pub struct DockTabs {
     pub brushes: usize,
 }
 
+/// Picker layout shared by docked and floating Color panels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PaletteMode {
+    #[default]
+    HueCube,
+    Hsb,
+    ColorWheel,
+    Lab,
+}
+
 /// Color panel state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorPanelState {
     /// The panel edits the background colour (its chip was clicked), not the foreground.
@@ -1057,6 +1068,26 @@ pub struct ColorPanelState {
     /// Color Picker › Only Web Colors, kept across opens like Photoshop (#4995).
     #[serde(default)]
     pub web_only: bool,
+    pub mode: PaletteMode,
+    #[serde(default = "color_readout_default")]
+    pub show_values: bool,
+    pub recent: [[f32; 4]; 6],
+}
+
+fn color_readout_default() -> bool {
+    true
+}
+
+impl Default for ColorPanelState {
+    fn default() -> Self {
+        Self {
+            background: false,
+            web_only: false,
+            mode: PaletteMode::HueCube,
+            show_values: true,
+            recent: [[0., 0., 0., 1.], [0.86, 0.12, 0.12, 1.], [0.04, 0.32, 0.92, 1.], [0.05, 0.52, 0.24, 1.], [0.; 4], [0.; 4]],
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

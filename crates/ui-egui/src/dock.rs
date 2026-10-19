@@ -62,7 +62,7 @@ impl Group {
     /// column has room (see [`DockLayout::heights_for`]).
     pub fn default_height(self) -> f32 {
         match self {
-            Group::Color => 190.0,
+            Group::Color => 316.0,
             Group::Properties => 250.0,
             Group::Character => 270.0,
             Group::Navigator => 210.0,
@@ -76,7 +76,7 @@ impl Group {
     /// [`Group::preferred_fill`] in a short column (#147). Content taller than this scrolls.
     pub fn compact_height(self) -> f32 {
         match self {
-            Group::Color => 130.0,
+            Group::Color => 260.0,
             Group::Properties => 160.0,
             Group::Character => 160.0,
             Group::Navigator => 140.0,
@@ -521,10 +521,12 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
                 ui.set_min_height(inner);
                 body(app, ui, g, tab);
             } else {
-                crate::panels::offer_color_field_fill(ui, t.pro, g, tab);
                 // No scroll fade: it darkens real colours, swatches and previews at the edge
                 // (#2726); the scroll bar already shows there is more.
                 ui.spacing_mut().scroll.fade.strength = 0.0;
+                if g == Group::Color && tab == if t.pro { 0 } else { 1 } {
+                    ui.spacing_mut().scroll.floating_allocated_width = 0.0;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt(("dock-scroll", g.key(), tab))
                     .max_height(inner)
@@ -601,6 +603,10 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
         egui::Popup::menu(&resp.menu).show(|ui| {
             crate::widgets::style_spectrum_popup_menu(ui);
             ui.set_min_width(170.0);
+            if tabs.get(sel) == Some(&"Color") {
+                crate::color_panel::menu(app, ui);
+                ui.separator();
+            }
             if tabs.get(sel) == Some(&"Layers") {
                 crate::layer_row_ui::panel_menu(app, ui);
                 ui.separator();

@@ -1258,6 +1258,7 @@ impl StrokeRenderer {
                         let rgba = self.material_color(to_rgba(&fmt, &src[..n]), to_rgba(&fmt, px), x, y);
                         from_rgba_into(&fmt, rgba, &mut pixel_src);
                     }
+                    let pigment_base = (b.pigment_mix_strength > 0.0 && fmt.mode == ColorMode::Rgb).then(|| to_rgba(&fmt, px));
                     if matches!(b.mode, BlendMode::Normal | BlendMode::Dissolve) {
                         over_native(&fmt, px, &pixel_src[..n], k, lock_transparency);
                     } else {
@@ -1270,6 +1271,17 @@ impl StrokeRenderer {
                         let mut enc = [0.0f32; 8];
                         from_rgba_into(&fmt, o, &mut enc);
                         px.copy_from_slice(&enc[..n]);
+                    }
+                    if let Some(base) = pigment_base {
+                        let normal = to_rgba(&fmt, px);
+                        let source = to_rgba(&fmt, &pixel_src[..n]);
+                        let coverage = k * source[3];
+                        let combined_alpha = coverage + base[3] * (1.0 - coverage);
+                        let amount = coverage / combined_alpha.max(0.000001);
+                        let mixed = crate::pigment::paint(normal, base, source, amount, b.pigment_mix_strength);
+                        let mut encoded = [0.0; 8];
+                        from_rgba_into(&fmt, mixed, &mut encoded);
+                        px.copy_from_slice(&encoded[..n]);
                     }
                     if dither {
                         dither8(px, x, y);

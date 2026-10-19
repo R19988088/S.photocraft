@@ -154,6 +154,9 @@ pub fn merge_brush(base: &BrushSettings, patch: &Value, cmd: &str) -> Result<Bru
 /// Rejects brush sizes and Scatter amounts outside their documented ranges, before a brush is
 /// stored or painted with.
 pub(crate) fn validate_brush(brush: &BrushSettings, cmd: &str) -> Result<()> {
+    if !brush.pigment_mix_strength.is_finite() || !(0.0..=1.0).contains(&brush.pigment_mix_strength) {
+        return Err(bad(cmd, "pigment mix strength must be 0..1"));
+    }
     let max = photocraft_paint::MAX_BRUSH_SIZE;
     if !brush.size.is_finite() || brush.size > max {
         return Err(bad(cmd, format!("brush size must be finite and at most {max} px")));
@@ -244,6 +247,7 @@ pub fn resolve_brush(s: &Session, p: &Value, cmd: &str) -> Result<BrushSettings>
     b.color = color(p.get("color"), s.tools.foreground);
     b.color_cmyk = s.tools.picked_cmyk([b.color[0], b.color[1], b.color[2]]).map(|k| ([b.color[0], b.color[1], b.color[2]], k));
     b.background = s.tools.background;
+    b.pigment_mix_strength = s.prefs().painting.pigment_mix_strength / 100.0;
     b.erase = flag(p, "erase", false);
     b.seed = match p.get("seed").and_then(Value::as_u64) {
         Some(v) => v,
