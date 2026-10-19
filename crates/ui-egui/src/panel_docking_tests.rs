@@ -110,6 +110,38 @@ fn drag(h: &mut Harness<'static, PhotocraftApp>, from: Pos2, to: Pos2) {
 }
 
 #[test]
+fn top_grip_moves_the_complete_right_dock_without_rearranging_groups() {
+    let mut h = harness(app(), vec2(1280.0, 800.0));
+    let id = egui::Id::new("photocraft-whole-dock");
+    let from = h.ctx.read_response(id.with("grip")).expect("whole dock drag grip").rect.center();
+    let before = crate::dock::last_rects(&h.ctx);
+    drag(&mut h, from, from + vec2(-180.0, 50.0));
+    let after = crate::dock::last_rects(&h.ctx);
+    assert!(h.ctx.memory(|memory| memory.area_rect(id.with("floating"))).is_some(), "the complete column becomes floating");
+    assert!(h.state().ui.docking.is_none(), "whole-column movement keeps the native groups intact");
+    for (group, rect) in before {
+        let moved = after.iter().find(|(current, _)| *current == group).expect("all groups remain present").1;
+        assert!(moved.left() < rect.left() - 100.0, "{group:?} moves with the column");
+        if group == Group::Color {
+            assert!(moved.top() > rect.top() + 30.0, "the column follows vertical dragging");
+        }
+    }
+}
+
+#[test]
+fn rail_grip_moves_the_icon_strip_and_keeps_its_width_on_repeated_drags() {
+    let mut h = harness(app(), vec2(1280.0, 800.0));
+    let id = egui::Id::new("photocraft-panel-rail");
+    let initial = h.ctx.read_response(id.with("grip")).unwrap().rect;
+    drag(&mut h, initial.center(), initial.center() + vec2(-120.0, 40.0));
+    let first = h.ctx.read_response(id.with("grip")).unwrap().rect;
+    drag(&mut h, first.center(), first.center() + vec2(-80.0, 30.0));
+    let moved = h.ctx.read_response(id.with("grip")).unwrap().rect;
+    assert!((moved.width() - initial.width()).abs() < 1.0);
+    assert!(moved.left() < initial.left() - 180.0);
+}
+
+#[test]
 fn ordinary_panel_tab_drag_enters_shared_docking_and_can_redock_into_another_tab_group() {
     let mut h = harness(app(), vec2(1280.0, 800.0));
     let source = h.query_all_by_label("Layers").find(|node| node.rect().height() <= 45.0).unwrap().rect().center();

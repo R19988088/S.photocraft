@@ -7,6 +7,91 @@ use serde_json::{Value, json};
 
 use crate::PhotocraftApp;
 
+#[derive(Clone, Default)]
+struct DockSurface {
+    generation: u64,
+    floating: Option<egui::Rect>,
+    dragging: bool,
+}
+
+/// Keep the complete right column together when its top grip is detached.
+pub(crate) fn dock_surface<R>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    panel: egui::Panel,
+    frame: egui::Frame,
+    generation: u64,
+    locked: bool,
+    mut body: impl FnMut(&mut egui::Ui) -> R,
+) -> R {
+    let mut state = ui.ctx().data_mut(|data| data.get_temp::<DockSurface>(id)).unwrap_or_default();
+    if state.generation != generation {
+        state = DockSurface { generation, ..Default::default() };
+    }
+    let available = ui.max_rect();
+    if state.dragging {
+        if let Some(rect) = &mut state.floating {
+            *rect = rect.translate(ui.input(|input| input.pointer.delta()));
+            // The grip remains reachable even when a tall column extends below the viewport.
+            let screen = ui.ctx().content_rect();
+            let min = egui::pos2(
+                rect.min.x.clamp(screen.left(), (screen.right() - rect.width()).max(screen.left())),
+                rect.min.y.clamp(screen.top(), screen.bottom() - 20.0),
+            );
+            *rect = egui::Rect::from_min_size(min, rect.size());
+        }
+        if !ui.input(|input| input.pointer.primary_down()) {
+            state.dragging = false;
+        }
+    }
+    let floating = state.floating;
+    let tokens = crate::theme::Tokens::get(ui.ctx());
+    let mut draw = |ui: &mut egui::Ui| {
+        let bounds = frame.outer_rect(ui.max_rect());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
+        let grip = ui.interact(rect, id.with("grip"), if locked { egui::Sense::hover() } else { egui::Sense::click_and_drag() });
+        ui.painter().line_segment([rect.center() - egui::vec2(18.0, 0.0), rect.center() + egui::vec2(18.0, 0.0)], egui::Stroke::new(2.0, tokens.text_faint));
+        if !locked {
+            let grip = grip.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(tl!("Drag panels"));
+            if grip.drag_started() {
+                state.floating = Some(bounds.translate(grip.drag_delta()));
+                state.dragging = true;
+            }
+            if grip.double_clicked() {
+                state.floating = None;
+                state.dragging = false;
+            }
+        }
+        body(ui)
+    };
+    let result = if let Some(rect) = floating {
+        let height = (ui.ctx().content_rect().bottom() - rect.top()).max(20.0).min(rect.height());
+        let size = egui::vec2(rect.width(), height);
+        egui::Area::new(id.with("floating"))
+            .constrain(false)
+            .order(egui::Order::Middle)
+            .fixed_pos(rect.min)
+            .movable(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_size(size);
+                ui.set_max_size(size);
+                frame.show(ui, &mut draw).inner
+            })
+            .inner
+    } else {
+        panel.frame(frame).show(ui, &mut draw).inner
+    };
+    if let Some(rect) = state.floating
+        && !state.dragging
+        && rect.top() <= available.top() + 24.0
+        && (rect.right() - available.right()).abs() <= 24.0
+    {
+        state.floating = None;
+    }
+    ui.ctx().data_mut(|data| data.insert_temp(id, state));
+    result
+}
+
 const PANELS: &[(&str, &str, Group)] = &[
     ("color", "Color", Group::Color),
     ("swatches", "Swatches", Group::Color),
@@ -400,6 +485,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     let locked = app.session.prefs().workspace_locked;
     let collapsed = collapsed_members(app, &layout);
     let requested_width = ui.ctx().data_mut(|data| data.remove_temp::<f32>(crate::panels::dock_width_id()));
+    let generation = app.ui.docking_generation;
     let mut commands = Vec::new();
     let mut targets = Vec::new();
     let mut draw = |ui: &mut egui::Ui| {
@@ -453,7 +539,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
         if let Some(width) = requested_width {
             panel = panel.exact_size(width);
         }
-        panel.show(ui, &mut draw).inner
+        dock_surface(ui, egui::Id::new("photocraft-whole-dock"), panel, egui::Frame::NONE.fill(t.card), generation, locked, &mut draw)
     } else {
         draw(ui)
     };
