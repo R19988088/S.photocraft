@@ -79,6 +79,7 @@ fn visible_sections(hidden: &[String]) -> Vec<Vec<(usize, Vec<Tool>)>> {
 }
 
 pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    crate::panel_docking::restore_surfaces(app, ui.ctx());
     let t = Tokens::get(ui.ctx());
     let (w1, bx, m) = if t.pro { (40.0, 30.0, 5i8) } else { (50.0, 36.0, 7i8) };
     let sections = visible_sections(&app.session.prefs().toolbar.hidden);
@@ -385,11 +386,13 @@ pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if let Some(pos) = floating_pos {
         let toolbar_height = toolbar_height.min((ui.ctx().content_rect().bottom() - pos.y).max(40.0));
         egui::Area::new(floating_id).order(egui::Order::Foreground).fixed_pos(pos).movable(false).constrain(false).show(ui.ctx(), |ui| {
-            ui.set_min_size(vec2(w, toolbar_height));
+            ui.set_min_width(w);
             ui.set_max_size(vec2(w, toolbar_height));
-            egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(m, 8)).show(ui, |ui| {
-                ui.set_min_size(vec2(w - 2.0 * f32::from(m), toolbar_height - 16.0));
+            let frame = crate::panel_docking::floating_frame(ui.ctx(), egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(m, 8)));
+            frame.show(ui, |ui| {
+                ui.set_min_width(w - 2.0 * f32::from(m));
                 ui.set_max_size(vec2(w - 2.0 * f32::from(m), toolbar_height - 16.0));
+                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
                 draw(ui);
             });
         });
@@ -399,6 +402,10 @@ pub fn toolbar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             .exact_size(w)
             .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(m, 8)))
             .show(ui, draw);
+    }
+    crate::panel_docking::capture_surfaces(app, ui.ctx());
+    if !app.ui.panels.dock {
+        crate::dock::persist(app, ui.ctx());
     }
 }
 
@@ -1633,70 +1640,115 @@ fn hint(ui: &mut egui::Ui, s: &str) {
 
 // ----------------------------------------------------------------------------- status bar
 
-/// The status bar's height and the height of the controls in it (zoom field, Fit), which leaves
-/// them an even margin above and below inside the bar (#2823).
+/// The bottom overlays' height and control height, with even vertical margins.
 pub fn status_bar_heights(t: &Tokens) -> (f32, f32) {
     if t.pro { (24.0, 18.0) } else { (30.0, 22.0) }
 }
 
 pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    egui::Panel::bottom("status_bar")
-        .exact_size(status_bar_heights(&t).0)
-        .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0)))
-        .show(ui, |ui| {
-            let control_h = status_bar_heights(&t).1;
-            // Read from the right in a right-to-left UI, with the trailing group at the left.
-            crate::direction::horizontal_centered(ui, |ui| {
-                if t.pro {
-                    crate::chrome_ui::status_bar_pro(app, ui);
-                    // Background job progress with Cancel, at the far end (#210).
+    let ctx = ui.ctx().clone();
+    let rect = ui.max_rect();
+    let (height, control_h) = status_bar_heights(&t);
+    let margin = ((height - control_h) / 2.0) as i8;
+    let bottom = rect.bottom() - 6.0 - if app.ui.view.shows_scrollbars() { crate::scrollbars::THICKNESS } else { 0.0 };
+    let rtl = crate::direction::is_rtl();
+    let frame = egui::Frame::NONE.fill(t.chrome.gamma_multiply(0.78)).corner_radius(t.radius_sm).inner_margin(egui::Margin::symmetric(6, margin));
+    let width = (rect.width() - 20.0).max(1.0);
+    let has_actions = (!t.pro && app.session.active().is_some())
+        || app.session.has_jobs()
+        || app
+            .session
+            .active()
+            .is_some_and(|st| app.redraws.contains_key(&st.doc.id) || app.perf.gpu_layer_fit.is_some_and(|fit| fit.doc == st.doc.id.0 && !fit.fits()));
+    // Separate areas leave the space between the readout and controls available to the canvas.
+    let actions_width = if has_actions {
+        egui::Area::new(egui::Id::new("status_bar_actions"))
+            .layout(crate::direction::trailing())
+            .order(egui::Order::Foreground)
+            .pivot(if rtl { Align2::LEFT_BOTTOM } else { Align2::RIGHT_BOTTOM })
+            .fixed_pos(pos2(if rtl { rect.left() + 10.0 } else { rect.right() - 10.0 }, bottom))
+            .default_size(vec2(0.0, height))
+            .movable(false)
+            .enabled(ui.is_enabled())
+            .show(&ctx, |ui| {
+                ui.set_max_width(width);
+                frame.show(ui, |ui| {
                     ui.with_layout(crate::direction::trailing(), |ui| {
+                        ui.set_min_height(control_h);
+                        if !t.pro
+                            && app.session.active().is_some()
+                            && widgets::compact_button(ui, tl!("Fit"), control_h).clicked()
+                            && let Some(i) = app.session.active_index()
+                        {
+                            app.ui.views[i].fit_pending = true;
+                        }
                         crate::jobs_ui::status_progress(app, ui);
                         crate::background_redraw::status(app, ui);
                         crate::chrome_ui::gpu_memory_status(app, ui);
                     });
-                    return;
-                }
-                if let (Some(st), Some(i)) = (app.session.active(), app.session.active_index()) {
-                    let (w, h, mode, bits, layers) =
-                        (st.doc.size.width, st.doc.size.height, crate::canvas::mode_label(&st.doc), st.doc.depth.bits(), st.doc.layer_count());
-                    let mut pct = app.ui.views[i].zoom * 100.0;
-                    if widgets::compact_wrapping_value_field(ui, &mut pct, crate::zoom_levels::percent_range(&app.ui.views[i]), "%", vec2(78.0, control_h))
-                        .changed()
-                    {
-                        app.ui.views[i].zoom = crate::zoom_levels::clamp(pct / 100.0, app.ui.views[i].doc_size);
-                        app.ui.views[i].fit_pending = false;
-                    }
-                    widgets::vline(ui, 16.0);
-                    label(ui, &crate::i18n::fmt(tl!("{mode} Color · {bits} bit"), &[("mode", mode), ("bits", &bits.to_string())]));
-                    widgets::vline(ui, 16.0);
-                    label(ui, &format!("{w} × {h} px"));
-                    widgets::vline(ui, 16.0);
-                    label(ui, &crate::i18n::trn(crate::i18n::current(), layers as u64, "{n} layer", "{n} layers"));
-                } else {
-                    label(ui, tl!("No document"));
-                }
-                if !app.ui.status.is_empty() {
-                    widgets::vline(ui, 16.0);
-                    let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");
-                    ui.label(RichText::new(&app.ui.status).color(if is_err { t.warning } else { t.text_faint }));
-                }
-                ui.with_layout(crate::direction::trailing(), |ui| {
-                    if app.session.active().is_some()
-                        && !t.pro
-                        && widgets::compact_button(ui, tl!("Fit"), control_h).clicked()
-                        && let Some(i) = app.session.active_index()
-                    {
-                        app.ui.views[i].fit_pending = true;
-                    }
-                    if app.session.has_jobs() {
-                        ui.add_space(6.0);
-                        crate::jobs_ui::status_progress(app, ui);
-                    }
-                    crate::background_redraw::status(app, ui);
-                    crate::chrome_ui::gpu_memory_status(app, ui);
                 });
+            })
+            .response
+            .rect
+            .width()
+    } else {
+        0.0
+    };
+    egui::Area::new(egui::Id::new("status_bar_info"))
+        .layout(crate::direction::row())
+        .order(egui::Order::Foreground)
+        .pivot(if rtl { Align2::RIGHT_BOTTOM } else { Align2::LEFT_BOTTOM })
+        .fixed_pos(pos2(if rtl { rect.right() - 10.0 } else { rect.left() + 10.0 }, bottom))
+        .default_size(vec2(0.0, height))
+        .movable(false)
+        .enabled(ui.is_enabled())
+        .show(&ctx, |ui| {
+            ui.set_max_width((width - actions_width - 8.0).max(1.0));
+            frame.show(ui, |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt("status-info-scroll")
+                    .max_width((width - actions_width - 20.0).max(1.0))
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        ui.with_layout(crate::direction::row(), |ui| {
+                            ui.set_min_height(control_h);
+                            if t.pro {
+                                crate::chrome_ui::status_bar_pro(app, ui);
+                                return;
+                            }
+                            if let (Some(st), Some(i)) = (app.session.active(), app.session.active_index()) {
+                                let (w, h, mode, bits, layers) =
+                                    (st.doc.size.width, st.doc.size.height, crate::canvas::mode_label(&st.doc), st.doc.depth.bits(), st.doc.layer_count());
+                                let mut pct = app.ui.views[i].zoom * 100.0;
+                                if widgets::compact_wrapping_value_field(
+                                    ui,
+                                    &mut pct,
+                                    crate::zoom_levels::percent_range(&app.ui.views[i]),
+                                    "%",
+                                    vec2(78.0, control_h),
+                                )
+                                .changed()
+                                {
+                                    app.ui.views[i].zoom = crate::zoom_levels::clamp(pct / 100.0, app.ui.views[i].doc_size);
+                                    app.ui.views[i].fit_pending = false;
+                                }
+                                widgets::vline(ui, 16.0);
+                                label(ui, &crate::i18n::fmt(tl!("{mode} Color · {bits} bit"), &[("mode", mode), ("bits", &bits.to_string())]));
+                                widgets::vline(ui, 16.0);
+                                label(ui, &format!("{w} × {h} px"));
+                                widgets::vline(ui, 16.0);
+                                label(ui, &crate::i18n::trn(crate::i18n::current(), layers as u64, "{n} layer", "{n} layers"));
+                            } else {
+                                label(ui, tl!("No document"));
+                            }
+                            if !app.ui.status.is_empty() {
+                                widgets::vline(ui, 16.0);
+                                let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");
+                                ui.label(RichText::new(&app.ui.status).color(if is_err { t.warning } else { t.text_faint }));
+                            }
+                        });
+                    });
             });
         });
 }
@@ -1704,6 +1756,7 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 // ----------------------------------------------------------------------------- dock
 
 pub fn right_dock(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    crate::panel_docking::restore_surfaces(app, ui.ctx());
     // Even legacy destinations must discard gestures captured by an earlier workspace.
     let customized = crate::panel_docking::show(app, ui);
     let t = Tokens::get(ui.ctx());
@@ -1722,10 +1775,6 @@ pub fn right_dock(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             app.ui.docking_generation,
             app.session.prefs().workspace_locked,
             |ui| {
-                // The separator is on the canvas side.
-                let r = ui.max_rect();
-                let x = if crate::direction::is_rtl() { r.right() + 6.0 } else { r.left() - 6.0 };
-                ui.painter().line_segment([pos2(x, r.top() - 8.0), pos2(x, r.bottom() + 8.0)], Stroke::new(1.0, t.separator));
                 ui.spacing_mut().item_spacing.y = 4.0;
                 use crate::dock::Group;
                 let entries: [(&str, &str, Group); 6] = [
@@ -1754,6 +1803,7 @@ pub fn right_dock(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if !t.pro && !customized {
         dock_panels(app, ui, &p, &t);
     }
+    crate::panel_docking::capture_surfaces(app, ui.ctx());
     crate::dock::persist(app, ui.ctx());
 }
 
@@ -6753,6 +6803,26 @@ mod toolbar_drag_tests {
                 toolbar(app, ui)
             });
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn floating_toolbar_height_follows_the_tool_columns() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        let ctx = egui::Context::default();
+        PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::StudioLight);
+        let id = egui::Id::new("toolbar-floating");
+        app.ui.floating_panels.toolbar = Some([100.0, 20.0]);
+        for _ in 0..4 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let single = ctx.memory(|memory| memory.area_rect(id)).unwrap();
+        app.ui.panels.toolbar_double = true;
+        for _ in 0..4 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let double = ctx.memory(|memory| memory.area_rect(id)).unwrap();
+        assert!(double.height() < single.height() - 100.0, "two columns fit their shorter content: {single:?} -> {double:?}");
+        assert!(double.height() < 750.0);
     }
 
     #[test]

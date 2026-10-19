@@ -14,6 +14,57 @@ struct DockSurface {
     dragging: bool,
 }
 
+/// Floating shell placement shares the same lifetime as the saved workspace.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FloatingPanels {
+    pub toolbar: Option<[f32; 2]>,
+    pub rail: Option<[[f32; 2]; 2]>,
+    pub dock: Option<[[f32; 2]; 2]>,
+}
+
+pub(crate) fn restore_surfaces(app: &PhotocraftApp, ctx: &egui::Context) {
+    let generation = app.ui.docking_generation;
+    let marker = egui::Id::new("floating-panel-generation");
+    ctx.data_mut(|data| {
+        if data.get_temp::<u64>(marker) == Some(generation) {
+            return;
+        }
+        let toolbar = egui::Id::new("toolbar-floating");
+        data.remove::<egui::Pos2>(toolbar);
+        data.remove::<egui::Pos2>(toolbar.with("drag-origin"));
+        if let Some(pos) = app.ui.floating_panels.toolbar.map(egui::Pos2::from).filter(|pos| pos.is_finite()) {
+            data.insert_temp(toolbar, pos);
+        }
+        for (name, rect) in [("photocraft-panel-rail", app.ui.floating_panels.rail), ("photocraft-whole-dock", app.ui.floating_panels.dock)] {
+            let floating = rect.map(|[min, max]| egui::Rect::from_min_max(min.into(), max.into())).filter(|rect| rect.is_finite() && rect.is_positive());
+            data.insert_temp(egui::Id::new(name), DockSurface { generation, floating, dragging: false });
+        }
+        data.insert_temp(marker, generation);
+    });
+}
+
+pub(crate) fn capture_surfaces(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    ctx.data(|data| {
+        app.ui.floating_panels = FloatingPanels {
+            toolbar: data.get_temp::<egui::Pos2>(egui::Id::new("toolbar-floating")).map(|pos| [pos.x, pos.y]),
+            rail: data
+                .get_temp::<DockSurface>(egui::Id::new("photocraft-panel-rail"))
+                .and_then(|state| state.floating)
+                .map(|rect| [[rect.min.x, rect.min.y], [rect.max.x, rect.max.y]]),
+            dock: data
+                .get_temp::<DockSurface>(egui::Id::new("photocraft-whole-dock"))
+                .and_then(|state| state.floating)
+                .map(|rect| [[rect.min.x, rect.min.y], [rect.max.x, rect.max.y]]),
+        };
+    });
+}
+
+pub(crate) fn floating_frame(ctx: &egui::Context, frame: egui::Frame) -> egui::Frame {
+    let tokens = crate::theme::Tokens::get(ctx);
+    frame.corner_radius(egui::CornerRadius::same(tokens.radius_lg as u8)).shadow(egui::Shadow { offset: [0, 10], blur: 30, spread: 0, color: tokens.shadow })
+}
+
 /// Keep the complete right column together when its top grip is detached.
 pub(crate) fn dock_surface<R>(
     ui: &mut egui::Ui,
@@ -45,6 +96,8 @@ pub(crate) fn dock_surface<R>(
         }
     }
     let floating = state.floating;
+    let whole_dock = id == egui::Id::new("photocraft-whole-dock");
+    let mut resized_height = None;
     let tokens = crate::theme::Tokens::get(ui.ctx());
     let mut draw = |ui: &mut egui::Ui| {
         let bounds = frame.outer_rect(ui.max_rect());
@@ -67,20 +120,55 @@ pub(crate) fn dock_surface<R>(
     let result = if let Some(rect) = floating {
         let height = (ui.ctx().content_rect().bottom() - rect.top()).max(20.0).min(rect.height());
         let size = egui::vec2(rect.width(), height);
+        let frame = floating_frame(ui.ctx(), frame);
         egui::Area::new(id.with("floating"))
             .constrain(false)
             .order(egui::Order::Middle)
             .fixed_pos(rect.min)
             .movable(false)
             .show(ui.ctx(), |ui| {
-                ui.set_min_size(size);
+                ui.set_min_size(egui::vec2(size.x, if whole_dock { size.y } else { 0.0 }));
                 ui.set_max_size(size);
-                frame.show(ui, &mut draw).inner
+                frame
+                    .show(ui, |ui| {
+                        if !whole_dock {
+                            return draw(ui);
+                        }
+                        let bounds = ui.available_rect_before_wrap();
+                        let mut content = bounds;
+                        content.max.y = (content.bottom() - 8.0).max(content.top());
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content));
+                        child.set_clip_rect(content.intersect(ui.clip_rect()));
+                        let result = draw(&mut child);
+                        let grip_rect = egui::Rect::from_min_max(egui::pos2(bounds.left(), content.bottom()), bounds.right_bottom());
+                        let grip = ui.interact(grip_rect, id.with("resize-bottom"), if locked { egui::Sense::hover() } else { egui::Sense::drag() });
+                        ui.painter().line_segment(
+                            [grip_rect.center() - egui::vec2(18.0, 0.0), grip_rect.center() + egui::vec2(18.0, 0.0)],
+                            egui::Stroke::new(2.0, tokens.text_faint),
+                        );
+                        if !locked {
+                            let grip = grip.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                            if grip.dragged() {
+                                resized_height = Some(
+                                    (height + grip.drag_delta().y)
+                                        .clamp(240.0_f32.min(height), (ui.ctx().content_rect().bottom() - rect.top()).max(240.0_f32.min(height))),
+                                );
+                            }
+                        }
+                        ui.allocate_rect(bounds, egui::Sense::hover());
+                        result
+                    })
+                    .inner
             })
             .inner
     } else {
         panel.frame(frame).show(ui, &mut draw).inner
     };
+    if let Some(height) = resized_height
+        && let Some(rect) = &mut state.floating
+    {
+        rect.max.y = rect.top() + height;
+    }
     if let Some(rect) = state.floating
         && !state.dragging
         && rect.top() <= available.top() + 24.0

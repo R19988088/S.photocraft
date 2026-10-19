@@ -139,6 +139,27 @@ fn rail_grip_moves_the_icon_strip_and_keeps_its_width_on_repeated_drags() {
     let moved = h.ctx.read_response(id.with("grip")).unwrap().rect;
     assert!((moved.width() - initial.width()).abs() < 1.0);
     assert!(moved.left() < initial.left() - 180.0);
+    let area = h.ctx.memory(|memory| memory.area_rect(id.with("floating"))).unwrap();
+    assert!(area.height() < 300.0, "the icon strip fits its six buttons: {area:?}");
+}
+
+#[test]
+fn floating_dock_bottom_grip_resizes_the_whole_column() {
+    let mut h = harness(app(), vec2(1280.0, 800.0));
+    let id = egui::Id::new("photocraft-whole-dock");
+    let top = h.ctx.read_response(id.with("grip")).unwrap().rect.center();
+    drag(&mut h, top, top + vec2(-180.0, 40.0));
+    let before = h.ctx.memory(|memory| memory.area_rect(id.with("floating"))).unwrap();
+    let bottom = h.ctx.read_response(id.with("resize-bottom")).unwrap().rect.center();
+    drag(&mut h, bottom, bottom - vec2(0.0, 180.0));
+    let after = h.ctx.memory(|memory| memory.area_rect(id.with("floating"))).unwrap();
+    assert!((after.height() - (before.height() - 180.0)).abs() < 2.0, "{before:?} -> {after:?}");
+    assert!((after.top() - before.top()).abs() < 1.0);
+    let bottom = h.ctx.read_response(id.with("resize-bottom")).unwrap().rect.center();
+    drag(&mut h, bottom, bottom + vec2(0.0, 90.0));
+    let grown = h.ctx.memory(|memory| memory.area_rect(id.with("floating"))).unwrap();
+    assert!((grown.height() - (after.height() + 90.0)).abs() < 2.0);
+    assert!(h.state().ui.docking.is_none());
 }
 
 #[test]
@@ -799,4 +820,97 @@ fn native_tab_reorder_stays_native_until_drag_crosses_the_strip() {
     let layers = tabs.iter().position(|(_, label)| *label == "Layers").unwrap();
     let channels = tabs.iter().position(|(_, label)| *label == "Channels").unwrap();
     assert!(channels < layers, "upstream native reorder remains effective");
+}
+
+#[test]
+#[ignore = "renders floating panel visual evidence"]
+fn floating_panel_layout_visual() {
+    let mut ready = false;
+    let mut app = app();
+    app.ui.panels.toolbar_double = true;
+    app.run("file.new", json!({"width":32,"height":32,"background":"white"})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1280.0, 900.0)).with_step_dt(1.0 / 60.0).wgpu().build_ui_state(
+        move |ui, app: &mut PhotocraftApp| {
+            if !ready {
+                PhotocraftApp::setup_context(ui.ctx(), crate::theme::ThemeKind::StudioLight);
+                app.ui.floating_panels.toolbar = Some([80.0, 60.0]);
+                ready = true;
+                return;
+            }
+            crate::panels::toolbar(app, ui);
+            crate::panels::right_dock(app, ui);
+            let tokens = crate::theme::Tokens::get(ui.ctx());
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(tokens.canvas)).show(ui, |_| {});
+        },
+        app,
+    );
+    h.run_steps(4);
+    let id = egui::Id::new("photocraft-panel-rail");
+    let from = h.ctx.read_response(id.with("grip")).unwrap().rect.center();
+    drag(&mut h, from, egui::pos2(270.0, 100.0));
+    let id = egui::Id::new("photocraft-whole-dock");
+    let from = h.ctx.read_response(id.with("grip")).unwrap().rect.center();
+    drag(&mut h, from, egui::pos2(620.0, 80.0));
+    let bottom = h.ctx.read_response(id.with("resize-bottom")).unwrap().rect.center();
+    drag(&mut h, bottom, bottom - vec2(0.0, 180.0));
+    h.render().unwrap().save(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/floating-panels.png")).unwrap();
+}
+
+#[test]
+fn floating_panels_survive_restart_and_workspace_reset() {
+    fn shell(app: PhotocraftApp) -> Harness<'static, PhotocraftApp> {
+        let mut ready = false;
+        let mut h = Harness::builder().with_size(vec2(1280.0, 900.0)).build_ui_state(
+            move |ui, app: &mut PhotocraftApp| {
+                if !ready {
+                    PhotocraftApp::setup_context(ui.ctx(), crate::theme::ThemeKind::ProMedium);
+                    ready = true;
+                    return;
+                }
+                crate::panels::toolbar(app, ui);
+                crate::panels::right_dock(app, ui);
+                egui::CentralPanel::default().show(ui, |_| {});
+            },
+            app,
+        );
+        h.run_steps(4);
+        h
+    }
+    let mut h = shell(app());
+    for (name, target) in
+        [("toolbar-floating", egui::pos2(150.0, 80.0)), ("photocraft-panel-rail", egui::pos2(350.0, 100.0)), ("photocraft-whole-dock", egui::pos2(700.0, 80.0))]
+    {
+        let grip = h.ctx.read_response(egui::Id::new(name).with("grip")).unwrap().rect.center();
+        drag(&mut h, grip, target);
+    }
+    let dock = egui::Id::new("photocraft-whole-dock");
+    let bottom = h.ctx.read_response(dock.with("resize-bottom")).unwrap().rect.center();
+    drag(&mut h, bottom, bottom - vec2(0.0, 150.0));
+    let saved = h.state().ui.floating_panels.clone();
+    assert!(saved.toolbar.is_some() && saved.rail.is_some() && saved.dock.is_some());
+    let prefs = h.state().session.prefs_to_json();
+    let mut session = photocraft_engine::Session::new();
+    session.load_prefs_json(&prefs).unwrap();
+    let mut restored = PhotocraftApp::new(session, crate::Services::default());
+    crate::dock::restore(&mut restored);
+    assert_eq!(restored.ui.floating_panels, saved);
+    let mut restored = shell(restored);
+    assert_eq!(restored.state().ui.floating_panels, saved);
+    for id in [egui::Id::new("toolbar-floating"), egui::Id::new("photocraft-panel-rail").with("floating"), dock.with("floating")] {
+        assert_eq!(h.ctx.memory(|m| m.area_rect(id)), restored.ctx.memory(|m| m.area_rect(id)));
+    }
+    let ctx = restored.ctx.clone();
+    crate::menus::invoke(restored.state_mut(), &ctx, "window.workspace.newWorkspace", json!({"name":"Floating"})).unwrap();
+    let workspace = restored.state().session.prefs().workspaces["Floating"].clone();
+    restored.state_mut().ui.workspace = "Essentials".into();
+    crate::menus::apply_workspace(restored.state_mut());
+    restored.run_steps(4);
+    assert_eq!(restored.state().ui.floating_panels, FloatingPanels::default());
+    crate::dock::apply(restored.state_mut(), &workspace);
+    restored.run_steps(4);
+    assert_eq!(restored.state().ui.floating_panels, saved);
+    // Older workspaces omit floating placement and must restore a docked shell.
+    crate::dock::apply(restored.state_mut(), &json!({}));
+    restored.run_steps(4);
+    assert_eq!(restored.state().ui.floating_panels, FloatingPanels::default());
 }

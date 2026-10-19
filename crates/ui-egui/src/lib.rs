@@ -2054,9 +2054,6 @@ impl eframe::App for PhotocraftApp {
         if chrome && self.ui.panels.options_bar {
             panels::options_bar(self, ui);
         }
-        if chrome && self.ui.panels.status_bar {
-            panels::status_bar(self, ui);
-        }
         if chrome && self.ui.panels.toolbar {
             panels::toolbar(self, ui);
         }
@@ -2066,6 +2063,9 @@ impl eframe::App for PhotocraftApp {
         let t = theme::Tokens::get(&ctx);
         let backdrop = if chrome { prefs_ui::pasteboard_color(self).unwrap_or(t.canvas) } else { egui::Color32::BLACK };
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(backdrop)).show(ui, |ui| {
+            if chrome && self.ui.panels.status_bar {
+                panels::status_bar(self, ui);
+            }
             canvas::document_area(self, ui);
         });
         panels::properties_window(self, &ctx);

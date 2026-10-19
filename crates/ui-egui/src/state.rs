@@ -1224,6 +1224,8 @@ pub struct UiState {
     /// Right-dock group order, heights and collapsed groups (see `dock`).
     #[serde(default)]
     pub dock: crate::dock::DockLayout,
+    #[serde(default)]
+    pub floating_panels: crate::panel_docking::FloatingPanels,
     /// Authoritative custom panel membership and placement; legacy fields are compatibility projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docking: Option<craft_ui::docking::Layout<String>>,
@@ -1366,6 +1368,7 @@ impl Default for UiState {
             palette_open: false,
             dock_tabs: DockTabs::default(),
             dock: Default::default(),
+            floating_panels: Default::default(),
             docking: None,
             docking_hidden: Default::default(),
             docking_generation: 0,

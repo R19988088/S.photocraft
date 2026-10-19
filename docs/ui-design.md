@@ -131,6 +131,11 @@ session. Restoring a saved workspace or remembered panel layout preserves both f
 when the serialized layout contains their values. Panel visibility, dock layout, tabs and Timeline
 visibility follow the saved layout.
 
+Document information and view controls float at the bottom of the canvas in separate translucent
+surfaces. They reserve no layout height; panning and zooming can place image content behind them.
+The gap between the information and controls remains available for canvas interaction, and the
+horizontal scrollbar stays accessible below them.
+
 The Pro status bar's Document Dimensions readout follows Preferences › Units & Rulers › Rulers,
 including changes made from a ruler's context menu. It uses the document resolution for physical
 units, each side's own extent for percentages and the selected point-size convention for points

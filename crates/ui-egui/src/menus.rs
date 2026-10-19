@@ -1557,6 +1557,7 @@ pub fn apply_workspace(app: &mut PhotocraftApp) {
     }
     // Presets use the default group order, heights and tabs (Reset brings everything back).
     app.ui.dock = Default::default();
+    app.ui.floating_panels = Default::default();
     app.ui.docking_reveal = None;
     app.ui.docking_generation = app.ui.docking_generation.wrapping_add(1);
     app.ui.docking = None;

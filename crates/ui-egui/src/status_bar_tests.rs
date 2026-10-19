@@ -1,5 +1,4 @@
-//! The status bar's zoom field and Fit button sit inside the bar with an even margin above and
-//! below, in every theme (#2823).
+//! Bottom information and view controls overlay the canvas without reserving layout space.
 
 use egui::{Rect, pos2, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
@@ -10,22 +9,27 @@ use crate::theme::{ThemeKind, Tokens};
 
 const SIZE: egui::Vec2 = vec2(900.0, 200.0);
 
-fn bottom_id() -> egui::Id {
-    egui::Id::new("status-bar-test-bottom")
+fn layout_id() -> egui::Id {
+    egui::Id::new("status-bar-test-layout")
 }
 
 fn harness(kind: ThemeKind) -> Harness<'static, PhotocraftApp> {
+    harness_with_size(kind, SIZE)
+}
+
+fn harness_with_size(kind: ThemeKind, size: egui::Vec2) -> Harness<'static, PhotocraftApp> {
     let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"width": 1080, "height": 1080, "resolution": 72, "background": "white"})).unwrap();
     app.sync_views();
-    let mut h = Harness::builder().with_size(SIZE).build_ui_state(
+    let mut h = Harness::builder().with_size(size).build_ui_state(
         |ui, app: &mut PhotocraftApp| {
             // The first frame runs before `setup_context` installs the theme's fonts.
             if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
-                // Where the bar goes: the bottom of the harness's (margined) root Ui.
-                let bottom = ui.max_rect().bottom();
-                ui.ctx().data_mut(|d| d.insert_temp(bottom_id(), bottom));
+                let bounds = ui.max_rect();
+                let before = ui.available_rect_before_wrap();
                 crate::panels::status_bar(app, ui);
+                let after = ui.available_rect_before_wrap();
+                ui.ctx().data_mut(|d| d.insert_temp(layout_id(), (bounds, before, after)));
             }
         },
         app,
@@ -36,15 +40,19 @@ fn harness(kind: ThemeKind) -> Harness<'static, PhotocraftApp> {
 }
 
 #[test]
-fn status_bar_controls_sit_inside_the_bar_with_even_margins() {
+fn status_controls_overlay_the_bottom_without_reserving_space() {
     for kind in ThemeKind::ALL {
         let h = harness(kind);
         let t = Tokens::for_kind(kind);
         let (bar_h, control_h) = crate::panels::status_bar_heights(&t);
         let margin = (bar_h - control_h) / 2.0;
-        assert!(margin >= 3.0, "{kind:?}: margin {margin}");
-        let bottom = h.ctx.data(|d| d.get_temp::<f32>(bottom_id())).unwrap();
-        let bar = Rect::from_min_max(pos2(0.0, bottom - bar_h), pos2(SIZE.x, bottom));
+        let (bounds, before, after) = h.ctx.data(|d| d.get_temp::<(Rect, Rect, Rect)>(layout_id())).unwrap();
+        assert_eq!(before, after, "{kind:?}: overlays must not reduce the canvas area");
+        let bar = h.ctx.memory(|m| m.area_rect(egui::Id::new("status_bar_info"))).unwrap();
+        let bottom_gap = 6.0 + if h.state().ui.view.shows_scrollbars() { crate::scrollbars::THICKNESS } else { 0.0 };
+        assert!((bar.left() - bounds.left() - 10.0).abs() < 0.51, "{kind:?}: {bar:?}");
+        assert!((bar.bottom() - (bounds.bottom() - bottom_gap)).abs() < 0.51, "{kind:?}: {bar:?}");
+        assert!((bar.height() - bar_h).abs() < 0.51, "{kind:?}: {bar:?}");
         // Half a point of slack for egui's pixel rounding of the centred row.
         let inner = bar.shrink2(vec2(margin, margin - 0.5));
         // The zoom number (its box is painted around it, `control_h` tall and centred).
@@ -55,11 +63,61 @@ fn status_bar_controls_sit_inside_the_bar_with_even_margins() {
             assert!(h.query_by_label("Fit").is_none(), "{kind:?}");
             continue;
         }
+        let actions = h.ctx.memory(|m| m.area_rect(egui::Id::new("status_bar_actions"))).unwrap();
         let fit = h.get_by_label("Fit").rect();
-        assert!(inner.contains_rect(fit), "{kind:?}: bar {bar:?}, Fit {fit:?}");
-        assert!((fit.center().y - bar.center().y).abs() < 0.51, "{kind:?}: bar {bar:?}, Fit {fit:?}");
+        assert!((actions.right() - (bounds.right() - 10.0)).abs() < 0.51, "{kind:?}: {actions:?}");
+        assert!((actions.bottom() - bar.bottom()).abs() < 0.51, "{kind:?}: {actions:?}");
+        assert!(actions.shrink2(vec2(0.0, margin - 0.5)).contains_rect(fit), "{kind:?}: actions {actions:?}, Fit {fit:?}");
+        assert!((fit.center().y - actions.center().y).abs() < 0.51, "{kind:?}: actions {actions:?}, Fit {fit:?}");
         assert!((fit.height() - control_h).abs() < 0.01, "{kind:?}: Fit {fit:?}");
+        assert!(bar.right() < actions.left(), "{kind:?}: separate overlays leave the middle of the canvas exposed");
     }
+}
+
+#[test]
+fn narrow_status_overlays_keep_fit_clickable_in_both_directions() {
+    for direction in [crate::direction::Dir::Ltr, crate::direction::Dir::Rtl] {
+        let _direction = crate::direction::direction_scope(direction);
+        let mut h = harness_with_size(ThemeKind::Studio, vec2(350.0, 200.0));
+        let info = h.ctx.memory(|m| m.area_rect(egui::Id::new("status_bar_info"))).unwrap();
+        let actions = h.ctx.memory(|m| m.area_rect(egui::Id::new("status_bar_actions"))).unwrap();
+        assert!(!info.intersects(actions), "{direction:?}: info {info:?}, actions {actions:?}");
+        let gap = if direction == crate::direction::Dir::Rtl { info.left() - actions.right() } else { actions.left() - info.right() };
+        assert!(gap >= 7.5, "{direction:?}: the canvas remains exposed between overlays: {gap}");
+        h.state_mut().ui.views[0].fit_pending = false;
+        h.run_steps(2);
+        h.get_by_label("Fit").click();
+        h.run_steps(2);
+        assert!(h.state().ui.views[0].fit_pending, "{direction:?}: the information overlay must not intercept Fit");
+    }
+}
+
+#[test]
+fn status_overlay_preserves_canvas_bounds_and_fit_does_not_paint() {
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_max_steps(64).build_eframe(|cc| {
+        PhotocraftApp::setup_context(&cc.egui_ctx, ThemeKind::Studio);
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("prefs.set", json!({"path": "interface.theme", "value": ThemeKind::Studio.id()})).unwrap();
+        app.ui.theme = ThemeKind::Studio;
+        app.run("file.new", json!({"width": 1080, "height": 1080, "background": "white"})).unwrap();
+        app.ui.tool = crate::state::Tool::Brush;
+        app
+    });
+    h.run_steps(8);
+    let canvas = h.state().last_canvas_rect;
+    h.state_mut().ui.panels.status_bar = false;
+    h.run_steps(3);
+    assert_eq!(h.state().last_canvas_rect, canvas, "hiding overlays must not resize the canvas");
+    h.state_mut().ui.panels.status_bar = true;
+    h.state_mut().ui.views[0].zoom = 8.0;
+    h.run_steps(3);
+    assert_eq!(h.state().last_canvas_rect, canvas);
+    let revision = h.state().session.active().unwrap().revision;
+    h.get_by_label("Fit").click();
+    h.run_steps(3);
+    assert!(h.state().ui.views[0].zoom < 8.0, "Fit still fits the document into the full canvas");
+    assert!(!h.state().ui.views[0].fit_pending);
+    assert_eq!(h.state().session.active().unwrap().revision, revision, "clicking the overlay must not paint through it");
 }
 
 fn cursor_warp(h: &Harness<'_, PhotocraftApp>) -> Option<egui::Pos2> {
