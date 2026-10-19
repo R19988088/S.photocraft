@@ -1793,3 +1793,20 @@ fn material_normal_wet_preserves_native_cmyk_inks() {
         assert_eq!(actual.read_region(Rect::new(0, 0, 64, 64)), plain.read_region(Rect::new(0, 0, 64, 64)), "{outline:?}");
     }
 }
+
+#[test]
+fn pressure_flow_is_independent_and_does_not_double_apply_transfer_control() {
+    let pts = [StrokePoint::new(10.0, 10.0, 0.25)];
+    let mut b = BrushSettings { pressure_flow: true, flow: 0.8, ..brush() };
+    b.transfer.opacity = Dynamic::controlled(Control::PenPressure);
+    let dab = dabs_of(&b, &pts)[0];
+    assert!((dab.alpha - 0.2).abs() < 1e-6);
+    assert_eq!(dab.opacity, 1.0, "disabled transfer opacity remains disabled");
+    b.transfer.enabled = true;
+    b.transfer.flow = Dynamic::controlled(Control::PenPressure);
+    let dab = dabs_of(&b, &pts)[0];
+    assert!((dab.alpha - 0.2).abs() < 1e-6, "pressure must apply once");
+    let saved = serde_json::to_string(&b).unwrap();
+    assert!(serde_json::from_str::<BrushSettings>(&saved).unwrap().pressure_flow);
+    assert!(!serde_json::from_str::<BrushSettings>("{}").unwrap().pressure_flow);
+}

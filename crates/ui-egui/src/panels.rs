@@ -952,6 +952,12 @@ fn options_bar_height(pro: bool, narrow: bool) -> f32 {
     }
 }
 
+fn pressure_button(ui: &mut egui::Ui, enabled: &mut bool, label: &str) -> egui::Response {
+    let response = ui.toggle_value(enabled, "p").on_hover_text(label);
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), *enabled, label));
+    response
+}
+
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let narrow = app.session.prefs().workspace.narrow_options_bar();
@@ -959,7 +965,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         .exact_size(options_bar_height(t.pro, narrow))
         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0)))
         .show(ui, |ui| {
-            ui.style_mut().spacing.scroll = egui::style::ScrollStyle { bar_width: 4.0, ..egui::style::ScrollStyle::floating() };
+            ui.style_mut().spacing.scroll.bar_width = 4.0;
             egui::ScrollArea::horizontal().id_salt("tool-options").auto_shrink([false, false]).show(ui, |ui| {
             // Font ink can extend beyond its advance width at fractional positions.
             // Include its gutter in the container layout, including right-aligned actions.
@@ -1038,6 +1044,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         ui.add_enabled_ui(!block, |ui| {
                             brush_preset_chip(ui, b, &mut app.ui);
                             crate::brush_picker::settings_toggle(app, ui);
+                            pressure_button(ui, &mut b.pressure_size, tl!("Pressure for Size"));
                         });
                         widgets::vline(ui, 22.0);
                         // The Eraser has no blend mode: its Mode is Brush, Pencil or Block (#2662).
@@ -1050,13 +1057,12 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         }
                         ui.add_enabled_ui(!block, |ui| {
                             percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, 62.0);
-                            if icons::button(ui, "circle-dot", 24.0, b.pressure_opacity, tl!("Always use pressure for opacity")).clicked() {
-                                b.pressure_opacity = !b.pressure_opacity;
-                            }
+                            pressure_button(ui, &mut b.pressure_opacity, tl!("Pressure for Opacity"));
                         });
                         // A Pencil- or Block-mode Eraser is always full flow, without build-up (Photoshop).
                         ui.add_enabled_ui(!block && !crate::eraser_ui::pencil_mode(app, app.ui.tool), |ui| {
                             percent_field(ui, tl!("Flow"), &mut b.flow, 1.0..=100.0, 62.0);
+                            pressure_button(ui, &mut b.pressure_flow, tl!("Pressure for Flow"));
                             let airbrush = icons::button(ui, "sparkles", 24.0, b.build_up, tl!("Enable airbrush-style build-up effects"));
                             if crate::brush_picker::named(airbrush, "Enable airbrush-style build-up effects").clicked() {
                                 b.build_up = !b.build_up;
@@ -1065,10 +1071,6 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         opt_label(ui, tl!("Smoothing"));
                         smoothing_field(ui, b, 58.0);
                         smoothing_options(ui, b);
-                        widgets::vline(ui, 22.0);
-                        if icons::button(ui, "circle-dot", 24.0, b.pressure_size, tl!("Always use pressure for size")).clicked() {
-                            b.pressure_size = !b.pressure_size;
-                        }
                     }
                     // Pencil: Photoshop's options (no hardness or flow: the pencil is always hard).
                     Tool::Pencil => {
@@ -1098,6 +1100,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         ui.add_enabled_ui(!block, |ui| {
                             opt_label(ui, tl!("Size"));
                             widgets::value_field(ui, &mut b.size, 1.0..=photocraft_engine::paint::MAX_BRUSH_SIZE, "px", 76.0);
+                            pressure_button(ui, &mut b.pressure_size, tl!("Pressure for Size"));
                         });
                         widgets::vline(ui, 22.0);
                         if app.ui.tool == Tool::Eraser {
@@ -1110,13 +1113,16 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         // A Pencil-mode Eraser is always hard and at full flow (Photoshop).
                         let fixed = block || crate::eraser_ui::pencil_mode(app, app.ui.tool);
                         ui.add_enabled_ui(!fixed, |ui| percent_field(ui, tl!("Hardness"), &mut b.hardness, 0.0..=100.0, 66.0));
-                        ui.add_enabled_ui(!block, |ui| percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, 66.0));
-                        ui.add_enabled_ui(!fixed, |ui| percent_field(ui, tl!("Flow"), &mut b.flow, 1.0..=100.0, 66.0));
+                        ui.add_enabled_ui(!block, |ui| {
+                            percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, 66.0);
+                            pressure_button(ui, &mut b.pressure_opacity, tl!("Pressure for Opacity"));
+                        });
+                        ui.add_enabled_ui(!fixed, |ui| {
+                            percent_field(ui, tl!("Flow"), &mut b.flow, 1.0..=100.0, 66.0);
+                            pressure_button(ui, &mut b.pressure_flow, tl!("Pressure for Flow"));
+                        });
                         opt_label(ui, tl!("Smoothing"));
                         smoothing_field(ui, b, 66.0);
-                        widgets::vline(ui, 22.0);
-                        widgets::toggle(ui, &mut b.pressure_size, tl!("Pressure for Size"));
-                        widgets::toggle(ui, &mut b.pressure_opacity, tl!("Pressure for Opacity"));
                     }
                     Tool::MixerBrush => {
                         brush_preset_chip(ui, b, &mut app.ui);
@@ -6371,6 +6377,7 @@ mod compact_visual_regressions {
 
     #[test]
     fn tab_focus_reveals_the_final_narrow_tool_option() {
+        use egui_kittest::kittest::Queryable;
         for kind in theme::ThemeKind::ALL {
             for scale in [1.0, 1.5, 2.0] {
                 let mut ready = false;
@@ -6392,21 +6399,26 @@ mod compact_visual_regressions {
                 );
                 harness.run_steps(4);
                 let pro = Tokens::get(&harness.ctx).pro;
-                let last_label = if pro { "Auto Erase" } else { "Pressure for Opacity" };
+                let last_label = if pro { "Auto Erase" } else { "p" };
                 // Only the canvas Tab shortcut is cleared, using its public preference;
                 // no response is assigned focus programmatically.
                 let mut reached = false;
                 for _ in 0..80 {
                     harness.key_press(egui::Key::Tab);
                     harness.run_steps(3);
-                    let label = harness.output().shapes.iter().find_map(|shape| match &shape.shape {
-                        egui::Shape::Text(text) if text.galley.job.text.contains(last_label) => Some(text.visual_bounding_rect()),
-                        _ => None,
-                    });
+                    let label = if pro {
+                        harness.output().shapes.iter().find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text) if text.galley.job.text == last_label => Some(text.visual_bounding_rect()),
+                            _ => None,
+                        })
+                    } else {
+                        harness.query_by_label("Pressure for Flow").map(|node| node.rect())
+                    };
                     reached = label.is_some_and(|label| {
                         harness.ctx.memory(|memory| memory.focused()).and_then(|id| harness.ctx.read_response(id)).is_some_and(|response| {
                             response.rect.intersects(label)
-                                || ((label.left() - response.rect.right()).abs() <= 12.0
+                                || (pro
+                                    && (label.left() - response.rect.right()).abs() <= 12.0
                                     && response.rect.top() < label.bottom()
                                     && response.rect.bottom() > label.top())
                         })
@@ -6417,20 +6429,26 @@ mod compact_visual_regressions {
                 }
                 assert!(reached, "{kind:?} at {scale}x: Tab must reach the final tool option");
                 harness.run_steps(20);
+                let target = (!pro).then(|| harness.get_by_label("Pressure for Flow").rect());
                 let (clip, label) = harness
                     .output()
                     .shapes
                     .iter()
+                    .rev()
                     .find_map(|shape| match &shape.shape {
-                        egui::Shape::Text(text) if text.galley.job.text.contains(last_label) => Some((shape.clip_rect, text.visual_bounding_rect())),
+                        egui::Shape::Text(text)
+                            if text.galley.job.text == last_label && target.is_none_or(|rect| rect.contains_rect(text.visual_bounding_rect())) =>
+                        {
+                            Some((shape.clip_rect, text.visual_bounding_rect()))
+                        }
                         _ => None,
                     })
                     .expect("the final option remains painted");
                 assert!(clip.contains_rect(label), "{kind:?} at {scale}x: Tab leaves the focused final option outside {clip:?}: {label:?}");
-                let previous = if pro { harness.state().ui.tool_options.pencil_auto_erase } else { harness.state().session.tools.brush.pressure_opacity };
+                let previous = if pro { harness.state().ui.tool_options.pencil_auto_erase } else { harness.state().session.tools.brush.pressure_flow };
                 harness.key_press(egui::Key::Space);
                 harness.run_steps(3);
-                let current = if pro { harness.state().ui.tool_options.pencil_auto_erase } else { harness.state().session.tools.brush.pressure_opacity };
+                let current = if pro { harness.state().ui.tool_options.pencil_auto_erase } else { harness.state().session.tools.brush.pressure_flow };
                 assert_ne!(current, previous, "{kind:?} at {scale}x: Space must activate the revealed option");
                 assert!(harness.state().ui.panels.options_bar, "widget traversal must preserve the options bar");
             }
@@ -6565,7 +6583,7 @@ mod compact_visual_regressions {
                     crate::theme::install_fonts(&ctx);
                     crate::theme::apply(&ctx, kind);
                     let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
-                    let (tool, last_label) = if Tokens::get(&ctx).pro { (Tool::Pencil, "Auto Erase") } else { (Tool::Brush, "Pressure for Opacity") };
+                    let (tool, last_label) = if Tokens::get(&ctx).pro { (Tool::Pencil, "Auto Erase") } else { (Tool::Brush, "Smoothing") };
                     app.ui.tool = tool;
                     let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 120.0));
                     let mut output = ctx.run_ui(input_at_scale(screen, scale), |ui| options_bar(&mut app, ui));

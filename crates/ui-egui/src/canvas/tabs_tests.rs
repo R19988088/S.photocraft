@@ -224,3 +224,12 @@ fn crowded_tabs_keep_their_whole_names_and_the_menu_lists_every_document() {
         }
     }
 }
+
+#[test]
+fn floating_document_tabs_overlap_the_canvas_instead_of_reserving_a_strip() {
+    for theme in ThemeKind::ALL {
+        let h = harness(2, theme);
+        let tabs = strip(&h);
+        assert!(h.state().last_canvas_rect.contains_rect(tabs.rect), "{theme:?}: tabs overlay canvas");
+    }
+}

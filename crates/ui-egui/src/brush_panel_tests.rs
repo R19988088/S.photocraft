@@ -364,10 +364,10 @@ fn options_bar_edits_are_one_set_brush_per_gesture() {
     let (id, p) = j.last().unwrap();
     assert_eq!(id, "tools.setBrush");
     assert_eq!(p["brush"]["opacity"].as_f64().map(|v| v as f32), Some(opacity));
-    // A click is its own gesture: the Pressure for Size switch sits left of its label.
+    // A pressure-button click is its own gesture.
     let label = h.get_by_label("Pressure for Size").rect();
     let was = h.state().session.tools.brush.pressure_size;
-    let at = egui::pos2(label.left() - 18.0, label.center().y);
+    let at = label.center();
     h.hover_at(at);
     h.run();
     h.drag_at(at);
@@ -1540,4 +1540,32 @@ fn material_sections_open_controls_and_refresh_preview() {
         assert_eq!(kept.grain, brush.grain);
         assert_eq!(kept.wet_edge, brush.wet_edge);
     }
+}
+
+#[test]
+fn inline_pressure_buttons_commit_and_replay_independently() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = options_bar_harness(crate::state::Tool::Brush);
+    let initial = h.state().session.tools.brush.clone();
+    for label in ["Pressure for Size", "Pressure for Opacity", "Pressure for Flow"] {
+        let n = h.state().session.journal.len();
+        h.get_by_label(label).click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.journal.len(), n + 1, "{label}: one command");
+    }
+    let b = &h.state().session.tools.brush;
+    assert_eq!(b.pressure_size, !initial.pressure_size);
+    assert_eq!(b.pressure_opacity, !initial.pressure_opacity);
+    assert_eq!(b.pressure_flow, !initial.pressure_flow);
+    assert_eq!(b.transfer, initial.transfer);
+    h.get_by_label("Pressure for Flow").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.tools.brush.pressure_flow, initial.pressure_flow);
+    assert_eq!(h.state().session.tools.brush.opacity, initial.opacity);
+    assert_eq!(h.state().session.tools.brush.flow, initial.flow);
+    let mut replay = photocraft_engine::Session::new();
+    for (id, params) in &h.state().session.journal {
+        replay.execute(id, params.clone()).unwrap();
+    }
+    assert_eq!(replay.tools.brush, h.state().session.tools.brush);
 }

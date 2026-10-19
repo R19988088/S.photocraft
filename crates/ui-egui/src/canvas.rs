@@ -2144,14 +2144,18 @@ fn documents(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         return;
     }
     if !app.ui.view.hides_tabs() || opening {
-        // Flat Spectrum tabs sit directly against the canvas. The parent's default vertical
-        // item spacing would otherwise leave a visible gap below the tab strip (#2188).
-        let spacing = ui.spacing().item_spacing.y;
-        if crate::theme::Tokens::get(ui.ctx()).pro {
-            ui.spacing_mut().item_spacing.y = 0.0;
-        }
-        app.tab_strip = Some(tabs(app, ui));
-        ui.spacing_mut().item_spacing.y = spacing;
+        let rect = ui.available_rect_before_wrap();
+        let ctx = ui.ctx().clone();
+        egui::Area::new(egui::Id::new("document-tabs"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .default_size(egui::vec2(rect.width(), 0.0))
+            .movable(false)
+            .enabled(ui.is_enabled())
+            .show(&ctx, |ui| {
+                ui.set_width(rect.width());
+                app.tab_strip = Some(tabs(app, ui));
+            });
         drop_slot_line(app, ui);
     }
     if let Some(job) = app.jobs.focus.or_else(|| (n == 0).then(|| app.jobs.opens.last().map(|o| o.job)).flatten()) {
@@ -2234,7 +2238,7 @@ fn tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
         .focus
         .and_then(|job| opening.iter().position(|(open, _, _)| *open == job))
         .map_or_else(|| app.session.active_index().unwrap_or(0), |p| tab_count + p);
-    let frame = egui::Frame::NONE.fill(t.canvas).inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 4 }).show(ui, |ui| {
+    let frame = egui::Frame::NONE.inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 4 }).show(ui, |ui| {
         let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), tab_h), Sense::hover());
         let f = fit_doc_tabs(&natural, selected, row.width());
         let mut x = row.left();
@@ -2556,7 +2560,7 @@ fn studio_tab_name(app: &PhotocraftApp, st: &photocraft_engine::DocState) -> Str
     format!("{}{}{saving}", st.doc.name, if st.is_dirty() { " *" } else { "" })
 }
 
-/// Photoshop document tabs: "name @ 33.3% (RGB/8)" on a dark strip; active tab matches panels.
+/// Photoshop document tabs: "name @ 33.3% (RGB/8)"; active tab matches panels.
 /// Tabs keep their whole titles, and the ones that don't fit move into a » menu at the end of the
 /// strip; the active document's tab always stays on the strip (#1276, #4487).
 fn pro_tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
@@ -2574,7 +2578,6 @@ fn pro_tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
     let font = egui::FontId::proportional(if large_tabs { 13.0 } else { 11.5 });
     let tab_h = if large_tabs { 34.0 } else { 26.0 };
     let (strip, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), tab_h), Sense::hover());
-    ui.painter().rect_filled(strip, 0.0, t.tab_strip);
     // Files opening in the background (#210) are tabs too ("name (Opening… 45%)" with a progress
     // underline); they share the fit's index space, after the documents.
     let opening = crate::jobs_ui::open_tabs(app);
@@ -7067,7 +7070,7 @@ mod tests {
     }
 
     #[test]
-    fn spectrum_document_tabs_meet_canvas_without_a_gap() {
+    fn spectrum_document_tabs_float_over_the_canvas() {
         for kind in [crate::theme::ThemeKind::Pro, crate::theme::ThemeKind::ProMedium] {
             let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
             app.run("file.new", json!({"width": 80, "height": 60})).unwrap();
@@ -7085,8 +7088,8 @@ mod tests {
             h.run_steps(3);
             let app = &h.state().0;
             let strip = app.tab_strip.as_ref().expect("a document opens with tabs").rect;
-            let gap = app.last_canvas_rect.top() - strip.bottom();
-            assert!(gap.abs() < 0.1, "{kind:?}: document strip should touch canvas, got {gap} pt");
+            assert!((app.last_canvas_rect.top() - strip.top()).abs() < 0.1, "{kind:?}: tabs share the canvas top");
+            assert!(app.last_canvas_rect.contains_rect(strip), "{kind:?}: tabs overlay the canvas");
         }
     }
 

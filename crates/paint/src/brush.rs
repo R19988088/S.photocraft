@@ -496,6 +496,9 @@ pub struct BrushSettings {
     /// Shortcut for Transfer › Opacity › Pen Pressure.
     #[serde(alias = "pressure_opacity")]
     pub pressure_opacity: bool,
+    /// Shortcut for Transfer › Flow › Pen Pressure.
+    #[serde(alias = "pressure_flow")]
+    pub pressure_flow: bool,
     /// Straight RGBA colour (display RGB). Commands fill it from the foreground colour.
     pub color: [f32; 4],
     /// The inks `color` was picked as (its sRGB colour, the CMYK values), for a CMYK target: the
@@ -565,6 +568,7 @@ impl Default for BrushSettings {
             flow: 1.0,
             pressure_size: true,
             pressure_opacity: false,
+            pressure_flow: false,
             color: [0.0, 0.0, 0.0, 1.0],
             color_cmyk: None,
             background: [1.0, 1.0, 1.0, 1.0],
@@ -761,6 +765,7 @@ impl BrushPreset {
             b.flow = current.flow;
             b.pressure_size = current.pressure_size;
             b.pressure_opacity = current.pressure_opacity;
+            b.pressure_flow = current.pressure_flow;
         }
         b
     }

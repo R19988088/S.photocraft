@@ -1037,15 +1037,13 @@ pub fn apply(ctx: &egui::Context, kind: ThemeKind) {
         s.spacing.icon_width = 14.0;
         s.visuals.indent_has_left_vline = false;
         s.interaction.tooltip_delay = TOOLTIP_DELAY;
-        // Thin overlay scrollbars that appear on hover (Photoshop/macOS style).
-        // Thin bars stay visible, including while the pointer is on them. The stock thin
-        // style fades the handle to the same opacity as the track, so the thumb disappears (#4611).
-        let mut scroll = if t.bevel { egui::style::ScrollStyle::solid() } else { egui::style::ScrollStyle::thin() };
-        if scroll.floating {
-            scroll.interact_handle_opacity = 1.0;
-            scroll.interact_background_opacity = 0.4;
-            scroll.floating_width = 4.0;
-        }
+        // Overlay thumbs without a track in every theme and on every platform.
+        let mut scroll = egui::style::ScrollStyle::thin();
+        scroll.interact_handle_opacity = 1.0;
+        scroll.dormant_background_opacity = 0.0;
+        scroll.active_background_opacity = 0.0;
+        scroll.interact_background_opacity = 0.0;
+        scroll.floating_width = 4.0;
         s.spacing.scroll = scroll;
         s.spacing.tooltip_width = 280.0;
     });
@@ -1070,6 +1068,17 @@ pub fn canvas_bg(t: &Tokens) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollbars_have_no_track_in_any_theme() {
+        let ctx = egui::Context::default();
+        for theme in ThemeKind::ALL {
+            apply(&ctx, theme);
+            let scroll = ctx.global_style().spacing.scroll;
+            assert!(scroll.floating, "{theme:?}");
+            assert_eq!((scroll.dormant_background_opacity, scroll.active_background_opacity, scroll.interact_background_opacity), (0.0, 0.0, 0.0));
+        }
+    }
 
     fn text_sizes(ctx: &egui::Context) -> Vec<egui::Vec2> {
         let mut sizes = Vec::new();

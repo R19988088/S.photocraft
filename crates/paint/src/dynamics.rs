@@ -613,6 +613,9 @@ impl DabBuilder {
             if b.pressure_opacity && !(tr.enabled && tr.opacity.control != Control::Off) {
                 opacity *= s.point.pressure.clamp(0.0, 1.0);
             }
+            if b.pressure_flow && !(tr.enabled && tr.flow.control != Control::Off) {
+                flow *= s.point.pressure.clamp(0.0, 1.0);
+            }
             // Colour.
             let color = if b.color_dynamics.enabled {
                 if b.color_dynamics.per_tip { dynamic_color(b, s, seed, i) } else { *self.stroke_color.get_or_insert_with(|| dynamic_color(b, s, seed, 0)) }

@@ -78,7 +78,10 @@ fn tip_shape_sig(h: &mut DefaultHasher, t: &TipShape) {
 /// Cheap signature of everything that changes a brush's stroke preview.
 pub fn preview_sig(b: &BrushSettings) -> u64 {
     let mut h = DefaultHasher::new();
-    js(&mut h, &(b.size, b.hardness, b.spacing, b.opacity, b.flow, b.pressure_size, b.pressure_opacity, b.erase, b.mode, b.angle, b.roundness));
+    js(
+        &mut h,
+        &(b.size, b.hardness, b.spacing, b.opacity, b.flow, b.pressure_size, b.pressure_opacity, b.pressure_flow, b.erase, b.mode, b.angle, b.roundness),
+    );
     js(&mut h, &(b.flip_x, b.flip_y, b.aliased, b.noise, b.wet_edges, b.build_up, b.build_up_rate, b.protect_texture, b.seed));
     js(&mut h, &(&b.shape_dynamics, &b.scattering, &b.color_dynamics, &b.transfer, &b.pose, &b.smoothing));
     js(&mut h, &(&b.grain, &b.wet_edge, &b.dual_brush.grain, b.dual_brush.wet_edges, &b.dual_brush.wet_edge));

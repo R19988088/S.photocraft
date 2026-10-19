@@ -2878,3 +2878,5 @@ curves	Smooth	平滑
 	Enable Grain	启用颗粒
 	Use Grain Parameters	使用颗粒参数
 	Use Wet Edge Parameters	使用湿边参数
+
+	Pressure for Flow	用压感控制流量
