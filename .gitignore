@@ -1,0 +1,17 @@
+# Local build and generated output
+target/
+dist/
+corpus/
+log/
+plan/
+secrets/
+temp/
+book/output/
+craft-fonts/
+
+# Local tooling and OS files
+.DS_Store
+*.log
+*.swp
+*~
+__pycache__/
