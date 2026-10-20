@@ -46,7 +46,7 @@ jobs:
         run: |
           rustup target add ${{ matrix.target }}
           bash packaging/macos/package.sh --arch ${{ matrix.arch }}
-          lipo -verify_arch ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }} target/macos-package/PhotoCraft.app/Contents/MacOS/PhotoCraft
+          lipo target/macos-package/PhotoCraft.app/Contents/MacOS/PhotoCraft -verify_arch ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
           codesign --verify --strict target/macos-package/PhotoCraft.app
           ditto -c -k --keepParent target/macos-package/PhotoCraft.app dist/release/photocraft-0.23.0-macos-${{ matrix.arch }}-app.zip
       - uses: actions/upload-artifact@v4
