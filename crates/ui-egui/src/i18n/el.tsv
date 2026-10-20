@@ -3932,3 +3932,101 @@ curves	Smooth	Εξομάλυνση
 	Increase Brush Hardness	Αύξηση σκληρότητας πινέλου
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Άγκυρα: Καθυστέρηση
+	Anchor Smooth	Άγκυρα: Εξομάλυνση
+	Anchor X	Άγκυρα X
+	Anchor Y	Άγκυρα Y
+	Blur Jitter	Θόλωση: Διακύμανση
+	Blur Strength	Θόλωση: Ένταση
+	Canvas Material	Υλικό καμβά
+	Choose Pattern	Επιλογή μοτίβου
+	Color Attributes	Ιδιότητες χρώματος
+	Complementary Color	Συμπληρωματικό χρώμα
+	Concentration	Συγκέντρωση
+	Contour Strength	Περίγραμμα: Ένταση
+	Coordinates:	Συντεταγμένες:
+	Darkening	Σκούρυνση
+	Density Jitter	Πυκνότητα: Διακύμανση
+	Drag panels	Σύρετε τα πάνελ
+	Draw with the pen in the canvas to calibrate pressure response.	Σχεδιάστε με τη γραφίδα στον καμβά για να βαθμονομήσετε την απόκριση πίεσης.
+	Edge Control	Έλεγχος άκρων
+	Enable Color Attributes	Ενεργοποίηση: Ιδιότητες χρώματος
+	Enable Inertia	Ενεργοποίηση: Αδράνεια
+	Enable Mixing	Ενεργοποίηση: Ανάμειξη
+	Enable Pigment	Ενεργοποίηση: Χρωστική
+	Enable Stroke Motion	Ενεργοποίηση: Κίνηση πινελιάς
+	Expansion	Επέκταση
+	Fixed Width	Σταθερό πλάτος
+	Flow Algorithm:	Αλγόριθμος ροής:
+	Fluid	Ρευστό
+	Gaussian Mask	Μάσκα Gauss
+	Grain Density	Πυκνότητα κόκκου
+	Hardness Jitter	Σκληρότητα: Διακύμανση
+	Highlight Brightness	Φωτεινότητα αντανακλάσεων
+	Highlight Ratio	Αναλογία αντανακλάσεων
+	Image Palette Color	Χρώμα παλέτας εικόνας
+	Import a C3 preset with a packaged canvas pattern.	Εισαγάγετε μια προρύθμιση C3 με ενσωματωμένο μοτίβο καμβά.
+	Inertia	Αδράνεια
+	Invert Blur Pressure	Αντιστροφή πίεσης: Θόλωση
+	Invert Length Pressure	Αντιστροφή πίεσης: Μήκος
+	Jitter	Διακύμανση
+	Length Jitter	Μήκος: Διακύμανση
+	Liquidity	Ρευστότητα
+	Minimum Angle	Ελάχιστο: Γωνία
+	Minimum Blur	Ελάχιστο: Θόλωση
+	Minimum Count	Ελάχιστο: Καταμέτρηση
+	Minimum Distance	Ελάχιστο: Απόσταση
+	Minimum Hardness	Ελάχιστο: Σκληρότητα
+	Minimum Length	Ελάχιστο: Μήκος
+	Minimum Scatter	Ελάχιστο: Διασπορά
+	Minimum Spacing	Ελάχιστο: Διάστημα
+	Minimum Strength	Ελάχιστο: Ένταση
+	Minimum Stroke Jitter	Ελάχιστο: Πινελιά: Διακύμανση
+	Minimum Width	Ελάχιστο: Πλάτος
+	Mixing	Ανάμειξη
+	Mixing Strength	Ανάμειξη: Ένταση
+	Outline	Περίγραμμα
+	Output Strength	Ένταση εξόδου
+	Painting Settings…	Ρυθμίσεις ζωγραφικής…
+	Painting…	Ζωγραφική…
+	Pattern:	Μοτίβο:
+	Pigment	Χρωστική
+	Pressure Controls Anchor Delay	Έλεγχος με πίεση: Άγκυρα: Καθυστέρηση
+	Pressure Controls Contour	Έλεγχος με πίεση: Περίγραμμα
+	Pressure Controls Fluid	Έλεγχος με πίεση: Ρευστό
+	Pressure for Flow	Πίεση για τη ροή
+	Primary Strength	Κύρια ένταση
+	Range Jitter	Εύρος: Διακύμανση
+	Saturation Boost	Ενίσχυση κορεσμού
+	Saturation Protection	Προστασία κορεσμού
+	Saturation Record	Καταγραφή κορεσμού
+	Secondary Strength	Δευτερεύουσα ένταση
+	Show Color Values	Εμφάνιση τιμών χρώματος
+	Single Tip	Μία μύτη
+	Smudge Output	Έξοδος μουτζουρώματος
+	Soft Coverage	Απαλή κάλυψη
+	Spacing Jitter	Διάστημα: Διακύμανση
+	Strength Jitter	Ένταση: Διακύμανση
+	Stroke Jitter	Πινελιά: Διακύμανση
+	Stroke Motion	Κίνηση πινελιάς
+	Stroke Smoothing	Εξομάλυνση πινελιάς
+	Tilt Delay	Καθυστέρηση κλίσης
+	Use Grain Parameters	Χρήση: Παράμετροι κόκκου
+	Use Pressure Curve	Χρήση: Καμπύλη πίεσης
+	Use Sampled Pattern	Χρήση: Δείγμα μοτίβου
+	Use Wet Edge Parameters	Χρήση: Παράμετροι υγρών άκρων
+	Use the eyedropper on the canvas to sample a pattern.	Χρησιμοποιήστε το σταγονόμετρο στον καμβά για δειγματοληψία μοτίβου.
+	Water	Νερό
+	Watercolor 2	Ακουαρέλα 2
+	Wet Edge Mode	Λειτουργία υγρών άκρων
+	Whole Stroke	Ολόκληρη πινελιά
+	Width Mode	Λειτουργία πλάτους
+
+	Eyedropper Saturation Protection	Προστασία κορεσμού σταγονόμετρου
+	Loop Hue Slider	Κυκλικός ολισθητής απόχρωσης
+	Translucent Selection	Ημιδιαφανής επιλογή
+
+	Primary Brush	Κύριο πινέλο
+	Secondary Brush	Δευτερεύον πινέλο
+	Color Output	Έξοδος χρώματος

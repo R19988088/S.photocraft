@@ -3840,3 +3840,101 @@ navigator	Zoom	Zvětšení
 	Increase Brush Hardness	Zvýšit tvrdost štětce
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Kotva: Zpoždění
+	Anchor Smooth	Kotva: Vyhlazení
+	Anchor X	Kotva X
+	Anchor Y	Kotva Y
+	Blur Jitter	Rozostření: Kolísání
+	Blur Strength	Rozostření: Síla
+	Canvas Material	Materiál plátna
+	Choose Pattern	Vybrat vzorek
+	Color Attributes	Vlastnosti barvy
+	Complementary Color	Doplňková barva
+	Concentration	Koncentrace
+	Contour Strength	Obrys: Síla
+	Coordinates:	Souřadnice:
+	Darkening	Ztmavení
+	Density Jitter	Hustota: Kolísání
+	Drag panels	Přetahovat panely
+	Draw with the pen in the canvas to calibrate pressure response.	Kreslením perem na plátno zkalibrujte odezvu na tlak.
+	Edge Control	Řízení okrajů
+	Enable Color Attributes	Zapnout: Vlastnosti barvy
+	Enable Inertia	Zapnout: Setrvačnost
+	Enable Mixing	Zapnout: Míchání
+	Enable Pigment	Zapnout: Pigment
+	Enable Stroke Motion	Zapnout: Pohyb tahu
+	Expansion	Rozšíření
+	Fixed Width	Pevná šířka
+	Flow Algorithm:	Algoritmus toku:
+	Fluid	Tekutina
+	Gaussian Mask	Gaussovská maska
+	Grain Density	Hustota zrna
+	Hardness Jitter	Tvrdost: Kolísání
+	Highlight Brightness	Jas odlesků
+	Highlight Ratio	Podíl odlesků
+	Image Palette Color	Barva palety obrázku
+	Import a C3 preset with a packaged canvas pattern.	Importujte předvolbu C3 s přiloženým vzorkem plátna.
+	Inertia	Setrvačnost
+	Invert Blur Pressure	Obrátit tlak: Rozostření
+	Invert Length Pressure	Obrátit tlak: Délka
+	Jitter	Kolísání
+	Length Jitter	Délka: Kolísání
+	Liquidity	Tekutost
+	Minimum Angle	Minimum: Úhel
+	Minimum Blur	Minimum: Rozostření
+	Minimum Count	Minimum: Počítání
+	Minimum Distance	Minimum: Vzdálenost
+	Minimum Hardness	Minimum: Tvrdost
+	Minimum Length	Minimum: Délka
+	Minimum Scatter	Minimum: Rozptýlení
+	Minimum Spacing	Minimum: Rozestup
+	Minimum Strength	Minimum: Síla
+	Minimum Stroke Jitter	Minimum: Tah: Kolísání
+	Minimum Width	Minimum: Šířka
+	Mixing	Míchání
+	Mixing Strength	Míchání: Síla
+	Outline	Obrys
+	Output Strength	Výstupní síla
+	Painting Settings…	Nastavení malování…
+	Painting…	Malování…
+	Pattern:	Vzorek:
+	Pigment	Pigment
+	Pressure Controls Anchor Delay	Řízení tlakem: Kotva: Zpoždění
+	Pressure Controls Contour	Řízení tlakem: Obrys
+	Pressure Controls Fluid	Řízení tlakem: Tekutina
+	Pressure for Flow	Tlak pro tok
+	Primary Strength	Primární síla
+	Range Jitter	Rozsah: Kolísání
+	Saturation Boost	Zvýšení sytosti
+	Saturation Protection	Ochrana sytosti
+	Saturation Record	Záznam sytosti
+	Secondary Strength	Sekundární síla
+	Show Color Values	Zobrazit hodnoty barvy
+	Single Tip	Jediný hrot
+	Smudge Output	Výstup rozmazání
+	Soft Coverage	Měkké krytí
+	Spacing Jitter	Rozestup: Kolísání
+	Strength Jitter	Síla: Kolísání
+	Stroke Jitter	Tah: Kolísání
+	Stroke Motion	Pohyb tahu
+	Stroke Smoothing	Vyhlazení tahu
+	Tilt Delay	Zpoždění náklonu
+	Use Grain Parameters	Použít: Parametry zrna
+	Use Pressure Curve	Použít: Křivka tlaku
+	Use Sampled Pattern	Použít: Navzorkovaný vzorek
+	Use Wet Edge Parameters	Použít: Parametry mokrých okrajů
+	Use the eyedropper on the canvas to sample a pattern.	Pomocí kapátka na plátně odeberte vzorek.
+	Water	Voda
+	Watercolor 2	Akvarel 2
+	Wet Edge Mode	Režim mokrých okrajů
+	Whole Stroke	Celý tah
+	Width Mode	Režim šířky
+
+	Eyedropper Saturation Protection	Ochrana sytosti kapátka
+	Loop Hue Slider	Cyklický posuvník odstínu
+	Translucent Selection	Průsvitný výběr
+
+	Primary Brush	Hlavní štětec
+	Secondary Brush	Vedlejší štětec
+	Color Output	Barevný výstup

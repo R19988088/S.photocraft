@@ -4305,3 +4305,101 @@ shape	Appearance	Izgled
 	Increase Brush Hardness	Povećaj tvrdoću četkice
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Sidro: Kašnjenje
+	Anchor Smooth	Sidro: Uglađivanje
+	Anchor X	Sidro X
+	Anchor Y	Sidro Y
+	Blur Jitter	Zamućenje: Varijacija
+	Blur Strength	Zamućenje: Jačina
+	Canvas Material	Materijal platna
+	Choose Pattern	Izaberi šaru
+	Color Attributes	Svojstva boje
+	Complementary Color	Komplementarna boja
+	Concentration	Koncentracija
+	Contour Strength	Kontura: Jačina
+	Coordinates:	Koordinate:
+	Darkening	Zatamnjivanje
+	Density Jitter	Gustina: Varijacija
+	Drag panels	Prevlači panele
+	Draw with the pen in the canvas to calibrate pressure response.	Crtajte olovkom na platnu da kalibrišete odziv na pritisak.
+	Edge Control	Upravljanje ivicama
+	Enable Color Attributes	Uključi: Svojstva boje
+	Enable Inertia	Uključi: Inercija
+	Enable Mixing	Uključi: Mešanje
+	Enable Pigment	Uključi: Pigment
+	Enable Stroke Motion	Uključi: Kretanje poteza
+	Expansion	Širenje
+	Fixed Width	Fiksna širina
+	Flow Algorithm:	Algoritam protoka:
+	Fluid	Tečnost
+	Gaussian Mask	Gausova maska
+	Grain Density	Gustina zrna
+	Hardness Jitter	Tvrdoća: Varijacija
+	Highlight Brightness	Svetlina odsjaja
+	Highlight Ratio	Udeo odsjaja
+	Image Palette Color	Boja palete slike
+	Import a C3 preset with a packaged canvas pattern.	Uvezite C3 postavku sa priloženom šarom platna.
+	Inertia	Inercija
+	Invert Blur Pressure	Obrni pritisak: Zamućenje
+	Invert Length Pressure	Obrni pritisak: Dužina
+	Jitter	Varijacija
+	Length Jitter	Dužina: Varijacija
+	Liquidity	Tečljivost
+	Minimum Angle	Minimum: Ugao
+	Minimum Blur	Minimum: Zamućenje
+	Minimum Count	Minimum: Broj
+	Minimum Distance	Minimum: Udaljenost
+	Minimum Hardness	Minimum: Tvrdoća
+	Minimum Length	Minimum: Dužina
+	Minimum Scatter	Minimum: Rasejavanje
+	Minimum Spacing	Minimum: Razmak
+	Minimum Strength	Minimum: Jačina
+	Minimum Stroke Jitter	Minimum: Potez: Varijacija
+	Minimum Width	Minimum: Širina
+	Mixing	Mešanje
+	Mixing Strength	Mešanje: Jačina
+	Outline	Obris
+	Output Strength	Izlazna jačina
+	Painting Settings…	Postavke slikanja…
+	Painting…	Slikanje…
+	Pattern:	Šara:
+	Pigment	Pigment
+	Pressure Controls Anchor Delay	Upravljanje pritiskom: Sidro: Kašnjenje
+	Pressure Controls Contour	Upravljanje pritiskom: Kontura
+	Pressure Controls Fluid	Upravljanje pritiskom: Tečnost
+	Pressure for Flow	Pritisak za protok
+	Primary Strength	Primarna jačina
+	Range Jitter	Opseg: Varijacija
+	Saturation Boost	Pojačanje zasićenosti
+	Saturation Protection	Zaštita zasićenosti
+	Saturation Record	Pamćenje zasićenosti
+	Secondary Strength	Sekundarna jačina
+	Show Color Values	Prikaži vrednosti boje
+	Single Tip	Jedan vrh
+	Smudge Output	Izlaz razmazivanja
+	Soft Coverage	Meko pokrivanje
+	Spacing Jitter	Razmak: Varijacija
+	Strength Jitter	Jačina: Varijacija
+	Stroke Jitter	Potez: Varijacija
+	Stroke Motion	Kretanje poteza
+	Stroke Smoothing	Uglađivanje poteza
+	Tilt Delay	Kašnjenje nagiba
+	Use Grain Parameters	Koristi: Parametri zrna
+	Use Pressure Curve	Koristi: Kriva pritiska
+	Use Sampled Pattern	Koristi: Uzorkovana šara
+	Use Wet Edge Parameters	Koristi: Parametri vlažnih ivica
+	Use the eyedropper on the canvas to sample a pattern.	Uzmite uzorak šare pipetom na platnu.
+	Water	Voda
+	Watercolor 2	Akvarel 2
+	Wet Edge Mode	Režim vlažnih ivica
+	Whole Stroke	Ceo potez
+	Width Mode	Režim širine
+
+	Eyedropper Saturation Protection	Zaštita zasićenosti pipete
+	Loop Hue Slider	Kružni klizač nijanse
+	Translucent Selection	Poluprovidan izbor
+
+	Primary Brush	Главна четкица
+	Secondary Brush	Помоћна четкица
+	Color Output	Наношење боје

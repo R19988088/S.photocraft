@@ -447,6 +447,7 @@ impl Stylus {
     pub(crate) fn native_point(&self, event: NativePenEvent, position: [f64; 2]) -> photocraft_engine::paint::StrokePoint {
         let s = if self.use_pressure { event.sample.unwrap_or_default() } else { PenSample::default() };
         photocraft_engine::paint::StrokePoint {
+            is_pen: event.sample.is_some(),
             x: position[0],
             y: position[1],
             pressure: s.pressure,
@@ -527,6 +528,11 @@ impl Stylus {
                 }
                 if has_time {
                     v.push(self.point_ms(i) - t0);
+                }
+                if self.native_last.is_some() || self.touch_pen || self.current.is_some() {
+                    v.resize(8, 0.0);
+                    v[7] = 1.0;
+                    v.push(1.0);
                 }
                 v
             })
@@ -925,7 +931,11 @@ mod tests {
         s.feed.set(Some(PenSample { pressure: 0.2, tilt_x: 40.0, ..Default::default() }));
         assert_eq!((s.sample(), s.pressure()), (None, 1.0));
         s.begin_stroke();
-        assert_eq!(s.stroke_points(&[[1.0, 2.0, 1.0]]), vec![vec![1.0, 2.0, 1.0]], "no tilt either");
+        assert_eq!(
+            s.stroke_points(&[[1.0, 2.0, 1.0]]),
+            vec![vec![1.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]],
+            "pressure and tilt are ignored; pen identity is retained"
+        );
     }
 
     #[test]

@@ -3992,3 +3992,101 @@ curves	Smooth	Vloeiend maken
 	Increase Brush Hardness	Penseelhardheid verhogen
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Anker: Vertraging
+	Anchor Smooth	Anker: Vloeiend maken
+	Anchor X	Anker X
+	Anchor Y	Anker Y
+	Blur Jitter	Vervaging: Variatie
+	Blur Strength	Vervaging: Sterkte
+	Canvas Material	Canvasmateriaal
+	Choose Pattern	Patroon kiezen
+	Color Attributes	Kleureigenschappen
+	Complementary Color	Complementaire kleur
+	Concentration	Concentratie
+	Contour Strength	Contour: Sterkte
+	Coordinates:	Coördinaten:
+	Darkening	Verdonkering
+	Density Jitter	Dichtheid: Variatie
+	Drag panels	Panelen slepen
+	Draw with the pen in the canvas to calibrate pressure response.	Teken met de pen op het canvas om de drukrespons te kalibreren.
+	Edge Control	Randregeling
+	Enable Color Attributes	Inschakelen: Kleureigenschappen
+	Enable Inertia	Inschakelen: Traagheid
+	Enable Mixing	Inschakelen: Mengen
+	Enable Pigment	Inschakelen: Pigment
+	Enable Stroke Motion	Inschakelen: Streekbeweging
+	Expansion	Uitbreiding
+	Fixed Width	Vaste breedte
+	Flow Algorithm:	Stroomalgoritme:
+	Fluid	Vloeistof
+	Gaussian Mask	Gaussiaans masker
+	Grain Density	Korreldichtheid
+	Hardness Jitter	Hardheid: Variatie
+	Highlight Brightness	Helderheid van hooglichten
+	Highlight Ratio	Aandeel hooglichten
+	Image Palette Color	Kleur uit afbeeldingspalet
+	Import a C3 preset with a packaged canvas pattern.	Importeer een C3-voorinstelling met een bijgevoegd canvaspatroon.
+	Inertia	Traagheid
+	Invert Blur Pressure	Druk omkeren: Vervaging
+	Invert Length Pressure	Druk omkeren: Lengte
+	Jitter	Variatie
+	Length Jitter	Lengte: Variatie
+	Liquidity	Vloeibaarheid
+	Minimum Angle	Minimum: Hoek
+	Minimum Blur	Minimum: Vervaging
+	Minimum Count	Minimum: Telling
+	Minimum Distance	Minimum: Afstand
+	Minimum Hardness	Minimum: Hardheid
+	Minimum Length	Minimum: Lengte
+	Minimum Scatter	Minimum: Spreiding
+	Minimum Spacing	Minimum: Tussenruimte
+	Minimum Strength	Minimum: Sterkte
+	Minimum Stroke Jitter	Minimum: Streek: Variatie
+	Minimum Width	Minimum: Breedte
+	Mixing	Mengen
+	Mixing Strength	Mengen: Sterkte
+	Outline	Omtrek
+	Output Strength	Uitvoersterkte
+	Painting Settings…	Schilderinstellingen…
+	Painting…	Schilderen…
+	Pattern:	Patroon:
+	Pigment	Pigment
+	Pressure Controls Anchor Delay	Drukregeling: Anker: Vertraging
+	Pressure Controls Contour	Drukregeling: Contour
+	Pressure Controls Fluid	Drukregeling: Vloeistof
+	Pressure for Flow	Pendruk voor stroom
+	Primary Strength	Primaire sterkte
+	Range Jitter	Bereik: Variatie
+	Saturation Boost	Verzadigingsversterking
+	Saturation Protection	Verzadigingsbescherming
+	Saturation Record	Verzadigingsregistratie
+	Secondary Strength	Secundaire sterkte
+	Show Color Values	Kleurwaarden tonen
+	Single Tip	Enkele punt
+	Smudge Output	Nattevingeruitvoer
+	Soft Coverage	Zachte dekking
+	Spacing Jitter	Tussenruimte: Variatie
+	Strength Jitter	Sterkte: Variatie
+	Stroke Jitter	Streek: Variatie
+	Stroke Motion	Streekbeweging
+	Stroke Smoothing	Streekvloeiendheid
+	Tilt Delay	Kantelvertraging
+	Use Grain Parameters	Gebruiken: Korrelparameters
+	Use Pressure Curve	Gebruiken: Drukcurve
+	Use Sampled Pattern	Gebruiken: Bemonsterd patroon
+	Use Wet Edge Parameters	Gebruiken: Parameters voor natte randen
+	Use the eyedropper on the canvas to sample a pattern.	Gebruik het pipet op het canvas om een patroon te bemonsteren.
+	Water	Water
+	Watercolor 2	Aquarel 2
+	Wet Edge Mode	Modus voor natte randen
+	Whole Stroke	Hele streek
+	Width Mode	Breedtemodus
+
+	Eyedropper Saturation Protection	Verzadigingsbescherming van het pipet
+	Loop Hue Slider	Cyclische tintschuifregelaar
+	Translucent Selection	Doorschijnende selectie
+
+	Primary Brush	Hoofdpenseel
+	Secondary Brush	Tweede penseel
+	Color Output	Kleurafgifte

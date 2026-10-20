@@ -2844,3 +2844,116 @@ curves	Smooth	平滑
 	Tablet pressure	数位板压感
 
 	Pressure for Flow	用壓感控制流量
+
+	Anchor Delay	錨點: 延遲
+	Anchor Smooth	錨點: 平滑
+	Anchor X	錨點 X
+	Anchor Y	錨點 Y
+	Blur Jitter	模糊抖動
+	Blur Strength	模糊: 強度
+	Canvas Material	畫布材質
+	Choose Pattern	選擇圖樣
+	Color Attributes	色彩屬性
+	Complementary Color	互補色
+	Concentration	濃度
+	Contour Strength	輪廓: 強度
+	Coordinates:	座標：
+	Darkening	變暗
+	Density Jitter	密度抖動
+	Drag panels	拖曳面板
+	Draw with the pen in the canvas to calibrate pressure response.	使用筆在畫布上繪製以校準壓感反應。
+	Edge Control	邊緣控制
+	Enable Color Attributes	啟用色彩屬性
+	Enable Inertia	啟用慣性
+	Enable Mixing	啟用混色
+	Enable Pigment	啟用顏料
+	Enable Stroke Motion	啟用筆觸運動
+	Expansion	擴張
+	Fixed Width	固定寬度
+	Flow Algorithm:	流量演算法：
+	Fluid	流體
+	Gaussian Mask	高斯遮色片
+	Grain Density	顆粒密度
+	Grain Size	顆粒: 大小
+	Hardness Jitter	硬度抖動
+	Highlight Brightness	亮部亮度
+	Highlight Ratio	亮部比例
+	Highlight Strength	亮部: 強度
+	Image Palette Color	影像色盤顏色
+	Import a C3 preset with a packaged canvas pattern.	匯入包含畫布圖樣的 C3 預設集。
+	Inertia	慣性
+	Invert Blur Pressure	反轉壓感: 模糊
+	Invert Length Pressure	反轉壓感: 長度
+	Jitter	抖動
+	Length	長度
+	Length Jitter	長度抖動
+	Liquidity	流動性
+	Minimum Angle	最小角度
+	Minimum Blur	最小模糊
+	Minimum Count	最小計算
+	Minimum Distance	最小間距
+	Minimum Hardness	最小硬度
+	Minimum Length	最小長度
+	Minimum Scatter	最小散佈
+	Minimum Spacing	最小間距
+	Minimum Strength	最小強度
+	Minimum Stroke Jitter	最小筆觸抖動
+	Minimum Width	最小寬度
+	Mixing	混色
+	Mixing Strength	混色: 強度
+	Outline	描邊
+	Output Strength	輸出強度
+	Painting Settings…	繪畫設定…
+	Painting…	繪畫…
+	Pattern:	圖樣：
+	Pigment	顏料
+	Pressure Controls Anchor Delay	壓感控制錨點: 延遲
+	Pressure Controls Contour	壓感控制輪廓
+	Pressure Controls Fluid	壓感控制流體
+	Primary Strength	主筆刷強度
+	Range Jitter	範圍抖動
+	Saturation Boost	提高飽和度
+	Saturation Protection	飽和度保護
+	Saturation Record	飽和度記錄
+	Secondary Strength	副筆刷強度
+	Show Color Values	顯示色彩數值
+	Single Tip	單筆尖
+	Smudge Output	塗抹輸出
+	Soft Coverage	柔和覆蓋
+	Softness	柔化
+	Spacing Jitter	間距抖動
+	Strength	強度
+	Strength Jitter	強度抖動
+	Stroke Jitter	筆觸抖動
+	Stroke Motion	筆觸運動
+	Stroke Smoothing	筆觸平滑
+	Tilt Delay	傾斜延遲
+	Use Grain Parameters	使用顆粒參數
+	Use Pressure Curve	使用壓感曲線
+	Use Sampled Pattern	使用取樣圖樣
+	Use Wet Edge Parameters	使用濕邊參數
+	Use the eyedropper on the canvas to sample a pattern.	使用滴管在畫布上取樣圖樣。
+	Water	水量
+	Watercolor	水彩
+	Watercolor 2	水彩 2
+	Wet Edge Mode	濕邊模式
+	Whole Stroke	整筆描邊
+	Width Mode	寬度模式
+
+	Eyedropper Saturation Protection	滴管飽和度保護
+	Loop Hue Slider	色相滑桿循環
+	Translucent Selection	選取範圍半透明
+
+	Primary Brush	主畫筆
+	Secondary Brush	副畫筆
+	Color Output	顏色輸出
+
+# Reference brush panel categories
+brushSection	Tip	基本參數
+brushSection	Basic	形態控制
+brushSection	Motion	運筆
+brushSection	Texture	紋理
+brushSection	Color Mode	顏色屬性
+brushSection	Wet Edge	濕邊
+brushSection	Mix	混色
+brushSection	Pigment	顏料

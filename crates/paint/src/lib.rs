@@ -18,14 +18,18 @@ use photocraft_geom::{Point, Rect};
 use photocraft_raster::Surface;
 use serde::{Deserialize, Serialize};
 
+pub mod attributes;
 pub mod bg_erase;
 pub mod brush;
+pub mod canvas_material;
 pub mod curve;
 pub mod dynamics;
 pub mod material;
 pub mod mixer;
+pub mod motion;
 pub mod outline;
 pub mod pigment;
+pub mod pigment_material;
 pub mod presets;
 pub mod procedural;
 pub mod render;
@@ -35,11 +39,14 @@ pub mod rng;
 pub mod symmetry;
 pub mod tablet_pressure;
 pub mod tile;
+pub mod transport;
 
+pub use attributes::AttributeMode;
 pub use brush::{
     BrushPreset, BrushSettings, ColorDynamics, Control, DualBrush, Dynamic, MAX_BRUSH_SIZE, MAX_SCATTER, MaskMode, Pattern, PatternStyle, Pose, PresetCaptures,
     Scattering, SectionLocks, ShapeDynamics, Smoothing, Texture, TipShape, Transfer,
 };
+pub use brush::{ColorAttributes, ColorPattern};
 pub use curve::ResponseCurve;
 pub use mixer::MixerSettings;
 pub use render::{BrushContext, StrokeRenderer, UnionLive, grid_center, grid_square, render_stroke};
@@ -50,6 +57,7 @@ pub use tile::{GrayTile, StoredTile};
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct StrokePoint {
+    pub is_pen: bool,
     pub x: f64,
     pub y: f64,
     /// 0..1, 1 for mouse.
@@ -67,13 +75,13 @@ pub struct StrokePoint {
 
 impl Default for StrokePoint {
     fn default() -> Self {
-        Self { x: 0.0, y: 0.0, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, rotation: 0.0, wheel: 1.0, time: 0.0 }
+        Self { is_pen: false, x: 0.0, y: 0.0, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, rotation: 0.0, wheel: 1.0, time: 0.0 }
     }
 }
 
 impl StrokePoint {
     pub fn new(x: f64, y: f64, pressure: f32) -> Self {
-        Self { x, y, pressure, ..Default::default() }
+        Self { x, y, pressure, is_pen: pressure != 1.0, ..Default::default() }
     }
 }
 
@@ -86,11 +94,16 @@ pub struct Stroke {
 /// A dab placed along the stroke (after dynamics).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Dab {
+    pub hardness: f32,
+    pub pigment: crate::pigment_material::ResolvedPigment,
+    pub mix_strength: f32,
+    pub mix_length: f32,
+    pub blur_strength: f32,
     pub center: Point,
     pub radius: f32,
     /// Flow: per-dab build-up amount.
     pub alpha: f32,
-    /// Radians, counter-clockwise.
+    /// Radians; clockwise for C3 tips, counter-clockwise for legacy tips.
     pub angle: f32,
     pub roundness: f32,
     pub flip_x: bool,
@@ -118,6 +131,11 @@ impl Dab {
     /// A plain round dab.
     pub fn round(center: Point, radius: f32, alpha: f32) -> Self {
         Self {
+            hardness: 1.0,
+            pigment: crate::pigment_material::ResolvedPigment::default(),
+            mix_strength: 0.0,
+            mix_length: 0.5,
+            blur_strength: 0.0,
             center,
             radius,
             alpha,

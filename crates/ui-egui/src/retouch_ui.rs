@@ -45,6 +45,18 @@ pub(crate) fn clone_params(app: &PhotocraftApp) -> Option<Value> {
     Some(p)
 }
 
+fn smudge_uses_brush(brush: &photocraft_paint::BrushSettings) -> bool {
+    brush.c3_tip_math
+        || brush.mix_settings.enabled
+        || brush.mix_settings.outputs_smudge
+        || brush.mix_settings.algorithm != photocraft_paint::transport::MixAlgorithm::V1
+        || brush.dual_brush.enabled
+        || brush.color_attributes.enabled
+        || brush.wet_edges
+        || brush.pigment.as_ref().is_some_and(|p| p.enabled)
+        || brush.mix_settings.blur_strength > 0.0
+}
+
 /// The command and options-bar params (without `points` and `target`) of a sequential-dab tool:
 /// Blur, Sharpen, Smudge, Dodge, Burn, Sponge. Shared by the live preview and the commit.
 pub(crate) fn dab_params(app: &PhotocraftApp, tool: Tool) -> Option<(&'static str, Value)> {
@@ -52,7 +64,10 @@ pub(crate) fn dab_params(app: &PhotocraftApp, tool: Tool) -> Option<(&'static st
     Some(match tool {
         Tool::Blur => ("paint.blur", json!({"strength": o.strength, "sampleAllLayers": o.sample_all_layers})),
         Tool::Sharpen => ("paint.sharpen", json!({"strength": o.strength, "protectDetail": o.protect_detail, "sampleAllLayers": o.sample_all_layers})),
-        Tool::Smudge => ("paint.smudge", json!({"strength": o.strength, "fingerPainting": o.finger_painting, "sampleAllLayers": o.sample_all_layers})),
+        Tool::Smudge => {
+            let strength = if smudge_uses_brush(&app.session.tools.brush) { app.session.tools.brush.mix_settings.strength * 100.0 } else { o.strength };
+            ("paint.smudge", json!({"strength": strength, "sampleAllLayers": o.sample_all_layers}))
+        }
         Tool::Dodge | Tool::Burn => (
             if tool == Tool::Dodge { "paint.dodge" } else { "paint.burn" },
             json!({"range": o.tone_range, "exposure": o.exposure, "protectTones": o.protect_tones}),
@@ -461,6 +476,17 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
     {
         return false;
     }
+    if tool == Tool::Smudge && smudge_uses_brush(&app.session.tools.brush) {
+        let before = app.session.tools.brush.clone();
+        let mut after = before.clone();
+        let mut strength = after.mix_settings.strength * 100.0;
+        opt(ui, tl!("Strength:"));
+        crate::widgets::value_field(ui, &mut strength, 0.0..=100.0, "%", 58.0);
+        after.mix_settings.strength = strength / 100.0;
+        crate::widgets::checkbox(ui, &mut app.ui.tool_options.sample_all_layers, tl!("Sample All Layers"));
+        crate::brush_panel::commit_gesture(app, ui.ctx(), &before, &after);
+        return true;
+    }
     let o = &mut app.ui.tool_options;
     match tool {
         Tool::SpotHealing => {
@@ -581,9 +607,6 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
             crate::widgets::checkbox(ui, &mut o.sample_all_layers, tl!("Sample All Layers"));
             if tool == Tool::Sharpen {
                 crate::widgets::checkbox(ui, &mut o.protect_detail, tl!("Protect Detail"));
-            }
-            if tool == Tool::Smudge {
-                crate::widgets::checkbox(ui, &mut o.finger_painting, tl!("Finger Painting"));
             }
         }
         Tool::ColorReplacement => {
@@ -813,6 +836,47 @@ mod tests {
     }
 
     #[test]
+    fn smudge_strength_uses_shared_brush_and_keeps_legacy_tool_strength() {
+        use egui_kittest::kittest::NodeT;
+        let mut app = app();
+        app.ui.tool_options.strength = 90.0;
+        app.session.tools.brush = photocraft_paint::BrushSettings::default();
+        assert_eq!(dab_params(&app, Tool::Smudge).unwrap().1["strength"], 90.0);
+        app.session.tools.brush.c3_tip_math = true;
+        app.session.tools.brush.mix_settings.strength = 0.23;
+        let params = dab_params(&app, Tool::Smudge).unwrap().1;
+        assert!((params["strength"].as_f64().unwrap() - 23.0).abs() < 1e-5);
+        app.session.tools.brush.mix_settings.strength = 0.0;
+        assert_eq!(dab_params(&app, Tool::Smudge).unwrap().1["strength"], 0.0);
+        assert_eq!(app.ui.tool_options.strength, 90.0);
+
+        use egui_kittest::kittest::Queryable;
+        app.session.tools.brush.mix_settings.strength = 0.23;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(600.0, 60.0)).build_ui_state(
+            |ui, app: &mut PhotocraftApp| {
+                if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    options_bar(app, ui, Tool::Smudge);
+                }
+            },
+            app,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
+        h.run_steps(4);
+        let value = h
+            .query_all_by_role(egui::accesskit::Role::SpinButton)
+            .find(|n| n.accesskit_node().numeric_value().is_some_and(|n| (n - 23.0).abs() < 1e-4))
+            .unwrap();
+        value.click();
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(2);
+        assert!(h.state().session.tools.brush.mix_settings.strength > 0.23);
+        assert_eq!(h.state().ui.tool_options.strength, 90.0);
+        let current = h.state().session.tools.brush.mix_settings.strength;
+        let params = dab_params(h.state(), Tool::Smudge).unwrap().1;
+        assert!((params["strength"].as_f64().unwrap() - f64::from(current * 100.0)).abs() < 1e-5);
+    }
+
+    #[test]
     fn sample_all_layers_reaches_the_command() {
         // #207, #731: the options-bar checkbox reaches the command.
         for tool in [Tool::SpotHealing, Tool::Remove, Tool::Blur, Tool::Sharpen, Tool::Smudge] {
@@ -868,47 +932,19 @@ mod tests {
     }
 
     #[test]
-    fn mixer_brush_is_selectable_and_paints_only_inside_the_selection_via_control() {
+    fn removed_mixer_brush_cannot_be_selected_via_control() {
         use crate::control::{ControlRequest, Outcome, handle};
-
         let mut app = app();
-        app.run("paint.pencil", json!({"points": [[50, 30]], "size": 200, "color": "#204080"})).unwrap();
-        app.run("tools.setColors", json!({"foreground": "#f02010"})).unwrap();
-        app.run(
-            "tools.setBrush",
-            json!({
-                "pressureSize": false,
-                "size": 12,
-                "mixer": {"wet": 0.0, "load": 1.0, "mix": 0.0, "flow": 1.0}
-            }),
-        )
-        .unwrap();
-        app.run("select.rect", json!({"x": 35, "y": 20, "width": 30, "height": 20})).unwrap();
-        let before = {
-            let surface = active(&app).surface().unwrap();
-            [surface.rgba(20, 30), surface.rgba(50, 30), surface.rgba(80, 30)]
-        };
-
+        let before = app.ui.tool;
         let ctx = egui::Context::default();
-        let (req, _rx) = ControlRequest::new(
-            "ui.pointer",
-            json!({
-                "tool": "mixerBrush",
-                "events": [
-                    {"kind": "down", "x": 8, "y": 30},
-                    {"kind": "move", "x": 92, "y": 30},
-                    {"kind": "up", "x": 92, "y": 30}
-                ]
-            }),
-        );
-        assert!(matches!(handle(&mut app, &ctx, &req), Outcome::Done(_)));
-        assert_eq!(app.ui.tool, Tool::MixerBrush);
-        assert_eq!(app.session.journal.last().map(|(id, _)| id.as_str()), Some("paint.mixerBrush"));
-
-        let surface = active(&app).surface().unwrap();
-        assert_ne!(surface.rgba(50, 30), before[1], "the selected pixels are mixed");
-        assert_eq!(surface.rgba(20, 30), before[0], "outside the selection is unchanged");
-        assert_eq!(surface.rgba(80, 30), before[2], "the far side outside the selection is unchanged");
+        let (req, _rx) = ControlRequest::new("ui.pointer", json!({"tool":"mixerBrush","events":[{"kind":"down","x":8,"y":30}]}));
+        let Outcome::Done(reply) = handle(&mut app, &ctx, &req) else {
+            panic!("removed tool must be rejected before queuing input");
+        };
+        assert_eq!(reply["ok"], false);
+        assert!(reply["error"].as_str().unwrap().contains("mixerBrush"));
+        assert_eq!(app.ui.tool, before);
+        assert!(app.synthetic.is_empty());
     }
 
     #[test]

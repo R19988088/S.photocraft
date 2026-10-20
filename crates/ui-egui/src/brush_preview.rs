@@ -75,6 +75,14 @@ fn tip_shape_sig(h: &mut DefaultHasher, t: &TipShape) {
     }
 }
 
+fn pattern_sig(h: &mut DefaultHasher, pattern: &Pattern) {
+    match pattern {
+        Pattern::Tile(tile) => tile_sig(h, tile),
+        Pattern::Stored(tile) => stored_sig(h, tile),
+        pattern => js(h, pattern),
+    }
+}
+
 /// Cheap signature of everything that changes a brush's stroke preview.
 pub fn preview_sig(b: &BrushSettings) -> u64 {
     let mut h = DefaultHasher::new();
@@ -82,20 +90,49 @@ pub fn preview_sig(b: &BrushSettings) -> u64 {
         &mut h,
         &(b.size, b.hardness, b.spacing, b.opacity, b.flow, b.pressure_size, b.pressure_opacity, b.pressure_flow, b.erase, b.mode, b.angle, b.roundness),
     );
+    js(
+        &mut h,
+        &(
+            b.c3_tip_math,
+            b.triangle,
+            b.square,
+            b.spacing_enabled,
+            &b.hardness_dynamic,
+            b.flow_algorithm_version,
+            b.pigment_mix_strength,
+            b.saturation_preserve_output,
+            b.saturation_record_strength,
+            b.pattern_enabled,
+        ),
+    );
+    js(&mut h, &(&b.pigment, &b.contour, &b.mix_settings, &b.motion, &b.inertia, &b.color_attributes));
+    b.canvas_material.is_some().hash(&mut h);
+    if let Some(canvas) = &b.canvas_material {
+        js(&mut h, &(canvas.enabled, canvas.scale, canvas.strength, canvas.blend_mode, &canvas.curve, &canvas.curve_lut));
+        pattern_sig(&mut h, &canvas.pattern);
+    }
+    b.sampled_pattern.is_some().hash(&mut h);
+    if let Some(pattern) = &b.sampled_pattern {
+        (pattern.width, pattern.height, pattern.pixels.len()).hash(&mut h);
+        let step = (pattern.pixels.len() / 4096).max(1);
+        for pixel in pattern.pixels.iter().step_by(step) {
+            for value in pixel {
+                value.to_bits().hash(&mut h);
+            }
+        }
+    }
     js(&mut h, &(b.flip_x, b.flip_y, b.aliased, b.noise, b.wet_edges, b.build_up, b.build_up_rate, b.protect_texture, b.seed));
     js(&mut h, &(&b.shape_dynamics, &b.scattering, &b.color_dynamics, &b.transfer, &b.pose, &b.smoothing));
     js(&mut h, &(&b.grain, &b.wet_edge, &b.dual_brush.grain, b.dual_brush.wet_edges, &b.dual_brush.wet_edge));
     tip_shape_sig(&mut h, &b.tip);
     let d = &b.dual_brush;
     js(&mut h, &(d.enabled, d.mode, d.size, d.hardness, d.roundness, d.angle, d.spacing, d.scatter, d.both_axes, d.count, d.flip));
+    js(&mut h, &(d.opacity, d.flow, &d.hardness_dynamic, d.primary_strength, d.secondary_strength));
+    d.full_parameters.as_deref().map(preview_sig).hash(&mut h);
     tip_shape_sig(&mut h, &d.tip);
     let t = &b.texture;
-    js(&mut h, &(t.enabled, t.invert, t.scale, t.brightness, t.contrast, t.each_tip, t.mode, t.depth, t.depth_jitter));
-    match &t.pattern {
-        Pattern::Tile(g) => tile_sig(&mut h, g),
-        Pattern::Stored(r) => stored_sig(&mut h, r),
-        p => js(&mut h, p),
-    }
+    js(&mut h, &(t.c3_math, t.enabled, t.coordinate_mode, t.invert, t.scale, t.brightness, t.contrast, t.each_tip, t.mode, t.depth, t.depth_jitter));
+    pattern_sig(&mut h, &t.pattern);
     h.finish()
 }
 
@@ -117,6 +154,10 @@ pub fn preview_pixels(b: &BrushSettings, w: u32, h: u32, color: [f32; 4]) -> Vec
     brush.dual_brush.size = (brush.dual_brush.size * k).max(1.0);
     brush.color = color;
     brush.erase = false;
+    brush.mix_settings.color_output = true;
+    if let Some(secondary) = brush.dual_brush.full_parameters.as_mut() {
+        secondary.mix_settings.color_output = true;
+    }
     brush.seed = 7;
     // Build-up adds dabs over (simulated) time: the preview has none.
     brush.build_up = false;
@@ -254,16 +295,43 @@ pub fn stroke_texture(ctx: &egui::Context, slot: &str, b: &BrushSettings, w: u32
     })
 }
 
-/// A tip thumbnail for `slot` (`n × n`; `shape` is hardness, angle, roundness), re-rendered only
+fn brush_tip_alpha(brush: &BrushSettings, n: u32) -> Vec<f32> {
+    let n = n.clamp(2, 512);
+    let settings = BrushSettings {
+        tip: brush.tip.clone(),
+        hardness: brush.hardness,
+        roundness: brush.roundness,
+        c3_tip_math: brush.c3_tip_math,
+        triangle: brush.triangle,
+        ..Default::default()
+    };
+    let ctx = paint::render::BrushContext::new(&settings);
+    let mut dab = paint::Dab::round(photocraft_geom::Point::new(f64::from(n) / 2.0, f64::from(n) / 2.0), n as f32 / 2.0 - 1.0, 1.0);
+    dab.angle = brush.angle.to_radians();
+    dab.roundness = brush.roundness;
+    dab.hardness = brush.hardness;
+    dab.flip_x = brush.flip_x;
+    dab.flip_y = brush.flip_y;
+    let mut alpha = Vec::new();
+    ctx.rasterize(&dab, false, photocraft_geom::Rect::new(0, 0, n as i32, n as i32), &mut alpha);
+    alpha
+}
+
+/// A tip thumbnail for `slot` (`n × n`), re-rendered only
 /// when the tip changes.
-pub fn tip_texture(ctx: &egui::Context, slot: &str, tip: &TipShape, shape: (f32, f32, f32), n: u32, color: Color32) -> egui::TextureHandle {
-    let (hardness, angle, roundness) = shape;
+pub fn tip_texture(ctx: &egui::Context, slot: &str, brush: &BrushSettings, n: u32, color: Color32) -> egui::TextureHandle {
+    let tip = &brush.tip;
+    let (hardness, angle, roundness) = (brush.hardness, brush.angle, brush.roundness);
     let mut hs = DefaultHasher::new();
-    (tip_sig(tip, hardness, angle, roundness, (false, false)), n, color).hash(&mut hs);
+    (tip_sig(tip, hardness, angle, roundness, (brush.flip_x, brush.flip_y)), brush.c3_tip_math, brush.triangle, n, color).hash(&mut hs);
     let sig = hs.finish();
     with_cache(ctx, |cache| {
         cache.get(slot, sig, || {
-            let a = tip_alpha(tip, hardness, angle, roundness, (false, false), n);
+            let a = if brush.c3_tip_math || brush.triangle {
+                brush_tip_alpha(brush, n)
+            } else {
+                tip_alpha(tip, hardness, angle, roundness, (brush.flip_x, brush.flip_y), n)
+            };
             let px: Vec<u8> = a.iter().flat_map(|v| [color.r(), color.g(), color.b(), (v * 255.0).round() as u8]).collect();
             upload(ctx, slot, n, n, &px)
         })
@@ -273,6 +341,62 @@ pub fn tip_texture(ctx: &egui::Context, slot: &str, tip: &TipShape, shape: (f32,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c3_tip_thumbnail_uses_triangle_and_clockwise_angle() {
+        let mut b = BrushSettings { c3_tip_math: true, triangle: true, hardness: 1.0, ..Default::default() };
+        let down = brush_tip_alpha(&b, 48);
+        let center = |alpha: &[f32]| -> (f32, f32) {
+            let sum = alpha.iter().sum::<f32>();
+            let x = alpha.iter().enumerate().map(|(i, a)| ((i % 48) as f32 + 0.5 - 24.0) * a).sum::<f32>() / sum;
+            let y = alpha.iter().enumerate().map(|(i, a)| ((i / 48) as f32 + 0.5 - 24.0) * a).sum::<f32>() / sum;
+            (x, y)
+        };
+        assert!(center(&down).1 > 2.0);
+        b.angle = 90.0;
+        let rotated = brush_tip_alpha(&b, 48);
+        assert!(center(&rotated).0 < -2.0);
+        b.triangle = false;
+        assert_ne!(brush_tip_alpha(&b, 48), rotated);
+        assert_ne!(preview_sig(&b), preview_sig(&BrushSettings { triangle: true, ..b.clone() }));
+    }
+
+    #[test]
+    fn preview_signature_tracks_new_primary_and_secondary_settings() {
+        let base = BrushSettings::default();
+        let signature = preview_sig(&base);
+        type BrushEdit = (&'static str, fn(&mut BrushSettings));
+        let cases: &[BrushEdit] = &[
+            ("hardness", |b| b.hardness_dynamic.jitter = 0.2),
+            ("flow algorithm", |b| b.flow_algorithm_version = 2),
+            ("mixing", |b| b.mix_settings.length = 0.2),
+            ("pigment mixing", |b| b.pigment_mix_strength = 0.2),
+            ("saturation protection", |b| b.saturation_preserve_output = 0.2),
+            ("saturation memory", |b| b.saturation_record_strength = 0.2),
+            ("pigment", |b| b.pigment = Some(Default::default())),
+            ("contour", |b| b.contour = Some(Default::default())),
+            ("canvas", |b| b.canvas_material = Some(Default::default())),
+            ("motion", |b| b.motion.smoothing = 0.2),
+            ("inertia", |b| b.inertia.amount = 0.2),
+            ("attributes", |b| b.color_attributes.enabled = true),
+            ("pattern", |b| b.pattern_enabled = true),
+            ("sampled pattern", |b| {
+                b.sampled_pattern = Some(paint::brush::ColorPattern { width: 1, height: 1, pixels: std::sync::Arc::from([[1.0, 0.0, 0.0, 1.0]]) })
+            }),
+            ("texture coordinates", |b| b.texture.coordinate_mode = paint::brush::TextureCoordinateMode::TipLocal),
+        ];
+        for (name, change) in cases {
+            let mut changed = base.clone();
+            change(&mut changed);
+            assert_ne!(preview_sig(&changed), signature, "{name}");
+            let mut secondary = base.clone();
+            secondary.dual_brush.full_parameters = Some(Box::new(base.clone()));
+            let before = preview_sig(&secondary);
+            change(secondary.dual_brush.full_parameters.as_deref_mut().unwrap());
+            assert_ne!(preview_sig(&secondary), before, "secondary {name}");
+        }
+        assert_eq!(preview_sig(&BrushSettings { color: [1.0, 0.0, 0.0, 1.0], ..base }), signature);
+    }
 
     #[test]
     fn sig_cache_renders_only_on_change() {

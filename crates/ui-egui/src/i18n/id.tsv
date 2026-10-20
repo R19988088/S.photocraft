@@ -3229,3 +3229,107 @@ curves	Smooth	Haluskan
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Jangkar: Penundaan
+	Anchor Smooth	Jangkar: Penghalusan
+	Anchor X	Jangkar X
+	Anchor Y	Jangkar Y
+	Blur Jitter	Buram: Variasi Acak
+	Blur Strength	Buram: Kekuatan
+	Canvas Material	Bahan Kanvas
+	Choose Pattern	Pilih Pola
+	Color Attributes	Atribut Warna
+	Complementary Color	Warna Komplementer
+	Concentration	Konsentrasi
+	Contour Strength	Kontur: Kekuatan
+	Coordinates:	Koordinat:
+	Darkening	Penggelapan
+	Density Jitter	Kepadatan: Variasi Acak
+	Drag panels	Seret panel
+	Draw with the pen in the canvas to calibrate pressure response.	Gambarlah dengan pena di kanvas untuk mengalibrasi respons tekanan.
+	Edge Control	Kontrol Tepi
+	Enable Color Attributes	Aktifkan: Atribut Warna
+	Enable Inertia	Aktifkan: Inersia
+	Enable Mixing	Aktifkan: Pencampuran
+	Enable Pigment	Aktifkan: Pigmen
+	Enable Stroke Motion	Aktifkan: Gerakan Sapuan
+	Expansion	Perluasan
+	Fixed Width	Lebar Tetap
+	Flow Algorithm:	Algoritma Aliran:
+	Fluid	Cairan
+	Gaussian Mask	Masker Gaussian
+	Grain Density	Kepadatan Butiran
+	Grain Size	Grain: Ukuran
+	Hardness Jitter	Kekerasan: Variasi Acak
+	Highlight Brightness	Kecerahan Sorotan
+	Highlight Ratio	Rasio Sorotan
+	Highlight Strength	Sorotan: Kekuatan
+	Image Palette Color	Warna Palet Gambar
+	Import a C3 preset with a packaged canvas pattern.	Impor prasetel C3 yang menyertakan pola kanvas.
+	Inertia	Inersia
+	Invert Blur Pressure	Balik Tekanan: Buram
+	Invert Length Pressure	Balik Tekanan: Panjang
+	Jitter	Variasi Acak
+	Length	Panjang
+	Length Jitter	Panjang: Variasi Acak
+	Liquidity	Fluiditas
+	Minimum Angle	Minimum: Sudut
+	Minimum Blur	Minimum: Buram
+	Minimum Count	Minimum: Hitung
+	Minimum Distance	Minimum: Jarak
+	Minimum Hardness	Minimum: Kekerasan
+	Minimum Length	Minimum: Panjang
+	Minimum Scatter	Minimum: Scatter
+	Minimum Spacing	Minimum: Jarak
+	Minimum Strength	Minimum: Kekuatan
+	Minimum Stroke Jitter	Minimum: Sapuan: Variasi Acak
+	Minimum Width	Minimum: Lebar
+	Mixing	Pencampuran
+	Mixing Strength	Pencampuran: Kekuatan
+	Outline	Garis Luar
+	Output Strength	Kekuatan Keluaran
+	Painting Settings…	Pengaturan Melukis…
+	Painting…	Melukis…
+	Pattern:	Pola:
+	Pigment	Pigmen
+	Pressure Controls Anchor Delay	Kontrol Tekanan: Jangkar: Penundaan
+	Pressure Controls Contour	Kontrol Tekanan: Kontur
+	Pressure Controls Fluid	Kontrol Tekanan: Cairan
+	Pressure for Flow	Tekanan untuk Aliran
+	Primary Strength	Kekuatan Utama
+	Range Jitter	Rentang: Variasi Acak
+	Saturation Boost	Peningkatan Saturasi
+	Saturation Protection	Perlindungan Saturasi
+	Saturation Record	Rekaman Saturasi
+	Secondary Strength	Kekuatan Sekunder
+	Show Color Values	Tampilkan Nilai Warna
+	Single Tip	Satu Ujung
+	Smudge Output	Keluaran Corengan
+	Soft Coverage	Cakupan Lembut
+	Softness	Kelembutan
+	Spacing Jitter	Jarak: Variasi Acak
+	Strength	Kekuatan
+	Strength Jitter	Kekuatan: Variasi Acak
+	Stroke Jitter	Sapuan: Variasi Acak
+	Stroke Motion	Gerakan Sapuan
+	Stroke Smoothing	Penghalusan Sapuan
+	Tilt Delay	Penundaan Kemiringan
+	Use Grain Parameters	Gunakan: Parameter Butiran
+	Use Pressure Curve	Gunakan: Kurva Tekanan
+	Use Sampled Pattern	Gunakan: Pola Sampel
+	Use Wet Edge Parameters	Gunakan: Parameter Tepi Basah
+	Use the eyedropper on the canvas to sample a pattern.	Gunakan pipet pada kanvas untuk mengambil sampel pola.
+	Water	Air
+	Watercolor	Cat Air
+	Watercolor 2	Cat Air 2
+	Wet Edge Mode	Mode Tepi Basah
+	Whole Stroke	Seluruh Sapuan
+	Width Mode	Mode Lebar
+
+	Eyedropper Saturation Protection	Perlindungan Saturasi Pipet
+	Loop Hue Slider	Penggeser Rona Melingkar
+	Translucent Selection	Seleksi Tembus Cahaya
+
+	Primary Brush	Kuas utama
+	Secondary Brush	Kuas sekunder
+	Color Output	Keluaran warna

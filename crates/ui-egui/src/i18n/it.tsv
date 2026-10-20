@@ -4349,3 +4349,101 @@ shape	Appearance	Aspetto
 	Replace it with this document, or cancel and use File › Save As to keep both.	Sostituiscilo con questo documento, oppure annulla e usa File › Salva con nome per tenerli entrambi.
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Ancora: Ritardo
+	Anchor Smooth	Ancora: Levigatura
+	Anchor X	Ancora X
+	Anchor Y	Ancora Y
+	Blur Jitter	Sfocatura: Variazione
+	Blur Strength	Sfocatura: Intensità
+	Canvas Material	Materiale della tela
+	Choose Pattern	Scegli motivo
+	Color Attributes	Attributi del colore
+	Complementary Color	Colore complementare
+	Concentration	Concentrazione
+	Contour Strength	Contorno: Intensità
+	Coordinates:	Coordinate:
+	Darkening	Scurimento
+	Density Jitter	Densità: Variazione
+	Drag panels	Trascina pannelli
+	Draw with the pen in the canvas to calibrate pressure response.	Disegna con la penna sulla tela per calibrare la risposta alla pressione.
+	Edge Control	Controllo dei bordi
+	Enable Color Attributes	Attiva: Attributi del colore
+	Enable Inertia	Attiva: Inerzia
+	Enable Mixing	Attiva: Miscelazione
+	Enable Pigment	Attiva: Pigmento
+	Enable Stroke Motion	Attiva: Movimento del tratto
+	Expansion	Espansione
+	Fixed Width	Larghezza fissa
+	Flow Algorithm:	Algoritmo di flusso:
+	Fluid	Fluido
+	Gaussian Mask	Maschera gaussiana
+	Grain Density	Densità della grana
+	Hardness Jitter	Durezza: Variazione
+	Highlight Brightness	Luminosità dei riflessi
+	Highlight Ratio	Proporzione dei riflessi
+	Image Palette Color	Colore della palette immagine
+	Import a C3 preset with a packaged canvas pattern.	Importa un predefinito C3 con un motivo della tela incluso.
+	Inertia	Inerzia
+	Invert Blur Pressure	Inverti pressione: Sfocatura
+	Invert Length Pressure	Inverti pressione: Lunghezza
+	Jitter	Variazione
+	Length Jitter	Lunghezza: Variazione
+	Liquidity	Fluidità
+	Minimum Angle	Minimo: Angolo
+	Minimum Blur	Minimo: Sfocatura
+	Minimum Count	Minimo: Conteggio
+	Minimum Distance	Minimo: Distanza
+	Minimum Hardness	Minimo: Durezza
+	Minimum Length	Minimo: Lunghezza
+	Minimum Scatter	Minimo: Dispersione
+	Minimum Spacing	Minimo: Spaziatura
+	Minimum Strength	Minimo: Intensità
+	Minimum Stroke Jitter	Minimo: Tratto: Variazione
+	Minimum Width	Minimo: Larghezza
+	Mixing	Miscelazione
+	Mixing Strength	Miscelazione: Intensità
+	Outline	Contorno
+	Output Strength	Intensità di uscita
+	Painting Settings…	Impostazioni pittura…
+	Painting…	Pittura…
+	Pattern:	Motivo:
+	Pigment	Pigmento
+	Pressure Controls Anchor Delay	Controllo pressione: Ancora: Ritardo
+	Pressure Controls Contour	Controllo pressione: Contorno
+	Pressure Controls Fluid	Controllo pressione: Fluido
+	Pressure for Flow	Pressione per il flusso
+	Primary Strength	Intensità principale
+	Range Jitter	Intervallo: Variazione
+	Saturation Boost	Aumento saturazione
+	Saturation Protection	Protezione saturazione
+	Saturation Record	Memorizzazione saturazione
+	Secondary Strength	Intensità secondaria
+	Show Color Values	Mostra valori colore
+	Single Tip	Punta singola
+	Smudge Output	Uscita sfumino
+	Soft Coverage	Copertura morbida
+	Spacing Jitter	Spaziatura: Variazione
+	Strength Jitter	Intensità: Variazione
+	Stroke Jitter	Tratto: Variazione
+	Stroke Motion	Movimento del tratto
+	Stroke Smoothing	Levigatura del tratto
+	Tilt Delay	Ritardo inclinazione
+	Use Grain Parameters	Usa: Parametri grana
+	Use Pressure Curve	Usa: Curva di pressione
+	Use Sampled Pattern	Usa: Motivo campionato
+	Use Wet Edge Parameters	Usa: Parametri bordi bagnati
+	Use the eyedropper on the canvas to sample a pattern.	Usa il contagocce sulla tela per campionare un motivo.
+	Water	Acqua
+	Watercolor 2	Acquerello 2
+	Wet Edge Mode	Modalità bordi bagnati
+	Whole Stroke	Tratto intero
+	Width Mode	Modalità larghezza
+
+	Eyedropper Saturation Protection	Protezione saturazione del contagocce
+	Loop Hue Slider	Cursore tonalità ciclico
+	Translucent Selection	Selezione traslucida
+
+	Primary Brush	Pennello principale
+	Secondary Brush	Pennello secondario
+	Color Output	Deposito colore

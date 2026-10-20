@@ -3833,3 +3833,101 @@ curves	Smooth	Wygładź
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Kotwica: Opóźnienie
+	Anchor Smooth	Kotwica: Wygładzanie
+	Anchor X	Kotwica X
+	Anchor Y	Kotwica Y
+	Blur Jitter	Rozmycie: Wahanie
+	Blur Strength	Rozmycie: Siła
+	Canvas Material	Materiał płótna
+	Choose Pattern	Wybierz wzorek
+	Color Attributes	Atrybuty koloru
+	Complementary Color	Kolor dopełniający
+	Concentration	Stężenie
+	Contour Strength	Kontur: Siła
+	Coordinates:	Współrzędne:
+	Darkening	Przyciemnianie
+	Density Jitter	Gęstość: Wahanie
+	Drag panels	Przeciągaj panele
+	Draw with the pen in the canvas to calibrate pressure response.	Rysuj piórem na płótnie, aby skalibrować reakcję na nacisk.
+	Edge Control	Sterowanie krawędziami
+	Enable Color Attributes	Włącz: Atrybuty koloru
+	Enable Inertia	Włącz: Bezwładność
+	Enable Mixing	Włącz: Mieszanie
+	Enable Pigment	Włącz: Pigment
+	Enable Stroke Motion	Włącz: Ruch pociągnięcia
+	Expansion	Rozszerzenie
+	Fixed Width	Stała szerokość
+	Flow Algorithm:	Algorytm przepływu:
+	Fluid	Ciecz
+	Gaussian Mask	Maska Gaussa
+	Grain Density	Gęstość ziarna
+	Hardness Jitter	Twardość: Wahanie
+	Highlight Brightness	Jasność odblasków
+	Highlight Ratio	Udział odblasków
+	Image Palette Color	Kolor palety obrazu
+	Import a C3 preset with a packaged canvas pattern.	Zaimportuj ustawienie C3 z dołączonym wzorkiem płótna.
+	Inertia	Bezwładność
+	Invert Blur Pressure	Odwróć nacisk: Rozmycie
+	Invert Length Pressure	Odwróć nacisk: Długość
+	Jitter	Wahanie
+	Length Jitter	Długość: Wahanie
+	Liquidity	Płynność
+	Minimum Angle	Minimum: Kąt
+	Minimum Blur	Minimum: Rozmycie
+	Minimum Count	Minimum: Licznik
+	Minimum Distance	Minimum: Odległość
+	Minimum Hardness	Minimum: Twardość
+	Minimum Length	Minimum: Długość
+	Minimum Scatter	Minimum: Rozproszenie
+	Minimum Spacing	Minimum: Odstępy
+	Minimum Strength	Minimum: Siła
+	Minimum Stroke Jitter	Minimum: Pociągnięcie: Wahanie
+	Minimum Width	Minimum: Szerokość
+	Mixing	Mieszanie
+	Mixing Strength	Mieszanie: Siła
+	Outline	Obrys
+	Output Strength	Siła wyjściowa
+	Painting Settings…	Ustawienia malowania…
+	Painting…	Malowanie…
+	Pattern:	Wzorek:
+	Pigment	Pigment
+	Pressure Controls Anchor Delay	Sterowanie naciskiem: Kotwica: Opóźnienie
+	Pressure Controls Contour	Sterowanie naciskiem: Kontur
+	Pressure Controls Fluid	Sterowanie naciskiem: Ciecz
+	Pressure for Flow	Nacisk dla przepływu
+	Primary Strength	Siła główna
+	Range Jitter	Zakres: Wahanie
+	Saturation Boost	Wzmocnienie nasycenia
+	Saturation Protection	Ochrona nasycenia
+	Saturation Record	Zapamiętywanie nasycenia
+	Secondary Strength	Siła dodatkowa
+	Show Color Values	Pokaż wartości koloru
+	Single Tip	Jedna końcówka
+	Smudge Output	Wynik rozmazywania
+	Soft Coverage	Miękkie krycie
+	Spacing Jitter	Odstępy: Wahanie
+	Strength Jitter	Siła: Wahanie
+	Stroke Jitter	Pociągnięcie: Wahanie
+	Stroke Motion	Ruch pociągnięcia
+	Stroke Smoothing	Wygładzanie pociągnięcia
+	Tilt Delay	Opóźnienie nachylenia
+	Use Grain Parameters	Użyj: Parametry ziarna
+	Use Pressure Curve	Użyj: Krzywa nacisku
+	Use Sampled Pattern	Użyj: Pobrany wzorek
+	Use Wet Edge Parameters	Użyj: Parametry mokrych krawędzi
+	Use the eyedropper on the canvas to sample a pattern.	Użyj kroplomierza na płótnie, aby pobrać wzorek.
+	Water	Woda
+	Watercolor 2	Akwarela 2
+	Wet Edge Mode	Tryb mokrych krawędzi
+	Whole Stroke	Całe pociągnięcie
+	Width Mode	Tryb szerokości
+
+	Eyedropper Saturation Protection	Ochrona nasycenia kroplomierza
+	Loop Hue Slider	Zapętlony suwak barwy
+	Translucent Selection	Półprzezroczyste zaznaczenie
+
+	Primary Brush	Pędzel główny
+	Secondary Brush	Pędzel dodatkowy
+	Color Output	Nakładanie koloru

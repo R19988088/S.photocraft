@@ -52,7 +52,15 @@ fn save_brush(app: &mut PhotocraftApp, tool: Tool, brush: BrushSettings) {
 /// The session's own brush fields, which a tool swap never carries: the colours, the erase flag
 /// and the stroke seed (a stroke's replay seed is the command's, not the tool's).
 fn session_fields(current: &BrushSettings, brush: &BrushSettings) -> BrushSettings {
-    BrushSettings { color: current.color, background: current.background, erase: current.erase, seed: current.seed, ..brush.clone() }
+    BrushSettings {
+        color: current.color,
+        background: current.background,
+        erase: current.erase,
+        seed: current.seed,
+        pattern_enabled: current.pattern_enabled,
+        sampled_pattern: current.sampled_pattern.clone(),
+        ..brush.clone()
+    }
 }
 
 /// A tool's brush as it starts out (Reset Tool, #2825): the default brush at Photoshop's
@@ -525,6 +533,20 @@ mod tests {
         app.run("prefs.set", json!({"path": "tools.rightClickWithPaintingTools", "value": "brushPicker"})).unwrap();
         assert!(!pointer_secondary(&mut app, &egui::Context::default(), true, egui::Modifiers::NONE, [0.0, 0.0]));
         assert!(app.ui.brush_picker.is_some() && !app.secondary_erase);
+    }
+
+    #[test]
+    fn sampled_color_source_survives_tool_switches() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width":8,"height":8,"background":"white"})).unwrap();
+        app.run("document.samplePattern", json!({"x":4,"y":4,"size":4})).unwrap();
+        let patch = app.session.tools.brush.sampled_pattern.clone();
+        for tool in [Tool::Brush, Tool::Eraser, Tool::Brush] {
+            app.ui.tool = tool;
+            sync_tool_brush(&mut app);
+            assert!(app.session.tools.brush.pattern_enabled);
+            assert_eq!(app.session.tools.brush.sampled_pattern, patch);
+        }
     }
 
     #[test]

@@ -57,23 +57,34 @@ pub(crate) const MAX_COORD: f64 = 1_000_000.0;
 /// objects `{"x":…, "y":…, "pressure":…, "tiltX":…, …, "time":…}`.
 pub fn parse_points(p: &Value, cmd: &str) -> Result<Vec<StrokePoint>> {
     let arr = p.get("points").and_then(Value::as_array).ok_or_else(|| bad(cmd, "missing `points`"))?;
-    let pts: Vec<StrokePoint> = arr
-        .iter()
-        .filter_map(|v| match v {
+    let mut pts = Vec::with_capacity(arr.len());
+    for (index, v) in arr.iter().enumerate() {
+        let point = match v {
             Value::Array(a) => {
                 let g = |i: usize| a.get(i).and_then(Value::as_f64);
-                let mut sp = StrokePoint::new(g(0)?, g(1)?, g(2).unwrap_or(1.0) as f32);
+                let x = g(0).ok_or_else(|| bad(cmd, format!("point {index} is missing x")))?;
+                let y = g(1).ok_or_else(|| bad(cmd, format!("point {index} is missing y")))?;
+                let mut sp = StrokePoint::new(x, y, g(2).unwrap_or(1.0) as f32);
                 sp.tilt_x = g(3).unwrap_or(0.0) as f32;
                 sp.tilt_y = g(4).unwrap_or(0.0) as f32;
                 sp.rotation = g(5).unwrap_or(0.0) as f32;
                 sp.time = g(6).unwrap_or(0.0);
                 sp.wheel = g(7).unwrap_or(1.0) as f32;
-                Some(sp)
+                sp.is_pen =
+                    a.get(8).and_then(Value::as_bool).unwrap_or_else(|| g(8).map_or(sp.pressure != 1.0 || sp.tilt_x != 0.0 || sp.tilt_y != 0.0, |v| v > 0.5));
+                sp
             }
-            Value::Object(_) => serde_json::from_value(v.clone()).ok(),
-            _ => None,
-        })
-        .collect();
+            Value::Object(object) => {
+                if !object.get("x").and_then(Value::as_f64).is_some_and(f64::is_finite) || !object.get("y").and_then(Value::as_f64).is_some_and(f64::is_finite)
+                {
+                    return Err(bad(cmd, format!("point {index} is missing finite x/y")));
+                }
+                serde_json::from_value(v.clone()).map_err(|_| bad(cmd, format!("point {index} is invalid")))?
+            }
+            _ => return Err(bad(cmd, format!("point {index} must be an array or object"))),
+        };
+        pts.push(point);
+    }
     if pts.is_empty() {
         return Err(bad(cmd, "`points` is empty"));
     }
@@ -128,12 +139,35 @@ pub fn merge_brush(base: &BrushSettings, patch: &Value, cmd: &str) -> Result<Bru
         true
     };
     let mut light = base.clone();
+    let canvas_pattern = (!touches(&["canvasMaterial", "pattern"])).then(|| light.canvas_material.as_mut().map(|m| std::mem::take(&mut m.pattern)));
     let tip = (!touches(&["tip"])).then(|| std::mem::take(&mut light.tip));
     let dual_tip = (!touches(&["dualBrush", "tip"])).then(|| std::mem::take(&mut light.dual_brush.tip));
     let pattern = (!touches(&["texture", "pattern"])).then(|| std::mem::take(&mut light.texture.pattern));
+    let sampled = (!touches(&["sampledPattern"])).then(|| light.sampled_pattern.take());
+    let secondary = if !touches(&["dualBrush", "fullParameters"]) {
+        Some(light.dual_brush.full_parameters.take())
+    } else if let (Some(base), Some(patch)) = (base.dual_brush.full_parameters.as_deref(), patch.pointer("/dualBrush/fullParameters").filter(|v| v.is_object()))
+    {
+        let merged = merge_brush(base, patch, cmd)?;
+        light.dual_brush.full_parameters = None;
+        Some(Some(Box::new(merged)))
+    } else {
+        None
+    };
     let mut v = serde_json::to_value(&light).map_err(|e| bad(cmd, e.to_string()))?;
     merge(&mut v, patch);
     let mut out: BrushSettings = serde_json::from_value(v).map_err(|e| bad(cmd, format!("invalid brush: {e}")))?;
+    if let Some(Some(pattern)) = canvas_pattern
+        && let Some(material) = out.canvas_material.as_mut()
+    {
+        material.pattern = pattern;
+    }
+    if let Some(secondary) = secondary {
+        out.dual_brush.full_parameters = secondary;
+    }
+    if let Some(pattern) = sampled {
+        out.sampled_pattern = pattern;
+    }
     if let Some(t) = tip {
         out.tip = t;
     }
@@ -148,14 +182,81 @@ pub fn merge_brush(base: &BrushSettings, patch: &Value, cmd: &str) -> Result<Bru
         out.size = base.size;
         out.resize_with_dual_brush(new_size);
     }
+    disable_build_up(&mut out);
     Ok(out)
+}
+
+fn disable_build_up(b: &mut BrushSettings) {
+    b.build_up = false;
+    if let Some(second) = b.dual_brush.full_parameters.as_deref_mut() {
+        disable_build_up(second);
+    }
 }
 
 /// Rejects brush sizes and Scatter amounts outside their documented ranges, before a brush is
 /// stored or painted with.
 pub(crate) fn validate_brush(brush: &BrushSettings, cmd: &str) -> Result<()> {
+    let unit = |v: f32| v.is_finite() && (0.0..=1.0).contains(&v);
+    if ![brush.saturation_preserve_output, brush.saturation_record_strength].into_iter().all(unit) {
+        return Err(bad(cmd, "saturation strengths must be 0..1"));
+    }
+    if brush.pigment.as_ref().is_some_and(|p| !p.is_valid()) {
+        return Err(bad(cmd, "invalid pigment material settings"));
+    }
+    if brush.contour.as_ref().is_some_and(|p| !p.is_valid()) {
+        return Err(bad(cmd, "invalid secondary contour settings"));
+    }
+    if brush.canvas_material.as_ref().is_some_and(|p| !p.is_valid()) {
+        return Err(bad(cmd, "invalid canvas material settings"));
+    }
+    if !(1..=2).contains(&brush.flow_algorithm_version) {
+        return Err(bad(cmd, "flow algorithm version must be 1 or 2"));
+    }
+    let m = &brush.motion;
+    if ![m.anchor_delay, m.anchor_smooth, m.smoothing, m.tilt_delay].into_iter().all(unit)
+        || ![m.anchor_point_x, m.anchor_point_y].into_iter().all(|v| v.is_finite() && (-1.0..=1.0).contains(&v))
+        || !unit(brush.inertia.amount)
+        || !brush.inertia.min_distance.is_finite()
+        || brush.inertia.min_distance < 0.
+    {
+        return Err(bad(cmd, "invalid stroke motion settings"));
+    }
+    let m = &brush.mix_settings;
+    if ![m.strength, m.length, m.concentration, m.water, m.smooth, m.output_strength, m.blur_strength].into_iter().all(unit)
+        || !m.quality.is_finite()
+        || !(1.0..=16.0).contains(&m.quality)
+        || [m.mix_pressure_curve.as_ref(), m.blur_pressure_curve.as_ref()].into_iter().flatten().any(|c| !c.is_valid())
+        || m.blur_color_target.is_some_and(|rgba| !rgba.into_iter().all(unit))
+    {
+        return Err(bad(cmd, "invalid brush transport settings"));
+    }
+    let c = &brush.color_dynamics;
+    if ![c.hue_minimum, c.saturation_minimum, c.brightness_minimum, c.purity_minimum].into_iter().all(unit) {
+        return Err(bad(cmd, "colour dynamics minimum must be 0..1"));
+    }
     if !brush.pigment_mix_strength.is_finite() || !(0.0..=1.0).contains(&brush.pigment_mix_strength) {
         return Err(bad(cmd, "pigment mix strength must be 0..1"));
+    }
+    for attributes in std::iter::once(&brush.color_attributes).chain(brush.dual_brush.full_parameters.as_deref().map(|b| &b.color_attributes)) {
+        for strength in [attributes.blend_strength, attributes.color_strength] {
+            if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+                return Err(bad(cmd, "colour attribute strength must be 0..1"));
+            }
+        }
+    }
+    if brush.sampled_pattern.as_ref().is_some_and(|p| !p.is_valid()) {
+        return Err(bad(cmd, "invalid sampled colour pattern"));
+    }
+    for strength in [brush.dual_brush.primary_strength, brush.dual_brush.secondary_strength, brush.dual_brush.opacity, brush.dual_brush.flow] {
+        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+            return Err(bad(cmd, "dual brush strength must be 0..1"));
+        }
+    }
+    if let Some(secondary) = &brush.dual_brush.full_parameters {
+        if secondary.dual_brush.full_parameters.is_some() || secondary.dual_brush.enabled {
+            return Err(bad(cmd, "a secondary brush cannot contain another dual brush"));
+        }
+        validate_brush(secondary, cmd)?;
     }
     let max = photocraft_paint::MAX_BRUSH_SIZE;
     if !brush.size.is_finite() || brush.size > max {
@@ -164,17 +265,20 @@ pub(crate) fn validate_brush(brush: &BrushSettings, cmd: &str) -> Result<()> {
     if brush.dual_brush.enabled && (!brush.dual_brush.size.is_finite() || brush.dual_brush.size > max) {
         return Err(bad(cmd, format!("dual brush size must be finite and at most {max} px")));
     }
-    // Scatter may exceed 1 (100 %) but not the 1000 % maximum: a huge amount pushed dab centres to
+    // Scatter uses the C3 or legacy maximum: an unbounded amount pushed dab centres to
     // infinity (#977). `{:?}` keeps 1e38 short and shows infinity as `inf`.
-    let scatter_max = photocraft_paint::MAX_SCATTER;
+    let scatter_max = if brush.c3_tip_math { photocraft_paint::brush::MAX_C3_SCATTER } else { photocraft_paint::MAX_SCATTER };
+    if brush.scattering.minimum_count.is_some_and(|n| !n.is_finite() || !(1.0..=16.0).contains(&n)) {
+        return Err(bad(cmd, "minimum scatter count must be between 1 and 16"));
+    }
     let in_range = |v: f32| (0.0..=scatter_max).contains(&v);
     let sc = brush.scattering.scatter.jitter;
     if brush.scattering.enabled && !in_range(sc) {
-        return Err(bad(cmd, format!("scatter amount {sc:?} is out of range: it must be between 0 and {scatter_max} (1000 %)")));
+        return Err(bad(cmd, format!("scatter amount {sc:?} is out of range: it must be between 0 and {scatter_max}")));
     }
     let ds = brush.dual_brush.scatter;
     if brush.dual_brush.enabled && !in_range(ds) {
-        return Err(bad(cmd, format!("dual brush scatter amount {ds:?} is out of range: it must be between 0 and {scatter_max} (1000 %)")));
+        return Err(bad(cmd, format!("dual brush scatter amount {ds:?} is out of range: it must be between 0 and {scatter_max}")));
     }
     for grain in [&brush.grain, &brush.dual_brush.grain].into_iter().flatten() {
         for (name, value, max) in [
@@ -247,12 +351,22 @@ pub fn resolve_brush(s: &Session, p: &Value, cmd: &str) -> Result<BrushSettings>
     b.color = color(p.get("color"), s.tools.foreground);
     b.color_cmyk = s.tools.picked_cmyk([b.color[0], b.color[1], b.color[2]]).map(|k| ([b.color[0], b.color[1], b.color[2]], k));
     b.background = s.tools.background;
-    b.pigment_mix_strength = s.prefs().painting.pigment_mix_strength / 100.0;
+    if b.pattern_enabled && !flag(p, "erase", false) && b.sampled_pattern.is_none() {
+        return Err(bad(cmd, "sample a pattern with the eyedropper before painting"));
+    }
+    // Brush colour deposition is a tool property, even when an old preset disabled it.
+    if cmd == "paint.stroke" {
+        b.mix_settings.color_output = true;
+        if let Some(secondary) = b.dual_brush.full_parameters.as_mut() {
+            secondary.mix_settings.color_output = true;
+        }
+    }
     b.erase = flag(p, "erase", false);
     b.seed = match p.get("seed").and_then(Value::as_u64) {
         Some(v) => v,
         None => photocraft_paint::rng::seed_from_bytes(p.get("points").map(|v| v.to_string()).unwrap_or_default().as_bytes()),
     };
+    disable_build_up(&mut b);
     validate_brush(&b, cmd)?;
     Ok(b)
 }
@@ -807,6 +921,8 @@ fn presets_save(s: &mut Session, p: &Value) -> Result<Value> {
         Some(patch) => merge_brush(&s.tools.brush, patch, cmd)?,
         None => s.tools.brush.clone(),
     };
+    disable_build_up(&mut brush);
+    validate_brush(&brush, cmd)?;
     // The New Brush Preset dialog's boxes; without them the preset captures what it always did.
     let captures = PresetCaptures { size: flag(p, "captureSize", true), tool_settings: flag(p, "toolSettings", true), color: flag(p, "color", false) };
     if captures.color {
@@ -990,6 +1106,7 @@ pub(crate) fn set_brush(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     b = merge_brush(&b, &patch, cmd)?;
+    disable_build_up(&mut b);
     validate_brush(&b, cmd)?;
     // The picked preset stays "the current brush" across later edits, so `brush.presets.update`
     // knows what to overwrite. Only once the brush is accepted: a failed call leaves no state
@@ -1041,9 +1158,20 @@ pub fn remember_brush(s: &mut Session) {
 /// externalizes it; see [`ref_tip`]), so the previous remembered brush stands.
 fn remembered_brush(s: &Session) -> Option<Value> {
     let b = &s.tools.brush;
-    let (tip, dual, pattern) = (ref_tip(&b.tip)?, ref_tip(&b.dual_brush.tip)?, ref_pattern(&b.texture.pattern)?);
-    let mut c = b.clone();
-    (c.tip, c.dual_brush.tip, c.texture.pattern) = (tip, dual, pattern);
+    fn without_bitmaps(b: &BrushSettings) -> Option<BrushSettings> {
+        let mut c = b.clone();
+        c.tip = ref_tip(&b.tip)?;
+        c.dual_brush.tip = ref_tip(&b.dual_brush.tip)?;
+        c.texture.pattern = ref_pattern(&b.texture.pattern)?;
+        if let Some(m) = c.canvas_material.as_mut() {
+            m.pattern = ref_pattern(&m.pattern)?;
+        }
+        if let Some(second) = b.dual_brush.full_parameters.as_deref() {
+            c.dual_brush.full_parameters = Some(Box::new(without_bitmaps(second)?));
+        }
+        Some(c)
+    }
+    let c = without_bitmaps(b)?;
     Some(json!({ "preset": s.tools.current_preset.clone(), "brush": serde_json::to_value(&c).ok()? }))
 }
 
@@ -1083,24 +1211,37 @@ fn ref_pattern(p: &Pattern) -> Option<Pattern> {
 
 /// The brush as JSON with the bitmaps (sampled tips, pattern tiles) that `skip` names replaced by
 /// placeholders: they can be megabytes of base64, and skipped ones are equal on both sides.
-fn light_json(b: &BrushSettings, skip: (bool, bool, bool)) -> Value {
-    let mut c = b.clone();
-    if skip.0 {
-        c.tip = TipShape::Round;
+fn light_json(b: &BrushSettings, peer: &BrushSettings) -> Value {
+    fn lighten(b: &mut BrushSettings, peer: &BrushSettings) {
+        if b.tip == peer.tip {
+            b.tip = TipShape::Round;
+        }
+        if b.dual_brush.tip == peer.dual_brush.tip {
+            b.dual_brush.tip = TipShape::Round;
+        }
+        if b.texture.pattern == peer.texture.pattern {
+            b.texture.pattern = Default::default();
+        }
+        if let (Some(a), Some(other)) = (b.canvas_material.as_mut(), peer.canvas_material.as_ref())
+            && a.pattern == other.pattern
+        {
+            a.pattern = Default::default();
+        }
+        if b.sampled_pattern == peer.sampled_pattern {
+            b.sampled_pattern = None;
+        }
+        if let (Some(second), Some(other)) = (b.dual_brush.full_parameters.as_deref_mut(), peer.dual_brush.full_parameters.as_deref()) {
+            lighten(second, other);
+        }
     }
-    if skip.1 {
-        c.dual_brush.tip = TipShape::Round;
-    }
-    if skip.2 {
-        c.texture.pattern = photocraft_paint::Pattern::default();
-    }
-    serde_json::to_value(&c).unwrap_or(Value::Null)
+    let mut light = b.clone();
+    lighten(&mut light, peer);
+    serde_json::to_value(light).unwrap_or(Value::Null)
 }
 
 /// Fields of `new` that differ from `old`, nested objects diffed key by key: the minimal
 /// `tools.setBrush` `brush` patch that turns `old` into `new` (`{}` when nothing changed).
 pub fn brush_patch(old: &BrushSettings, new: &BrushSettings) -> Value {
-    let skip = (old.tip == new.tip, old.dual_brush.tip == new.dual_brush.tip, old.texture.pattern == new.texture.pattern);
     fn diff(a: &Value, b: &Value) -> Option<Value> {
         match (a, b) {
             (Value::Object(ao), Value::Object(bo)) => {
@@ -1123,7 +1264,7 @@ pub fn brush_patch(old: &BrushSettings, new: &BrushSettings) -> Value {
             _ => (a != b).then(|| b.clone()),
         }
     }
-    diff(&light_json(old, skip), &light_json(new, skip)).unwrap_or_else(|| json!({}))
+    diff(&light_json(old, new), &light_json(new, old)).unwrap_or_else(|| json!({}))
 }
 
 /// Journal hook ([`Session::execute`]): consecutive `tools.setBrush` calls with the same

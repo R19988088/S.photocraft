@@ -4151,3 +4151,101 @@ cameraRaw	Yellow	Sárga
 	Increase Brush Hardness	Ecsetkeménység növelése
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Horgony: Késleltetés
+	Anchor Smooth	Horgony: Simítás
+	Anchor X	Horgony X
+	Anchor Y	Horgony Y
+	Blur Jitter	Elmosás: Ingadozás
+	Blur Strength	Elmosás: Erősség
+	Canvas Material	Vászon anyaga
+	Choose Pattern	Minta kiválasztása
+	Color Attributes	Színtulajdonságok
+	Complementary Color	Kiegészítő szín
+	Concentration	Koncentráció
+	Contour Strength	Kontúr: Erősség
+	Coordinates:	Koordináták:
+	Darkening	Sötétítés
+	Density Jitter	Sűrűség: Ingadozás
+	Drag panels	Panelek húzása
+	Draw with the pen in the canvas to calibrate pressure response.	Rajzoljon tollal a vászonra a nyomásérzékelés kalibrálásához.
+	Edge Control	Élvezérlés
+	Enable Color Attributes	Engedélyezés: Színtulajdonságok
+	Enable Inertia	Engedélyezés: Tehetetlenség
+	Enable Mixing	Engedélyezés: Keverés
+	Enable Pigment	Engedélyezés: Pigment
+	Enable Stroke Motion	Engedélyezés: Ecsetvonás mozgása
+	Expansion	Kiterjesztés
+	Fixed Width	Rögzített szélesség
+	Flow Algorithm:	Áramlási algoritmus:
+	Fluid	Folyadék
+	Gaussian Mask	Gauss-maszk
+	Grain Density	Szemcsesűrűség
+	Hardness Jitter	Keménység: Ingadozás
+	Highlight Brightness	Csúcsfények fényereje
+	Highlight Ratio	Csúcsfények aránya
+	Image Palette Color	Képpaletta színe
+	Import a C3 preset with a packaged canvas pattern.	Importáljon vászonmintát tartalmazó C3-előbeállítást.
+	Inertia	Tehetetlenség
+	Invert Blur Pressure	Nyomás megfordítása: Elmosás
+	Invert Length Pressure	Nyomás megfordítása: Hossz
+	Jitter	Ingadozás
+	Length Jitter	Hossz: Ingadozás
+	Liquidity	Folyékonyság
+	Minimum Angle	Minimum: Szög
+	Minimum Blur	Minimum: Elmosás
+	Minimum Count	Minimum: Darabszám
+	Minimum Distance	Minimum: Távolság
+	Minimum Hardness	Minimum: Keménység
+	Minimum Length	Minimum: Hossz
+	Minimum Scatter	Minimum: Szóródás
+	Minimum Spacing	Minimum: Térköz
+	Minimum Strength	Minimum: Erősség
+	Minimum Stroke Jitter	Minimum: Ecsetvonás: Ingadozás
+	Minimum Width	Minimum: Szélesség
+	Mixing	Keverés
+	Mixing Strength	Keverés: Erősség
+	Outline	Körvonal
+	Output Strength	Kimeneti erősség
+	Painting Settings…	Festési beállítások…
+	Painting…	Festés…
+	Pattern:	Minta:
+	Pigment	Pigment
+	Pressure Controls Anchor Delay	Nyomásvezérlés: Horgony: Késleltetés
+	Pressure Controls Contour	Nyomásvezérlés: Kontúr
+	Pressure Controls Fluid	Nyomásvezérlés: Folyadék
+	Pressure for Flow	Nyomásvezérelt áramlás
+	Primary Strength	Elsődleges erősség
+	Range Jitter	Tartomány: Ingadozás
+	Saturation Boost	Telítettség növelése
+	Saturation Protection	Telítettség védelme
+	Saturation Record	Telítettség rögzítése
+	Secondary Strength	Másodlagos erősség
+	Show Color Values	Színértékek megjelenítése
+	Single Tip	Egyetlen hegy
+	Smudge Output	Maszatolás kimenete
+	Soft Coverage	Lágy fedés
+	Spacing Jitter	Térköz: Ingadozás
+	Strength Jitter	Erősség: Ingadozás
+	Stroke Jitter	Ecsetvonás: Ingadozás
+	Stroke Motion	Ecsetvonás mozgása
+	Stroke Smoothing	Ecsetvonás simítása
+	Tilt Delay	Dőlés késleltetése
+	Use Grain Parameters	Használat: Szemcseparaméterek
+	Use Pressure Curve	Használat: Nyomásgörbe
+	Use Sampled Pattern	Használat: Mintavételezett minta
+	Use Wet Edge Parameters	Használat: Nedves szélek paraméterei
+	Use the eyedropper on the canvas to sample a pattern.	A pipettával vegyen mintát a vászonról.
+	Water	Víz
+	Watercolor 2	Akvarell 2
+	Wet Edge Mode	Nedves szélek módja
+	Whole Stroke	Teljes ecsetvonás
+	Width Mode	Szélesség módja
+
+	Eyedropper Saturation Protection	Pipetta telítettségvédelme
+	Loop Hue Slider	Körbefutó színárnyalat-csúszka
+	Translucent Selection	Áttetsző kijelölés
+
+	Primary Brush	Elsődleges ecset
+	Secondary Brush	Másodlagos ecset
+	Color Output	Színkimenet

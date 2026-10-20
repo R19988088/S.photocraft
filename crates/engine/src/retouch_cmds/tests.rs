@@ -2144,3 +2144,40 @@ fn periodic_clone_interior_matches_ordinary_brush_masks_and_transparency() {
         }
     }
 }
+
+#[test]
+fn c3_smudge_shared_lanes_match_live_and_committed_pixels() {
+    use photocraft_paint::transport::MixAlgorithm;
+    for algorithm in [MixAlgorithm::V1, MixAlgorithm::V2, MixAlgorithm::V3] {
+        let mut s = session(96, 48, 32, "rgb");
+        paint_layer(&mut s, |x, _| if x < 30 { [1.0, 0.0, 0.0, 1.0] } else { [1.0; 4] });
+        s.tools.brush.mix_settings.algorithm = algorithm;
+        s.tools.brush.mix_settings.length = 0.8;
+        s.tools.brush.dual_brush.enabled = true;
+        s.tools.brush.dual_brush.mode = photocraft_paint::MaskMode::Normal;
+        let mut secondary = BrushSettings { size: 6.0, pressure_size: false, ..Default::default() };
+        secondary.mix_settings.algorithm = algorithm;
+        secondary.mix_settings.strength = 0.8;
+        s.tools.brush.dual_brush.full_parameters = Some(Box::new(secondary));
+        let points = [[20.0, 24.0], [35.0, 24.0], [60.0, 24.0], [75.0, 24.0]];
+        let opts = |points: &[[f64; 2]]| json!({"points":points,"size":12,"hardness":100,"strength":80});
+        let mut live = LiveDab::begin(&s, "paint.smudge", &opts(&points[..1])).unwrap();
+        assert!(live.shared_transport);
+        live.push(&points[1..].iter().map(|p| StrokePoint::new(p[0], p[1], 1.0)).collect::<Vec<_>>()).unwrap();
+        live.renderer.finish();
+        live.push(&[]).unwrap();
+        s.execute("paint.smudge", opts(&points)).unwrap();
+        let id = s.active().unwrap().active_layer.unwrap();
+        let shown = live.doc.layer(id).unwrap().surface().unwrap();
+        let committed = s.active().unwrap().doc.layer(id).unwrap().surface().unwrap();
+        let mut changed = false;
+        for y in 0..48 {
+            for x in 0..96 {
+                let (a, b) = (shown.rgba(x, y), committed.rgba(x, y));
+                assert!(a.iter().zip(b).all(|(a, b)| (*a - b).abs() < 1e-5), "{algorithm:?}: live differs at {x},{y}");
+                changed |= x > 30 && b[1] < 0.99;
+            }
+        }
+        assert!(changed, "{algorithm:?}: transport must move colour across the edge");
+    }
+}

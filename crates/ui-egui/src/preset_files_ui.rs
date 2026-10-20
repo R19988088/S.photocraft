@@ -15,7 +15,7 @@ use crate::PhotocraftApp;
 /// the Swatches panel through [`crate::swatches_ui::import_bytes`]).
 /// `.psp` is Photoshop's live `Keyboard Shortcuts.psp` (the same XML as a `.kys`); other `.psp`
 /// settings files are refused with a clear message.
-pub const PRESET_EXTS: &[&str] = &["abr", "grd", "pat", "aco", "ase", "kys", "psp"];
+pub const PRESET_EXTS: &[&str] = &["abr", "c3", "c3brushes", "ssspreset", "zip", "json", "grd", "pat", "aco", "ase", "kys", "psp"];
 
 fn ext(name: &str) -> String {
     std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
@@ -32,7 +32,7 @@ pub const BRUSH_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff", "ps
 /// Brushes panel / brush preset picker › Import Brushes…: an `.abr` joins the brush library as a
 /// group (as File › Open does), an image file becomes a new brush preset with that image as its tip.
 pub fn import_brushes(app: &mut PhotocraftApp) -> Result<Value, String> {
-    let exts: Vec<&str> = std::iter::once("abr").chain(BRUSH_IMAGE_EXTS.iter().copied()).collect();
+    let exts: Vec<&str> = ["abr", "c3", "c3brushes", "ssspreset", "zip", "json"].into_iter().chain(BRUSH_IMAGE_EXTS.iter().copied()).collect();
     app.pick_file_bytes_filtered(&exts, |app, name, bytes| match open(app, &name, &bytes) {
         Some(r) => r.map(|()| Value::Null),
         None => import_brush_image(app, &name, &bytes),
@@ -86,6 +86,10 @@ fn source(name: &str, bytes: &[u8]) -> Value {
 /// Import a preset file; `None` when `name` isn't one.
 pub fn open(app: &mut PhotocraftApp, name: &str, bytes: &[u8]) -> Option<Result<(), String>> {
     let (cmd, what) = match ext(name).as_str() {
+        "c3" | "c3brushes" | "ssspreset" | "zip" => ("brush.presets.importC3", "brushes"),
+        "json" if serde_json::from_slice::<Value>(bytes).ok().is_some_and(|v| v.get("schemaVersion").is_some() && v.get("presets").is_some()) => {
+            ("brush.presets.importC3", "brushes")
+        }
         "abr" => ("brush.presets.importAbr", "brushes"),
         "grd" => ("gradient.presets.importGrd", "gradients"),
         "pat" => ("pattern.import", "patterns"),
@@ -139,11 +143,21 @@ mod tests {
     fn recognises_preset_files() {
         assert!(is_preset_file("/a/b/Set.ABR"));
         assert!(is_preset_file("sunsets.grd"));
+        assert!(is_preset_file("C3笔刷.SSSPRESET"));
         assert!(is_preset_file("Brand.ACO"));
         assert!(is_preset_file("exchange.ase"));
         assert!(is_preset_file("Debaser-ColourLibrary-Part6.PAT"));
         assert!(!is_preset_file("photo.psd"));
         assert!(!is_preset_file("abr"));
+    }
+
+    #[test]
+    fn c3_ssspreset_filename_imports_and_selects_brush() {
+        let bytes = serde_json::to_vec(&json!({"schemaVersion":5,"presets":[{"id":"p","name":"C3 Ink","parameters":{"size":32}}]})).unwrap();
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        open(&mut app, "Ink.ssspreset", &bytes).unwrap().unwrap();
+        assert_eq!(app.session.tools.current_preset.as_deref(), Some("C3 Ink"));
+        assert_eq!(app.session.tools.brush.size, 32.);
     }
 
     /// Import Brushes… with a PNG: the image becomes the current brush's tip (TOOL-213-12).

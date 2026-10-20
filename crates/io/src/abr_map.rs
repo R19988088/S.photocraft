@@ -379,6 +379,7 @@ impl Mapper<'_> {
                 flip_y_jitter: boolean(d, "flipY").unwrap_or(false),
                 tilt_scale: pct(d, "tiltScale").unwrap_or(0.0).clamp(0.0, 2.0),
                 brush_projection: boolean(d, "brushProjection").unwrap_or(false),
+                stroke_jitter: Default::default(),
             };
         }
         // Scattering.

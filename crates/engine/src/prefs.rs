@@ -1638,8 +1638,12 @@ impl Session {
 
     /// Change preferences and apply the engine-side ones.
     pub fn edit_prefs<R>(&mut self, f: impl FnOnce(&mut Preferences) -> R) -> R {
+        let pigment = self.prefs().painting.pigment_mix_strength;
         let r = self.prefs.edit(f);
         self.apply_prefs();
+        if pigment != self.prefs().painting.pigment_mix_strength {
+            self.tools.brush.pigment_mix_strength = self.prefs().painting.pigment_mix_strength / 100.0;
+        }
         r
     }
 
@@ -1705,6 +1709,7 @@ impl Session {
             self.color.settings = serde_json::from_value(c).unwrap_or_default();
             photocraft_compose::psblend::set_text_gamma(self.color.settings.blend_text_gamma);
         }
+        self.tools.brush.pigment_mix_strength = prefs.painting.pigment_mix_strength / 100.0;
         self.prefs.edit(|p| *p = prefs);
         if let Some(v) = presets {
             self.load_presets_json(v);
@@ -1885,12 +1890,16 @@ fn prefs_set(s: &mut Session, p: &Value) -> Result<Value> {
     // `colorSettings.blendTextGamma` lives in the compositor too, as `edit.colorSettings` sets it.
     photocraft_compose::psblend::set_text_gamma(s.color.settings.blend_text_gamma);
     s.apply_prefs();
+    if saved_prefs.painting.pigment_mix_strength != s.prefs().painting.pigment_mix_strength {
+        s.tools.brush.pigment_mix_strength = s.prefs().painting.pigment_mix_strength / 100.0;
+    }
     let view = s.prefs_view();
     let out: Map<String, Value> = changes.iter().map(|(k, _)| (k.clone(), get_path(&view, k).cloned().unwrap_or(Value::Null))).collect();
     Ok(Value::Object(out))
 }
 
 fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
+    let pigment = s.prefs().painting.pigment_mix_strength;
     let path = p.get("path").or_else(|| p.get("section")).and_then(Value::as_str);
     match path {
         Some("colorSettings") => s.color.settings = Default::default(),
@@ -1915,6 +1924,9 @@ fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
     s.prefs.edit(|_| ());
     photocraft_compose::psblend::set_text_gamma(s.color.settings.blend_text_gamma);
     s.apply_prefs();
+    if pigment != s.prefs().painting.pigment_mix_strength {
+        s.tools.brush.pigment_mix_strength = s.prefs().painting.pigment_mix_strength / 100.0;
+    }
     if path.is_some_and(|path| keyed(path).is_some()) {
         // The removed override is absent, so reading its old path would report an error.
         Ok(Value::Null)

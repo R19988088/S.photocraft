@@ -2891,4 +2891,108 @@ curves	Smooth	平滑
 	Translucent Selection	选区半透明
 	Complementary Color	互补色
 	Image Palette Color	图片色板颜色
-Painting…	绘画…
+	Painting…	绘画…
+
+	Anchor Delay	锚点延迟
+	Anchor Smooth	锚点平滑
+	Anchor X	锚点 X
+	Anchor Y	锚点 Y
+	Blur Jitter	模糊抖动
+	Blur Strength	模糊强度
+	Canvas Material	画布材质
+	Concentration	颜料浓度
+	Contour Strength	轮廓强度
+	Coordinates:	坐标模式：
+	Enable Color Attributes	启用颜色属性
+	Enable Inertia	启用惯性
+	Enable Mixing	启用混色
+	Enable Pigment	启用颜料
+	Flow Algorithm:	流量算法：
+	Fluid	流体
+	Gaussian Mask	高斯蒙版
+	Grain Size	颗粒大小
+	Hardness Jitter	硬度抖动
+	Highlight Brightness	高光亮度
+	Highlight Ratio	高光比例
+	Highlight Strength	高光强度
+	Inertia	惯性
+	Invert Blur Pressure	反转模糊压感
+	Invert Length Pressure	反转长度压感
+	Jitter	抖动
+	Length	长度
+	Length Jitter	长度抖动
+	Liquidity	流动性
+	Minimum Angle	最小角度
+	Minimum Blur	最小模糊
+	Minimum Count	最小数量
+	Minimum Distance	最小距离
+	Minimum Hardness	最小硬度
+	Minimum Length	最小长度
+	Minimum Scatter	最小散布
+	Minimum Spacing	最小间距
+	Minimum Stroke Jitter	最小笔触抖动
+	Mixing	混色
+	Output Strength	输出强度
+	Pattern:	图案：
+	Pigment	颜料
+	Pressure Controls Anchor Delay	压感控制锚点延迟
+	Pressure Controls Contour	压感控制轮廓
+	Pressure Controls Fluid	压感控制流体
+	Primary Strength	主笔刷强度
+	Range Jitter	范围抖动
+	Saturation Protection	饱和度保护
+	Saturation Record	饱和度记录
+	Secondary Strength	副笔刷强度
+	Smudge Output	涂抹输出
+	Spacing Jitter	间距抖动
+	Strength	强度
+	Strength Jitter	强度抖动
+	Stroke Jitter	笔触抖动
+	Stroke Motion	笔触运动
+	Stroke Smoothing	笔触平滑
+	Tilt Delay	倾斜延迟
+	Use Pressure Curve	使用压感曲线
+	Use Sampled Pattern	使用采样图案
+	Use the eyedropper on the canvas to sample a pattern.	使用吸管在画布上采样图案。
+	Water	水量
+	Color Attributes	颜色属性
+	Inverse Pen Pressure	反向压感
+	Speed	速度
+	Pressure Release	压力释放
+	Thickness	颜料厚度
+	Visual Thickness	视觉厚度
+	Anchor	锚点
+	Canvas Locked	锁定画布
+	Stroke Locked	锁定笔触
+	Tip Local	笔尖局部
+	Minimum Saturation	最小饱和度
+	Minimum Purity	最小纯度
+	Watercolor Burn	水彩加深
+	Spectral	光谱
+	Overlay SP	叠加 SP
+	Shine	光泽
+	Lumi Shade	明暗着色
+	Version 1	版本 1
+	Version 2	版本 2
+	Choose Pattern	选择图案
+	Import a C3 preset with a packaged canvas pattern.	导入包含画布图案的 C3 预设。
+	Round Tip	圆形笔尖
+	Sampled Tip	采样笔尖
+	Enable Stroke Motion	启用笔迹运动
+
+	Drag panels	拖动面板
+	Draw with the pen in the canvas to calibrate pressure response.	使用笔在画布上绘制以校准压感响应。
+
+	Primary Brush	主画笔
+	Secondary Brush	副画笔
+	Color Output	颜色输出
+
+# Reference brush panel categories
+brushSection	Tip	基本参数
+brushSection	Basic	形态控制
+brushSection	Motion	运笔
+brushSection	Texture	纹理
+brushSection	Color Mode	颜色属性
+brushSection	Wet Edge	湿边
+brushSection	Mix	混色
+brushSection	Pigment	颜料

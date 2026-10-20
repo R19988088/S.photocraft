@@ -22,7 +22,8 @@
 #>
 param(
   [ValidateSet('x64', 'x86', 'arm64')] [string] $Arch = 'x64',
-  [switch] $SkipBuild
+  [switch] $SkipBuild,
+  [switch] $PortableOnly
 )
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -92,6 +93,7 @@ Copy-Item (Join-Path $Bin 'photocraft.exe'), (Join-Path $Bin 'photocraft-cli.exe
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'photocraft.exe') (Join-Path $Stage 'photocraft-cli.exe')
 
 # ---- MSI ---------------------------------------------------------------------------------------
+if (-not $PortableOnly) {
 # The setup wizard's art, drawn here from the app icon so the MSI shows PhotoCraft rather than
 # WiX's stock bitmaps: a 493x58 banner across the top of the inner pages (the page title is drawn
 # over its left side, so that stays white) and a 493x312 backdrop for the Welcome and Finish pages
@@ -146,6 +148,8 @@ Invoke-Native 'MSI shortcut icon validation (ICE50)' {
 Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($Msi, '.wixpdb'))
 & (Join-Path $PSScriptRoot 'sign.ps1') $Msi
 
+}
+
 # ---- portable zip ------------------------------------------------------------------------------
 $Portable = Join-Path $TargetDir "windows-package\photocraft-$Version-windows-$Arch-portable"
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
@@ -178,4 +182,5 @@ if ($Arch -ne 'arm64' -or $HostArch -eq 'arm64') {
 } else {
   Write-Output "skipping photocraft-cli --version: an $Arch build doesn't run on this $HostArch machine"
 }
-Get-Item $Msi, $Zip | Format-Table Name, Length
+if ($PortableOnly) { Get-Item $Zip | Format-Table Name, Length }
+else { Get-Item $Msi, $Zip | Format-Table Name, Length }

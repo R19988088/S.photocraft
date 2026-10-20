@@ -138,7 +138,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 67] = [
+    pub const ALL: [Tool; 66] = [
         Tool::Move,
         Tool::Artboard,
         Tool::RectMarquee,
@@ -158,7 +158,6 @@ impl Tool {
         Tool::Count,
         Tool::Brush,
         Tool::Pencil,
-        Tool::MixerBrush,
         Tool::ColorReplacement,
         Tool::Eraser,
         Tool::BackgroundEraser,
@@ -1277,6 +1276,11 @@ pub struct UiState {
     /// Brush Settings: selected section (0 = Brush Tip Shape) and tab (0 settings, 1 Brushes).
     #[serde(default)]
     pub brush_section: usize,
+    /// Active parameter lane in Brush Settings: 0 = primary, 1 = secondary.
+    #[serde(default)]
+    pub brush_lane: usize,
+    #[serde(default)]
+    pub brush_secondary_section: usize,
     #[serde(default)]
     pub brush_tab: usize,
     /// Brushes panel: collapsed groups and the search filter.
@@ -1407,6 +1411,8 @@ impl Default for UiState {
             docking_reveal: None,
             color_panel: Default::default(),
             brush_section: 0,
+            brush_lane: 0,
+            brush_secondary_section: 0,
             brush_tab: 0,
             brushes_panel: Default::default(),
             selection_mode: 0,
@@ -1484,8 +1490,8 @@ mod tests {
         assert_eq!(Tool::from_name("Rect"), Some(Tool::RectMarquee));
         assert_eq!(Tool::from_name("RectMarquee"), Some(Tool::RectMarquee));
         assert_eq!(Tool::from_name("Eraser Tool"), Some(Tool::Eraser));
-        assert_eq!(Tool::from_name("mixerBrush"), Some(Tool::MixerBrush));
-        assert_eq!(Tool::from_name("Mixer Brush Tool"), Some(Tool::MixerBrush));
+        assert_eq!(Tool::from_name("mixerBrush"), None);
+        assert_eq!(Tool::from_name("Mixer Brush Tool"), None);
         assert_eq!(Tool::from_name("colorReplacement"), Some(Tool::ColorReplacement));
         assert_eq!(Tool::from_name("Color Replacement Tool"), Some(Tool::ColorReplacement));
         assert_eq!(Tool::from_name("redEye"), Some(Tool::RedEye));
@@ -1494,7 +1500,7 @@ mod tests {
         assert!(!Tool::RedEye.is_brushlike());
         assert_eq!(Tool::from_name("patternStamp"), Some(Tool::PatternStamp));
         assert_eq!(Tool::from_name("Pattern Stamp Tool"), Some(Tool::PatternStamp));
-        assert_eq!(Tool::ALL.len(), 67);
+        assert_eq!(Tool::ALL.len(), 66);
         assert_eq!(Tool::from_name("Vertical Type Mask Tool"), Some(Tool::VerticalTypeMask));
         assert_eq!(Tool::from_name("addAnchorPoint"), Some(Tool::AddAnchorPoint));
         assert_eq!(Tool::from_name("Delete Anchor Point Tool"), Some(Tool::DeleteAnchorPoint));

@@ -3721,3 +3721,101 @@ curves	Smooth	Làm mượt
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Neo: Độ trễ
+	Anchor Smooth	Neo: Làm mượt
+	Anchor X	Neo X
+	Anchor Y	Neo Y
+	Blur Jitter	Làm mờ: Biến thiên
+	Blur Strength	Làm mờ: Cường độ
+	Canvas Material	Chất liệu khung vẽ
+	Choose Pattern	Chọn mẫu
+	Color Attributes	Thuộc tính màu
+	Complementary Color	Màu bổ sung
+	Concentration	Nồng độ
+	Contour Strength	Đường viền: Cường độ
+	Coordinates:	Tọa độ:
+	Darkening	Làm tối
+	Density Jitter	Mật độ: Biến thiên
+	Drag panels	Kéo bảng điều khiển
+	Draw with the pen in the canvas to calibrate pressure response.	Vẽ bằng bút trên khung vẽ để hiệu chỉnh phản hồi lực nhấn.
+	Edge Control	Điều khiển cạnh
+	Enable Color Attributes	Bật: Thuộc tính màu
+	Enable Inertia	Bật: Quán tính
+	Enable Mixing	Bật: Pha trộn
+	Enable Pigment	Bật: Sắc tố
+	Enable Stroke Motion	Bật: Chuyển động nét
+	Expansion	Mở rộng
+	Fixed Width	Độ rộng cố định
+	Flow Algorithm:	Thuật toán lưu lượng:
+	Fluid	Chất lỏng
+	Gaussian Mask	Mặt nạ Gauss
+	Grain Density	Mật độ hạt
+	Hardness Jitter	Độ cứng: Biến thiên
+	Highlight Brightness	Độ sáng vùng sáng
+	Highlight Ratio	Tỷ lệ vùng sáng
+	Image Palette Color	Màu bảng màu ảnh
+	Import a C3 preset with a packaged canvas pattern.	Nhập thiết lập C3 có kèm mẫu khung vẽ.
+	Inertia	Quán tính
+	Invert Blur Pressure	Đảo lực nhấn: Làm mờ
+	Invert Length Pressure	Đảo lực nhấn: Chiều dài
+	Jitter	Biến thiên
+	Length Jitter	Chiều dài: Biến thiên
+	Liquidity	Độ lưu động
+	Minimum Angle	Tối thiểu: Góc
+	Minimum Blur	Tối thiểu: Làm mờ
+	Minimum Count	Tối thiểu: Đếm
+	Minimum Distance	Tối thiểu: Khoảng cách
+	Minimum Hardness	Tối thiểu: Độ cứng
+	Minimum Length	Tối thiểu: Chiều dài
+	Minimum Scatter	Tối thiểu: Độ phân tán
+	Minimum Spacing	Tối thiểu: Khoảng cách
+	Minimum Strength	Tối thiểu: Cường độ
+	Minimum Stroke Jitter	Tối thiểu: Nét: Biến thiên
+	Minimum Width	Tối thiểu: Chiều rộng
+	Mixing	Pha trộn
+	Mixing Strength	Pha trộn: Cường độ
+	Outline	Đường bao
+	Output Strength	Cường độ đầu ra
+	Painting Settings…	Cài đặt vẽ…
+	Painting…	Vẽ…
+	Pattern:	Mẫu:
+	Pigment	Sắc tố
+	Pressure Controls Anchor Delay	Điều khiển bằng lực nhấn: Neo: Độ trễ
+	Pressure Controls Contour	Điều khiển bằng lực nhấn: Đường viền
+	Pressure Controls Fluid	Điều khiển bằng lực nhấn: Chất lỏng
+	Pressure for Flow	Lực nhấn cho lưu lượng
+	Primary Strength	Cường độ chính
+	Range Jitter	Phạm vi: Biến thiên
+	Saturation Boost	Tăng độ bão hòa
+	Saturation Protection	Bảo vệ độ bão hòa
+	Saturation Record	Ghi độ bão hòa
+	Secondary Strength	Cường độ phụ
+	Show Color Values	Hiện giá trị màu
+	Single Tip	Một đầu bút
+	Smudge Output	Đầu ra làm nhòe
+	Soft Coverage	Độ phủ mềm
+	Spacing Jitter	Khoảng cách: Biến thiên
+	Strength Jitter	Cường độ: Biến thiên
+	Stroke Jitter	Nét: Biến thiên
+	Stroke Motion	Chuyển động nét
+	Stroke Smoothing	Làm mượt nét
+	Tilt Delay	Độ trễ độ nghiêng
+	Use Grain Parameters	Sử dụng: Tham số hạt
+	Use Pressure Curve	Sử dụng: Đường cong lực nhấn
+	Use Sampled Pattern	Sử dụng: Mẫu đã lấy
+	Use Wet Edge Parameters	Sử dụng: Tham số cạnh ướt
+	Use the eyedropper on the canvas to sample a pattern.	Dùng ống hút trên khung vẽ để lấy mẫu.
+	Water	Nước
+	Watercolor 2	Màu nước 2
+	Wet Edge Mode	Chế độ cạnh ướt
+	Whole Stroke	Toàn bộ nét
+	Width Mode	Chế độ độ rộng
+
+	Eyedropper Saturation Protection	Bảo vệ độ bão hòa của ống hút
+	Loop Hue Slider	Thanh trượt sắc độ tuần hoàn
+	Translucent Selection	Vùng chọn bán trong suốt
+
+	Primary Brush	Cọ chính
+	Secondary Brush	Cọ phụ
+	Color Output	Xuất màu

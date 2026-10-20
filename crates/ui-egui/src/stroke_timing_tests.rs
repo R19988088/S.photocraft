@@ -293,11 +293,13 @@ fn held_points(h: &mut Harness<'static, PhotocraftApp>) -> (usize, usize) {
 }
 
 #[test]
-fn a_held_airbrush_keeps_the_stroke_clock_running() {
-    let mut h = harness();
-    h.state_mut().run("tools.setBrush", json!({"buildUp": true, "smoothing": {"amount": 0.0}})).unwrap();
-    let (before, after) = held_points(&mut h);
-    assert!(after > before, "a held airbrush adds timed repeats of its point ({before} → {after})");
+fn held_buildup_is_disabled_for_all_brushes() {
+    for c3 in [true, false] {
+        let mut h = harness();
+        h.state_mut().run("tools.setBrush", json!({"brush":{"c3TipMath":c3,"buildUp":true,"smoothing":{"amount":0.0}}})).unwrap();
+        let (before, after) = held_points(&mut h);
+        assert_eq!(after, before, "timed buildup is disabled (c3TipMath={c3})");
+    }
 }
 
 #[test]
@@ -431,8 +433,9 @@ fn a_tap_over_two_frames_paints_at_the_pressure_it_reached() {
     button(&mut h, 50.0, 50.0, false);
     h.run_steps(2);
     let pts = committed_points(&h);
-    assert_eq!(pts.len(), 1, "{pts:?}");
-    assert!((pts[0][2] - 0.5).abs() < 1e-3, "the tap's peak, not its first touch: {pts:?}");
+    assert_eq!(pts.len(), 2, "first contact is painted immediately; later pressure stays in the stroke: {pts:?}");
+    assert!((pts[0][2] - 0.1).abs() < 1e-3, "the first dab is not delayed for peak pressure: {pts:?}");
+    assert!((pts[1][2] - 0.5).abs() < 1e-3, "the final contact keeps the peak, never lift zero: {pts:?}");
 }
 
 #[test]

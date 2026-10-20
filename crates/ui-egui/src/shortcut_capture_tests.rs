@@ -90,7 +90,7 @@ fn toolbar_shortcut_overrides_remove_old_keys_and_skip_removed_group_members() {
     press(&mut app, Key::B, Modifiers::NONE);
     assert_eq!(app.ui.tool, Tool::Brush, "a removed tool cannot return through group memory");
     press(&mut app, Key::B, Modifiers::SHIFT);
-    assert_eq!(app.ui.tool, Tool::MixerBrush, "Shift cycling skips a removed tool");
+    assert_eq!(app.ui.tool, Tool::ColorReplacement, "Shift cycling skips removed tools");
 
     app.run("edit.keyboardShortcuts", json!({"reset": true})).unwrap();
     app.ui.tool = Tool::Brush;
@@ -98,7 +98,7 @@ fn toolbar_shortcut_overrides_remove_old_keys_and_skip_removed_group_members() {
     assert_eq!(app.ui.tool, Tool::Pencil, "reset restores the default group");
     app.session.edit_prefs(|p| p.tools.use_shift_key_for_tool_switch = false);
     press(&mut app, Key::B, Modifiers::NONE);
-    assert_eq!(app.ui.tool, Tool::MixerBrush, "plain-key cycling still follows the preference");
+    assert_eq!(app.ui.tool, Tool::ColorReplacement, "plain-key cycling still follows the preference");
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn toolbar_shortcuts_participate_in_conflict_resolution() {
     // Remove Ctrl from the captured binding: a plain B belongs to the Brush group by default.
     h.state_mut().ui.dialog_mut(id).unwrap().fields["overrides"]["edit.search"] = json!("B");
     crate::dialogs::confirm(h.state_mut(), id).unwrap();
-    for tool in ["brush", "pencil", "mixerBrush", "colorReplacement"] {
+    for tool in ["brush", "pencil", "colorReplacement"] {
         assert_eq!(h.state().session.prefs().shortcuts.get(&format!("tools.select.{tool}")).map(String::as_str), Some(""));
     }
     let ctx = h.ctx.clone();

@@ -3207,3 +3207,107 @@ curves	Smooth	Сгладить
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Якорь: Задержка
+	Anchor Smooth	Якорь: Сглаживание
+	Anchor X	Якорь X
+	Anchor Y	Якорь Y
+	Blur Jitter	Размытие: Колебание
+	Blur Strength	Размытие: Сила
+	Canvas Material	Материал холста
+	Choose Pattern	Выбрать узор
+	Color Attributes	Атрибуты цвета
+	Complementary Color	Дополнительный цвет
+	Concentration	Концентрация
+	Contour Strength	Контур: Сила
+	Coordinates:	Координаты:
+	Darkening	Затемнение
+	Density Jitter	Плотность: Колебание
+	Drag panels	Перетаскивать панели
+	Draw with the pen in the canvas to calibrate pressure response.	Рисуйте пером на холсте для калибровки отклика на нажим.
+	Edge Control	Управление краями
+	Enable Color Attributes	Включить: Атрибуты цвета
+	Enable Inertia	Включить: Инерция
+	Enable Mixing	Включить: Смешивание
+	Enable Pigment	Включить: Пигмент
+	Enable Stroke Motion	Включить: Движение мазка
+	Expansion	Расширение
+	Fixed Width	Фиксированная ширина
+	Flow Algorithm:	Алгоритм подачи:
+	Fluid	Жидкость
+	Gaussian Mask	Гауссова маска
+	Grain Density	Плотность зерна
+	Grain Size	Зерно: Размер
+	Hardness Jitter	Жёсткость: Колебание
+	Highlight Brightness	Яркость бликов
+	Highlight Ratio	Доля бликов
+	Highlight Strength	Блики: Сила
+	Image Palette Color	Цвет палитры изображения
+	Import a C3 preset with a packaged canvas pattern.	Импортируйте набор C3 со встроенным узором холста.
+	Inertia	Инерция
+	Invert Blur Pressure	Инверсия нажима: Размытие
+	Invert Length Pressure	Инверсия нажима: Длина
+	Jitter	Колебание
+	Length Jitter	Длина: Колебание
+	Liquidity	Текучесть
+	Minimum Angle	Минимум: Угол
+	Minimum Blur	Минимум: Размытие
+	Minimum Count	Минимум: Счёт
+	Minimum Distance	Минимум: Расстояние
+	Minimum Hardness	Минимум: Жёсткость
+	Minimum Length	Минимум: Длина
+	Minimum Scatter	Минимум: Рассеивание
+	Minimum Spacing	Минимум: Интервалы
+	Minimum Strength	Минимум: Сила
+	Minimum Stroke Jitter	Минимум: Мазок: Колебание
+	Minimum Width	Минимум: Ширина
+	Mixing	Смешивание
+	Mixing Strength	Смешивание: Сила
+	Outline	Обводка
+	Output Strength	Сила вывода
+	Painting Settings…	Настройки рисования…
+	Painting…	Рисование…
+	Pattern:	Узор:
+	Pigment	Пигмент
+	Pressure Controls Anchor Delay	Управление нажимом: Якорь: Задержка
+	Pressure Controls Contour	Управление нажимом: Контур
+	Pressure Controls Fluid	Управление нажимом: Жидкость
+	Pressure for Flow	Нажим для подачи
+	Primary Strength	Основная сила
+	Range Jitter	Диапазон: Колебание
+	Ratio	Соотношение
+	Saturation Boost	Усиление насыщенности
+	Saturation Protection	Защита насыщенности
+	Saturation Record	Запоминание насыщенности
+	Secondary Strength	Дополнительная сила
+	Show Color Values	Показать значения цвета
+	Single Tip	Один кончик
+	Smudge Output	Вывод размазывания
+	Soft Coverage	Мягкое покрытие
+	Softness	Мягкость
+	Spacing Jitter	Интервалы: Колебание
+	Strength	Сила
+	Strength Jitter	Сила: Колебание
+	Stroke Jitter	Мазок: Колебание
+	Stroke Motion	Движение мазка
+	Stroke Smoothing	Сглаживание мазка
+	Tilt Delay	Задержка наклона
+	Use Grain Parameters	Использовать: Параметры зерна
+	Use Pressure Curve	Использовать: Кривая нажима
+	Use Sampled Pattern	Использовать: Взятый образец узора
+	Use Wet Edge Parameters	Использовать: Параметры влажных краёв
+	Use the eyedropper on the canvas to sample a pattern.	Возьмите образец узора пипеткой на холсте.
+	Water	Вода
+	Watercolor	Акварель
+	Watercolor 2	Акварель 2
+	Wet Edge Mode	Режим влажных краёв
+	Whole Stroke	Весь мазок
+	Width Mode	Режим ширины
+
+	Eyedropper Saturation Protection	Защита насыщенности пипетки
+	Loop Hue Slider	Зациклить ползунок тона
+	Translucent Selection	Полупрозрачное выделение
+
+	Primary Brush	Основная кисть
+	Secondary Brush	Дополнительная кисть
+	Color Output	Нанесение цвета

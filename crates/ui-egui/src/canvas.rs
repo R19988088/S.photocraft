@@ -5167,6 +5167,11 @@ fn alt_eyedropper(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
 }
 
 fn sample_eyedropper(app: &mut PhotocraftApp, x: f64, y: f64, mods: egui::Modifiers) {
+    if app.session.tools.brush.pattern_enabled && !mods.alt {
+        let layers = app.ui.tool_options.eyedropper_sample.clone();
+        let _ = app.run("document.samplePattern", json!({"x":x,"y":y,"sampleLayer":layers}));
+        return;
+    }
     if let Some([r, g, b]) = eyedropper_color(app, x, y) {
         let key = if mods.alt { "background" } else { "foreground" };
         let _ = app.run("tools.setColors", json!({ key: [r, g, b, 1.0] }));
@@ -5246,7 +5251,17 @@ fn tool_move(app: &mut PhotocraftApp, x: f64, y: f64, pressure: f32, mods: egui:
 fn native_paint_input(app: &mut PhotocraftApp, response: &egui::Response, xf: &ViewXform, mods: egui::Modifiers, now_ms: f64) -> bool {
     use crate::stylus::NativePenPhase;
     let events = std::mem::take(&mut app.stylus.native_frame);
-    let owns_press = response.is_pointer_button_down_on() || response.clicked() || response.drag_stopped_by(PointerButton::Primary);
+    // egui may report neither click nor drag-stop when a complete drag crosses its
+    // click threshold within one frame. Keep the original canvas press ownership.
+    let raw_press = response.ctx.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => Some(*pos),
+            _ => None,
+        })
+    });
+    let canvas_press = raw_press.is_some_and(|p| response.interact_rect.contains(p) && response.ctx.layer_id_at(p) == Some(response.layer_id))
+        && !egui::Popup::is_any_open(&response.ctx);
+    let owns_press = response.is_pointer_button_down_on() || response.clicked() || response.drag_stopped_by(PointerButton::Primary) || canvas_press;
     let mut handled = app.stylus.native_active || app.stylus.native_handled;
     app.defer_live_stroke = true;
     for event in events {
@@ -7509,6 +7524,22 @@ mod tests {
             let r = xf.doc_rect(DRect::new(0, 0, 10, 10));
             assert!(r.width() > 0.0 && r.height() > 0.0);
         }
+    }
+
+    #[test]
+    fn pattern_eyedropper_captures_patch_and_preserves_foreground() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({"width":8,"height":8,"background":"white"})).unwrap();
+        app.run("tools.setColors", json!({"foreground":[0.2,0.3,0.4,1.]})).unwrap();
+        app.run("tools.setColorSource", json!({"pattern":true})).unwrap();
+        app.session.tools.brush.size = 6.;
+        super::sample_eyedropper(&mut app, 2., 2., egui::Modifiers::NONE);
+        let patch = app.session.tools.brush.sampled_pattern.as_ref().unwrap();
+        assert_eq!((patch.width, patch.height), (6, 6));
+        assert_eq!(app.session.tools.foreground, [0.2, 0.3, 0.4, 1.]);
+        let patch = patch.clone();
+        super::sample_eyedropper(&mut app, -1., 2., egui::Modifiers::NONE);
+        assert_eq!(app.session.tools.brush.sampled_pattern.as_ref(), Some(&patch));
     }
 
     #[test]

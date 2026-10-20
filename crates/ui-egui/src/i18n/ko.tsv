@@ -3415,3 +3415,101 @@ curves	Smooth	매끄럽게
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	앵커: 지연
+	Anchor Smooth	앵커: 매끄럽게
+	Anchor X	앵커 X
+	Anchor Y	앵커 Y
+	Blur Jitter	흐림 변동
+	Blur Strength	흐림: 강도
+	Canvas Material	캔버스 재질
+	Choose Pattern	패턴 선택
+	Color Attributes	색상 속성
+	Complementary Color	보색
+	Concentration	농도
+	Contour Strength	윤곽: 강도
+	Coordinates:	좌표:
+	Darkening	어둡게
+	Density Jitter	밀도 변동
+	Drag panels	패널 드래그
+	Draw with the pen in the canvas to calibrate pressure response.	캔버스에 펜으로 그려 필압 반응을 보정하세요.
+	Edge Control	가장자리 제어
+	Enable Color Attributes	색상 속성 활성화
+	Enable Inertia	관성 활성화
+	Enable Mixing	혼합 활성화
+	Enable Pigment	안료 활성화
+	Enable Stroke Motion	획 움직임 활성화
+	Expansion	확장
+	Fixed Width	고정 너비
+	Flow Algorithm:	흐름 알고리즘:
+	Fluid	유체
+	Gaussian Mask	가우시안 마스크
+	Grain Density	입자 밀도
+	Hardness Jitter	경도 변동
+	Highlight Brightness	하이라이트 밝기
+	Highlight Ratio	하이라이트 비율
+	Image Palette Color	이미지 팔레트 색상
+	Import a C3 preset with a packaged canvas pattern.	캔버스 패턴이 포함된 C3 사전 설정을 가져오세요.
+	Inertia	관성
+	Invert Blur Pressure	필압 반전: 흐림
+	Invert Length Pressure	필압 반전: 길이
+	Jitter	변동
+	Length Jitter	길이 변동
+	Liquidity	유동성
+	Minimum Angle	최소 각도
+	Minimum Blur	최소 흐림
+	Minimum Count	최소 개수
+	Minimum Distance	최소 거리
+	Minimum Hardness	최소 경도
+	Minimum Length	최소 길이
+	Minimum Scatter	최소 분산
+	Minimum Spacing	최소 간격
+	Minimum Strength	최소 강도
+	Minimum Stroke Jitter	최소 획 변동
+	Minimum Width	최소 너비
+	Mixing	혼합
+	Mixing Strength	혼합: 강도
+	Outline	외곽선
+	Output Strength	출력 강도
+	Painting Settings…	페인팅 설정…
+	Painting…	페인팅…
+	Pattern:	패턴:
+	Pigment	안료
+	Pressure Controls Anchor Delay	앵커: 지연 필압 제어
+	Pressure Controls Contour	윤곽 필압 제어
+	Pressure Controls Fluid	유체 필압 제어
+	Pressure for Flow	필압으로 흐름 제어
+	Primary Strength	주 강도
+	Range Jitter	범위 변동
+	Saturation Boost	채도 증가
+	Saturation Protection	채도 보호
+	Saturation Record	채도 기록
+	Secondary Strength	보조 강도
+	Show Color Values	색상 값 표시
+	Single Tip	단일 팁
+	Smudge Output	문지르기 출력
+	Soft Coverage	부드러운 커버리지
+	Spacing Jitter	간격 변동
+	Strength Jitter	강도 변동
+	Stroke Jitter	획 변동
+	Stroke Motion	획 움직임
+	Stroke Smoothing	획 보정
+	Tilt Delay	기울기 지연
+	Use Grain Parameters	입자 매개변수 사용
+	Use Pressure Curve	필압 곡선 사용
+	Use Sampled Pattern	샘플 패턴 사용
+	Use Wet Edge Parameters	젖은 가장자리 매개변수 사용
+	Use the eyedropper on the canvas to sample a pattern.	캔버스에서 스포이트로 패턴을 추출하세요.
+	Water	물
+	Watercolor 2	수채화 2
+	Wet Edge Mode	젖은 가장자리 모드
+	Whole Stroke	전체 획
+	Width Mode	너비 모드
+
+	Eyedropper Saturation Protection	스포이트 채도 보호
+	Loop Hue Slider	색조 슬라이더 순환
+	Translucent Selection	반투명 선택 영역
+
+	Primary Brush	기본 브러시
+	Secondary Brush	보조 브러시
+	Color Output	색상 출력

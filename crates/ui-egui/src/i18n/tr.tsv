@@ -3962,3 +3962,102 @@ cameraData	Lens	Lens
 	Increase Brush Hardness	Fırça sertliğini artır
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Çapa: Gecikme
+	Anchor Smooth	Çapa: Düzgünleştirme
+	Anchor X	Çapa X
+	Anchor Y	Çapa Y
+	Blur Jitter	Bulanıklık: Değişim
+	Blur Strength	Bulanıklık: Güç
+	Canvas Material	Tuval Malzemesi
+	Choose Pattern	Desen Seç
+	Color Attributes	Renk Nitelikleri
+	Complementary Color	Tamamlayıcı Renk
+	Concentration	Yoğunluk
+	Contour Strength	Kontur: Güç
+	Coordinates:	Koordinatlar:
+	Darkening	Koyulaştırma
+	Density Jitter	Sıklık: Değişim
+	Drag panels	Panelleri sürükle
+	Draw with the pen in the canvas to calibrate pressure response.	Basınç tepkisini ayarlamak için tuvale kalemle çizin.
+	Edge Control	Kenar Denetimi
+	Enable Color Attributes	Etkinleştir: Renk Nitelikleri
+	Enable Inertia	Etkinleştir: Atalet
+	Enable Mixing	Etkinleştir: Karıştırma
+	Enable Pigment	Etkinleştir: Pigment
+	Enable Stroke Motion	Etkinleştir: Darbe Hareketi
+	Expansion	Genişleme
+	Fixed Width	Sabit Genişlik
+	Flow Algorithm:	Akış Algoritması:
+	Fluid	Sıvı
+	Gaussian Mask	Gauss Maskesi
+	Grain Density	Tanecik Yoğunluğu
+	Hardness Jitter	Sertlik: Değişim
+	Highlight Brightness	Vurgu Parlaklığı
+	Highlight Ratio	Vurgu Oranı
+	Image Palette Color	Görüntü Paleti Rengi
+	Import a C3 preset with a packaged canvas pattern.	Tuval deseni içeren bir C3 hazır ayarı içe aktarın.
+	Inertia	Atalet
+	Invert Blur Pressure	Basıncı Ters Çevir: Bulanıklık
+	Invert Length Pressure	Basıncı Ters Çevir: Uzunluk
+	Jitter	Değişim
+	Length Jitter	Uzunluk: Değişim
+	Liquidity	Akışkanlık
+	Minimum Angle	En az: Açı
+	Minimum Blur	En az: Bulanıklık
+	Minimum Count	En az: Sayım
+	Minimum Distance	En az: Uzaklık
+	Minimum Hardness	En az: Sertlik
+	Minimum Length	En az: Uzunluk
+	Minimum Scatter	En az: Dağılım
+	Minimum Spacing	En az: Aralık
+	Minimum Strength	En az: Güç
+	Minimum Stroke Jitter	En az: Darbe: Değişim
+	Minimum Width	En az: Genişlik
+	Mixing	Karıştırma
+	Mixing Strength	Karıştırma: Güç
+	Outline	Dış Hat
+	Output Strength	Çıkış Gücü
+	Painting Settings…	Boyama Ayarları…
+	Painting…	Boyama…
+	Pattern:	Desen:
+	Pigment	Pigment
+	Pressure Controls Anchor Delay	Basınç Denetimi: Çapa: Gecikme
+	Pressure Controls Contour	Basınç Denetimi: Kontur
+	Pressure Controls Fluid	Basınç Denetimi: Sıvı
+	Pressure for Flow	Akış için Basınç
+	Primary Strength	Birincil Güç
+	Range Jitter	Aralık: Değişim
+	Saturation Boost	Doygunluk Artışı
+	Saturation Protection	Doygunluk Koruması
+	Saturation Record	Doygunluk Kaydı
+	Secondary Strength	İkincil Güç
+	Show Color Values	Renk Değerlerini Göster
+	Single Tip	Tek Uç
+	Smudge Output	Lekeleme Çıkışı
+	Soft Coverage	Yumuşak Kaplama
+	Spacing Jitter	Aralık: Değişim
+	Strength Jitter	Güç: Değişim
+	Stroke Jitter	Darbe: Değişim
+	Stroke Motion	Darbe Hareketi
+	Stroke Smoothing	Darbe Düzgünleştirme
+	Tilt Delay	Eğim Gecikmesi
+	Use Grain Parameters	Kullan: Tanecik Parametreleri
+	Use Pressure Curve	Kullan: Basınç Eğrisi
+	Use Sampled Pattern	Kullan: Örneklenen Desen
+	Use Wet Edge Parameters	Kullan: Islak Kenar Parametreleri
+	Use the eyedropper on the canvas to sample a pattern.	Tuvalden desen örneklemek için damlalığı kullanın.
+	Water	Su
+	Watercolor 2	Suluboya 2
+	Wet Edge Mode	Islak Kenar Modu
+	Whole Stroke	Tüm Darbe
+	Width Mode	Genişlik Modu
+
+	Eyedropper Saturation Protection	Damlalık Doygunluk Koruması
+	Loop Hue Slider	Döngüsel Ton Kaydırıcısı
+	Translucent Selection	Yarı Saydam Seçim
+
+	Primary Brush	Ana fırça
+	Secondary Brush	İkincil fırça
+	Color Output	Renk çıkışı
+	Smudge	Bulaştırma

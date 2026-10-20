@@ -118,7 +118,7 @@ pub fn average(px: &[[f32; 4]], mode: ColorMode, depth: SampleType) -> [f32; 4] 
 
 /// The document that renders what `which` samples: the whole document, or a copy with the layers
 /// it leaves out hidden. `active` is the active layer (`None`: Current Layer samples nothing).
-fn sampled_document(doc: &Document, active: Option<LayerId>, which: SampleLayers) -> Option<std::borrow::Cow<'_, Document>> {
+pub(crate) fn sampled_document(doc: &Document, active: Option<LayerId>, which: SampleLayers) -> Option<std::borrow::Cow<'_, Document>> {
     use std::borrow::Cow;
     match which {
         SampleLayers::All => return Some(Cow::Borrowed(doc)),

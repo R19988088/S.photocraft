@@ -1,6 +1,6 @@
 # Brush and painting parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-19 · **Change:** minor (grain and wet-edge parameter panes with native preset persistence; dragged preset tip preview; Hue Jitter amount track; Brush Settings minimum fields follow their Control; checkbox-only rows and non-destructive Smoothing switch; shaped-tip cursor follows the view; Color Replacement is a live toolbar tool; no brush-feel estimate changed) · **Target:** Adobe Photoshop 2026
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** major (C3 brush controls, full dual lanes, colour attributes, pattern sampling, independent mixing and material pipelines, schema-5 presets) · **Target:** Adobe Photoshop 2026
 
 Painting is where Photoshop users notice differences first, so it gets its own checklist: the
 brush engine (`crates/paint/src/brush.rs`), the Brush Settings UI
@@ -8,30 +8,50 @@ brush engine (`crates/paint/src/brush.rs`), the Brush Settings UI
 ([`hardware-parity.md`](hardware-parity.md)), and the brush-based tools. Status words as in
 [`ui-parity.md`](ui-parity.md).
 
-**Summary (estimated):** breadth ~90% (every Brush Settings section and option exists), ready for
+**Summary (estimated):** breadth ~90% (C3 painting controls are exposed; Photoshop-only options differ), ready for
 real work ~55%. The engine models what Photoshop models; the gaps are feel (latency, pressure
 response, edge quality, smoothing), a few missing options, and live previews for retouch tools.
 Remaining: 100–180 h (gap G4 in [`gaps.md`](gaps.md)). Human: feel must be checked on real
 tablets against Photoshop side by side.
 
+## C3 painting system (2026-10-20)
+
+The painting controls now follow C3 schema 5 within PhotoCraft’s existing egui panel. Brush,
+Eraser and Smudge share the Rust dab generator and renderer, with tool restrictions. Both dual
+brush lanes have full settings and separate strengths, motion, material, colour attributes and
+transport state. Mixing v1 deliberately retains PhotoCraft’s original Smudge algorithm; v2 and
+v3 use their own transport paths. Wet edges and pigment material run independently.
+
+The settings sidebar follows the named C3 reference directory: Basic Parameters, Shape Controls,
+Motion, Texture, Colour Attributes, Wet Edge, Mixing and Pigment. Basic Parameters and Shape
+Controls stay enabled. Grain and inertia belong to Shape Controls. Eraser hides Colour Attributes
+and Mixing. Each category limits control sources to the reference's supported choices.
+
+The options bar keeps one attribute selector at its existing Mode position, with strength to its
+right and the restored brush-size slider. Both attributes remain editable in Brush Settings.
+Primary and secondary settings keep independent selected sections. The dual-brush header exposes
+lane strengths and the reference blend modes. Mixing and blur curves have independent enable
+switches; mixing can also deposit the foreground or sampled colour patch.
+
+Hidden legacy brush options are neutralized in the render copy, including values loaded from
+older presets. This covers pose, canvas material, saturation-memory overrides, legacy smoothing,
+projection, speed spacing, unsupported control sources and transport tuning controls. Preset
+serialization retains its existing schema. The renderer and UI remain Rust on native and wasm.
+
 ## Brush Settings sections
 
 | Section | Status | Evidence |
 |---|---|---|
-| Brush Tip Shape: size, angle, roundness, hardness, spacing, flip X/Y | done | `brush.rs` |
-| Shape Dynamics (size/angle/roundness jitter, pen pressure/tilt/rotation/wheel controls, minimums, flip jitter, brush projection) | done | #174 |
-| Scattering (both axes, count, count jitter) | done | |
-| Texture (pattern, scale, brightness, contrast, mode, depth, each tip) | done | |
-| Dual Brush | done | |
-| Color Dynamics (FG/BG, hue/sat/brightness jitter, purity, per tip) | done | |
-| Hue Jitter uses a standard percentage-amount track instead of a hue spectrum | done | #3825 (Hue Jitter appearance only); rendered track checked in all 14 themes; numeric and pointer edits retain percentage units and engine command routing. |
-| Transfer (opacity/flow/wetness/mix jitter and controls) | done | |
-| Shape Dynamics and Transfer minimum fields disabled when their Control is Off, retaining their values | done | #3825 (minimum-field interaction only); `brush_sections.rs` UI regressions cover all six fields, reactivation and disabled input |
-| Brush Pose (tilt, rotation, pressure overrides) | done | |
-| Noise, Wet Edges, Build-up, Protect Texture | done | |
-| Smoothing: amount, Pulled String, Stroke Catch-up, Catch-up on End, Adjust for Zoom | done | `brush.rs:428-438` |
-| Section locks | done | #174 |
-| Grain and Wet Edges expose parameter panels; Build-up, Smoothing and Protect Texture remain switch rows | done | Material parameters persist with brush presets; `brush_panel_tests.rs` |
+| Basic Parameters: tip resource, size, spacing, angle, roundness | implemented | `brush_sections.rs::tip_shape` |
+| Shape Controls: size, opacity, flow, hardness, dynamics, scatter, grain, inertia | implemented | `section_body_with_canvas`, category 1 |
+| Motion: anchor, guidance, smoothing, delays | implemented | `motion_settings` |
+| Texture: pattern, scale, tone, coordinates, depth, per-tip, invert, protection | implemented | `texture` |
+| Colour Attributes: main/secondary attribute, strengths, colour dynamics | implemented | `color_attributes`, `color_dynamics` |
+| Wet Edge: style, strength, width, softness and colour | implemented | `wet_settings` |
+| Mixing: algorithm, enabled mixing/blur curves and colour output | implemented | `mix_settings`, `LaneTransport` |
+| Pigment: thickness curve, texture strength and highlights | implemented | `pigment_settings` |
+| Primary/secondary independent parameters and strengths | implemented | `settings_lane`, `dual_brush_header` |
+| Non-reference legacy parameters and control combinations | disabled | `BrushSettings::bounded_for_render` |
 | Brush tip from an image file | missing | TOOL-213-12 |
 | Erodible, Airbrush and Bristle tips (Photoshop's special tips) | partial | not audited in detail; "3D-based brushes don't work" (#1660) |
 | Anti-aliasing off for brushes | missing | #1666 (Pencil is the aliased path) |
@@ -42,7 +62,7 @@ tablets against Photoshop side by side.
 |---|---|---|
 | Pressure drives size/opacity/flow per sample (no shared pressure within a frame) | done | #2112 |
 | Global pressure curve in Preferences | done | #2195 |
-| Per-control pressure curves | missing | TOOL-213-11 |
+| Per-control pressure curves | done | Dynamic curves and signed C3 effect curves. |
 | Quick taps keep their pressure | partial | #1967 fixed one case; tap paints a full blob (#1798), tap sensitivity (#1933) |
 | Smooth pressure on Windows | partial | "jumpy" (#2046) |
 | Tilt and rotation drive angle/roundness | partial | macOS, X11, web; not Windows; rotation not applied (#1301) |
@@ -91,7 +111,7 @@ tablets against Photoshop side by side.
 | Tool | Status | Notes |
 |---|---|---|
 | Brush, Pencil (aliased, Auto Erase), Eraser (Brush/Pencil/Block) | done | Pencil 1 px quality #2139 |
-| Mixer Brush (Wet, Load, Mix, Flow, Sample All Layers) | partial | "incomplete" (#2247) |
+| Mixer Brush | integrated | Brush/Smudge share C3 transport; separate toolbar tool removed. |
 | Clone Stamp (opacity, flow, aligned, sample, overlay) | partial | Clone Source W/H link and Alt target cursor (TOOL-213-8) |
 | Pattern Stamp (aligned, impressionist) | done | |
 | History Brush | done | Art History Brush missing |
@@ -116,6 +136,7 @@ tablets against Photoshop side by side.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | major | C3 settings, independent full dual brushes, colour attributes, pattern sampling, three mixing paths, pigment material and schema-5 presets. |
 | 2026-10-19 | minor | Added grain and three wet-edge styles with main/dual controls, sensor resolution, persistent presets and rendering regressions. No brush-feel estimate changed. |
 | 2026-10-13 | minor | Stale "missing tool" row corrected against main: Color Replacement (`paint.colorReplacement`) is a live toolbar tool; no brush-feel estimate changed |
 | 2026-10-10 | major | First version, from a source audit and the open issues |
@@ -132,6 +153,6 @@ Grain exposes density, size (1–300), spatial size/density jitter and pen press
 tilt or rotation control. Wet Edges exposes Photoshop, Watercolor and Watercolor 2 styles;
 strength/minimum, ratio or fixed pixel width/minimum, softness, darkening, saturation,
 colour mode, expansion or soft coverage, and single-tip or whole-stroke outlines.
-The Dual Brush section has independent grain and wet-edge controls. Existing presets without
+The primary and secondary tabs have independent grain and wet-edge controls. Existing presets without
 these parameter blocks retain their original Noise/Wet Edges behaviour. New parameters travel
 through the existing brush JSON, native preset store, preset export/import, locks and reset.

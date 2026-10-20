@@ -8,7 +8,7 @@ use crate::brush::*;
 use crate::dynamics::{Smoother, smooth_points};
 use crate::render::{BrushContext, StrokeRenderer, mask_combine, render_stroke, texture_combine};
 use crate::tile::GrayTile;
-use crate::{Dab, Stroke, StrokePoint, dabs};
+use crate::{AttributeMode, Dab, Stroke, StrokePoint, dabs};
 
 fn brush() -> BrushSettings {
     BrushSettings { pressure_size: false, spacing: 0.25, ..Default::default() }
@@ -356,13 +356,13 @@ fn tilt_direction_and_rotation_drive_angle() {
     // Direction: travelling down the screen = -90° (counter-clockwise positive).
     let pts = vec![StrokePoint::new(0.0, 0.0, 1.0), StrokePoint::new(0.0, 50.0, 1.0)];
     let d = dabs_of(&mk(Control::Direction), &pts);
-    assert!(d.iter().all(|x| (x.angle.to_degrees() + 90.0).abs() < 1e-3));
+    assert!(d.iter().all(|x| (x.angle.sin() + 1.0).abs() < 1e-3));
     // Rotation.
     let mut q = StrokePoint::new(0.0, 0.0, 1.0);
     q.rotation = 30.0;
     let d = dabs_of(&mk(Control::Rotation), &[q, StrokePoint { x: 20.0, ..q }]);
     assert!((d[0].angle.to_degrees() - 30.0).abs() < 1e-3);
-    // Pen tilt on size: upright pen full size, flat pen minimum.
+    // C3 tilt magnitude on size: upright pen minimum, flat pen full size.
     let b = BrushSettings {
         shape_dynamics: ShapeDynamics { enabled: true, size: Dynamic::controlled(Control::PenTilt), ..Default::default() },
         size: 20.0,
@@ -371,7 +371,7 @@ fn tilt_direction_and_rotation_drive_angle() {
     let mut flat = StrokePoint::new(0.0, 0.0, 1.0);
     flat.tilt_x = 90.0;
     let d = dabs_of(&b, &[flat]);
-    assert!(d[0].radius <= 0.5 + 1e-6);
+    assert!((d[0].radius - 10.0).abs() < 1e-6);
 }
 
 #[test]
@@ -388,7 +388,14 @@ fn jitter_is_deterministic_per_seed() {
             flip_y_jitter: true,
             ..Default::default()
         },
-        scattering: Scattering { enabled: true, scatter: Dynamic::jitter(2.0), both_axes: true, count: 3, count_jitter: Dynamic::jitter(1.0) },
+        scattering: Scattering {
+            enabled: true,
+            scatter: Dynamic::jitter(2.0),
+            both_axes: true,
+            count: 3,
+            count_jitter: Dynamic::jitter(1.0),
+            ..Default::default()
+        },
         ..brush()
     };
     let pts = line(0.0, 300.0, 50.0);
@@ -398,8 +405,8 @@ fn jitter_is_deterministic_per_seed() {
     assert_ne!(a, c);
     // Jitter actually varies things, within their ranges.
     let radii: Vec<f32> = a.iter().map(|d| d.radius).collect();
-    assert!(radii.iter().any(|&r| r < 10.0) && radii.iter().all(|&r| r <= 15.0 + 1e-4));
-    assert!(a.iter().all(|d| d.roundness >= 0.2 - 1e-6 && d.roundness <= 1.0));
+    assert!(radii.iter().any(|&r| r < 10.0) && radii.iter().any(|&r| r > 15.0) && radii.iter().all(|&r| r <= 30.0 + 1e-4));
+    assert!(a.iter().all(|d| d.roundness >= 0.01 && d.roundness <= 1.0));
     assert!(a.iter().any(|d| d.flip_x) && a.iter().any(|d| !d.flip_x));
     // Chunked feeding gives identical dabs.
     let mut r = StrokeRenderer::new(&b, None, 1.0).record_dabs();
@@ -503,7 +510,7 @@ fn transfer_opacity_caps_and_flow_builds() {
 }
 
 #[test]
-fn build_up_accumulates_over_time() {
+fn build_up_stays_disabled_while_pointer_lingers() {
     let b = BrushSettings { build_up: true, build_up_rate: 20.0, flow: 0.05, size: 20.0, hardness: 1.0, ..brush() };
     let hold = |ms: f64| {
         let mut a = StrokePoint::new(50.0, 50.0, 1.0);
@@ -516,8 +523,8 @@ fn build_up_accumulates_over_time() {
     let (n0, a0) = hold(0.0);
     let (n1, a1) = hold(500.0);
     let (n2, a2) = hold(2000.0);
-    assert_eq!((n0, n1, n2), (1, 11, 41));
-    assert!(a0 < a1 && a1 < a2, "{a0} {a1} {a2}");
+    assert_eq!((n0, n1, n2), (1, 1, 1));
+    assert_eq!((a0, a1), (a1, a2));
     // Without build-up, lingering adds nothing.
     let nb = BrushSettings { build_up: false, ..b };
     let mut a = StrokePoint::new(50.0, 50.0, 1.0);
@@ -531,7 +538,7 @@ fn huge_airbrush_time_gap_emits_bounded_catch_up() {
     let b = BrushSettings { build_up: true, build_up_rate: 1000.0, ..brush() };
     let a = StrokePoint { time: 0.0, ..StrokePoint::new(20.0, 20.0, 1.0) };
     let brief_pause = StrokePoint { time: 200.0, ..a };
-    assert_eq!(dabs_of(&b, &[a, brief_pause]).len(), 201, "a 200 ms pause should retain its airbrush build-up");
+    assert_eq!(dabs_of(&b, &[a, brief_pause]).len(), 1, "time build-up is disabled");
 
     let z = StrokePoint { time: f64::MAX, ..a };
     let d = dabs_of(&b, &[a, z]);
@@ -612,11 +619,11 @@ fn texture_modulates_coverage() {
         // Full-white texture never reduces multiply-like masks below the brush.
         assert!(mask_combine(m, 0.6, 1.0, 1.0) >= 0.6 - 1e-5 || matches!(m, MaskMode::Overlay), "{m:?}");
     }
-    // Depth jitter per tip is deterministic and within [min depth, depth].
+    // C3 symmetric depth jitter follows control and clamps to the unit domain.
     let mut b = tex(MaskMode::Multiply, 0.8, true);
     b.texture.depth_jitter = Dynamic { jitter: 1.0, minimum: 0.25, ..Default::default() };
     let d = dabs_of(&b, &line(0.0, 200.0, 0.0));
-    assert!(d.iter().all(|x| x.depth <= 0.8 + 1e-6 && x.depth >= 0.8 * 0.25 - 1e-6));
+    assert!(d.iter().all(|x| (0.0..=1.0).contains(&x.depth)));
     assert!(d.iter().any(|x| x.depth < 0.6));
 }
 
@@ -1337,7 +1344,7 @@ fn transfer_wetness_and_mix_vary_per_dab() {
     let pts = [StrokePoint::new(0.0, 0.0, 0.3), StrokePoint::new(60.0, 0.0, 0.3)];
     let d = dabs_of(&b, &pts);
     assert!(d.iter().all(|x| (x.wet - 0.3).abs() < 1e-5));
-    assert!(d.iter().all(|x| (0.25..=1.0).contains(&x.mix)) && d.iter().any(|x| x.mix < 0.9));
+    assert!(d.iter().all(|x| (0.0..=1.0).contains(&x.mix)) && d.iter().any(|x| x.mix < 0.9));
     // Transfer off: as set.
     let d = dabs_of(&brush(), &pts);
     assert!(d.iter().all(|x| x.wet == 1.0 && x.mix == 1.0));
@@ -1417,6 +1424,44 @@ fn ordinary_scatter_is_unchanged_by_the_cap() {
     let (dabs, duals) = all_dabs(&b, &line(10.0, 200.0, 50.0));
     assert!(dabs.iter().any(|d| (d.center.y - 50.0).abs() > 10.0) && dabs.iter().all(|d| (d.center.y - 50.0).abs() <= 20.0));
     assert!(duals.iter().any(|d| (d.center.y - 50.0).abs() > 1.0) && duals.iter().all(|d| (d.center.y - 50.0).abs() <= 4.5));
+}
+
+#[test]
+fn primary_strength_applies_without_a_secondary_brush() {
+    for mixing in [false, true] {
+        let mut b = brush();
+        b.mix_settings.enabled = mixing;
+        b.dual_brush.enabled = false;
+        b.dual_brush.primary_strength = 0.0;
+        let point = [StrokePoint::new(16.0, 16.0, 1.0)];
+        assert_eq!(paint(&b, &point, 32, 32).rgba(16, 16)[3], 0.0);
+        b.dual_brush.primary_strength = 1.0;
+        assert!(paint(&b, &point, 32, 32).rgba(16, 16)[3] > 0.9);
+    }
+}
+
+#[test]
+fn render_ignores_brush_options_outside_the_reference_panel() {
+    let brush = BrushSettings {
+        color_attributes: ColorAttributes {
+            enabled: true,
+            blend: AttributeMode::Multiply,
+            blend_strength: 0.8,
+            color: AttributeMode::Saturation,
+            color_strength: 0.6,
+        },
+        pose: Pose { enabled: true, override_pressure: true, pressure: 0.2, ..Default::default() },
+        canvas_material: Some(Default::default()),
+        ..brush()
+    };
+
+    let rendered = brush.bounded_for_render();
+    assert_eq!(rendered.color_attributes.blend, AttributeMode::Multiply);
+    assert_eq!(rendered.color_attributes.blend_strength, 0.8);
+    assert_eq!(rendered.color_attributes.color, AttributeMode::Saturation);
+    assert_eq!(rendered.color_attributes.color_strength, 0.6);
+    assert!(!rendered.pose.enabled);
+    assert!(rendered.canvas_material.is_none());
 }
 
 /// The dab rectangle of a hostile centre (non-finite or beyond `i32`), from a direct caller of the
@@ -1809,4 +1854,178 @@ fn pressure_flow_is_independent_and_does_not_double_apply_transfer_control() {
     let saved = serde_json::to_string(&b).unwrap();
     assert!(serde_json::from_str::<BrushSettings>(&saved).unwrap().pressure_flow);
     assert!(!serde_json::from_str::<BrushSettings>("{}").unwrap().pressure_flow);
+}
+
+#[test]
+fn c3_sensor_controls_and_hardness_reach_dabs() {
+    let make = |control| BrushSettings { size: 20.0, spacing: 0.25, hardness_dynamic: Dynamic { control, minimum: 0.2, ..Default::default() }, ..brush() };
+    let mut a = StrokePoint::new(0.0, 0.0, 0.25);
+    a.time = 0.0;
+    let z = StrokePoint { x: 100.0, time: 100.0, ..a };
+    let inverse = dabs_of(&make(Control::PenPressureInverse), &[a, z]);
+    assert!((inverse[0].hardness - 0.8).abs() < 1e-6);
+    let speed = dabs_of(&make(Control::Speed), &[a, z]);
+    assert!((speed[0].hardness - 0.2).abs() < 1e-6);
+    assert!(speed.last().unwrap().hardness > 0.99);
+    let direction = dabs_of(&make(Control::Direction), &[a, StrokePoint { x: 0.0, y: 100.0, ..z }]);
+    assert!(direction.iter().all(|d| (d.hardness - 0.8).abs() < 1e-6));
+    let released = dabs_of(
+        &make(Control::PressureRelease),
+        &[StrokePoint { pressure: 1.0, ..a }, StrokePoint { x: 20.0, pressure: 0.7, time: 20.0, ..a }, StrokePoint { x: 40.0, pressure: 1.0, time: 40.0, ..a }],
+    );
+    assert!((released[0].hardness - 0.2).abs() < 1e-6);
+    assert!(released.iter().any(|d| d.hardness > 0.99));
+    assert!((released.last().unwrap().hardness - 0.2).abs() < 1e-6);
+}
+
+#[test]
+fn c3_distance_fade_uses_travel_and_symmetric_jitter_follows_control() {
+    let b = BrushSettings { hardness_dynamic: Dynamic::controlled(Control::DistanceFade), size: 20.0, spacing: 0.25, ..brush() };
+    let d = dabs_of(&b, &line(0.0, 200.0, 0.0));
+    assert_eq!(d[0].hardness, 1.0);
+    let middle = d.iter().find(|d| (d.center.x - 80.0).abs() < 0.01).unwrap();
+    assert!((middle.hardness - 0.5).abs() < 1e-6);
+    assert_eq!(d.last().unwrap().hardness, 0.0);
+    let b = BrushSettings {
+        size: 40.0,
+        shape_dynamics: ShapeDynamics {
+            enabled: true,
+            size: Dynamic { control: Control::PenPressure, minimum: 0.5, jitter: 0.5, ..Default::default() },
+            ..Default::default()
+        },
+        ..brush()
+    };
+    let pts = [StrokePoint::new(0.0, 0.0, 0.0), StrokePoint::new(500.0, 0.0, 0.0)];
+    let d = dabs_of(&b, &pts);
+    assert!(d.iter().any(|d| d.radius < 10.0));
+    assert!(d.iter().any(|d| d.radius > 10.0));
+    assert!(d.iter().all(|d| (5.0..=15.0).contains(&d.radius)));
+}
+
+#[test]
+fn symmetry_transport_keeps_each_pass_and_its_smoothing_tail() {
+    use crate::transport::{BrushMixSettings, MixAlgorithm};
+    for algorithm in [MixAlgorithm::V1, MixAlgorithm::V2, MixAlgorithm::V3] {
+        let fmt = PixelFormat::new(ColorMode::Rgb, SampleType::F32, true);
+        let mut pre = Surface::new(fmt);
+        let area = Rect::new(0, 0, 80, 64);
+        let values: Vec<f32> = (0..80 * 64).flat_map(|i| if i % 80 < 24 { [1.0, 0.0, 0.0, 1.0] } else { [1.0; 4] }).collect();
+        pre.write_region(area, &values);
+        let b = BrushSettings {
+            size: 8.0,
+            hardness: 1.0,
+            smoothing: Smoothing { enabled: true, amount: 0.7, ..Default::default() },
+            mix_settings: BrushMixSettings { enabled: true, outputs_smudge: true, strength: 0.9, length: 0.8, algorithm, ..Default::default() },
+            ..brush()
+        };
+        let mut passes: Vec<_> = [16.0, 48.0]
+            .into_iter()
+            .map(|y| {
+                let mut r = StrokeRenderer::on_surface(&b, &pre, 1.0);
+                r.push(&[StrokePoint::new(16.0, y, 1.0), StrokePoint::new(40.0, y, 1.0), StrokePoint::new(60.0, y, 1.0)]);
+                r
+            })
+            .collect();
+        let mut live = pre.clone();
+        let mut state = crate::render::UnionLive::default();
+        StrokeRenderer::composite_union_live(&mut passes.iter_mut().collect::<Vec<_>>(), &mut state, true, &pre, &mut live, None, false);
+        for r in &mut passes {
+            r.finish();
+        }
+        let mut merged = pre.clone();
+        passes[0].composite_union(&passes[1], &pre, &mut merged, None, false);
+        for (index, r) in passes.iter_mut().enumerate() {
+            let mut single = pre.clone();
+            r.composite(&pre, &mut single, None, false, true);
+            let rect = Rect::new(0, index as i32 * 32, 80, index as i32 * 32 + 32);
+            assert_eq!(merged.read_region(rect), single.read_region(rect), "{algorithm:?}: mirror {index} lost transport");
+            assert_eq!(live.read_region(rect), single.read_region(rect), "{algorithm:?}: live mirror {index} lost its tail");
+        }
+    }
+}
+
+#[test]
+fn c3_angles_turn_clockwise_and_direction_control_follows_the_path() {
+    let covariance = |c3: bool, angle: f32| {
+        let ctx = BrushContext::new(&BrushSettings { c3_tip_math: c3, hardness: 1.0, roundness: 0.25, ..brush() });
+        let mut dab = Dab::round(Point::new(24.0, 24.0), 18.0, 1.0);
+        dab.roundness = 0.25;
+        dab.angle = angle.to_radians();
+        let rect = Rect::new(0, 0, 48, 48);
+        let mut alpha = Vec::new();
+        ctx.rasterize(&dab, false, rect, &mut alpha);
+        alpha
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i % 48) as f32 + 0.5 - 24.0)
+            .zip(alpha.iter().enumerate().map(|(i, a)| ((i / 48) as f32 + 0.5 - 24.0) * a))
+            .map(|(x, ya)| x * ya)
+            .sum::<f32>()
+    };
+    assert!(covariance(true, 45.0) > 100.0, "C3 positive angles rotate down on screen");
+    assert!(covariance(false, 45.0) < -100.0, "legacy tips retain counter-clockwise angles");
+    let mut b = BrushSettings { c3_tip_math: true, size: 24.0, ..brush() };
+    b.shape_dynamics.enabled = true;
+    b.shape_dynamics.angle.control = Control::Direction;
+    let generated = dabs_of(&b, &[StrokePoint::new(10.0, 10.0, 1.0), StrokePoint::new(50.0, 50.0, 1.0)]);
+    assert!(generated.last().is_some_and(|d| d.angle.sin() > 0.0 && d.angle.cos() > 0.0), "direction angles must follow the down-right path");
+}
+
+#[test]
+fn mixing_can_deposit_foreground_and_resized_sampled_color() {
+    use crate::transport::{BrushMixSettings, MixAlgorithm};
+    for algorithm in [MixAlgorithm::V1, MixAlgorithm::V2, MixAlgorithm::V3] {
+        for pattern in [false, true] {
+            for size in [8.0, 32.0] {
+                let mut b = BrushSettings {
+                    c3_tip_math: true,
+                    size,
+                    color: [0.0, 1.0, 0.0, 1.0],
+                    pattern_enabled: pattern,
+                    sampled_pattern: Some(ColorPattern {
+                        width: 4,
+                        height: 4,
+                        pixels: (0..16).map(|i| if i % 4 < 2 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] }).collect::<Vec<_>>().into(),
+                    }),
+                    mix_settings: BrushMixSettings { enabled: true, outputs_smudge: true, strength: 0.5, algorithm, ..Default::default() },
+                    ..brush()
+                };
+                let point = [StrokePoint::new(32.0, 32.0, 1.0)];
+                let s = paint(&b, &point, 64, 64);
+                let left = s.rgba((32.0 - size * 0.25) as i32, 32);
+                let right = s.rgba((32.0 + size * 0.25) as i32, 32);
+                assert!(left[3] > 0.9 && right[3] > 0.9, "{algorithm:?}, size={size}: pattern must fill the resized tip");
+                if pattern {
+                    assert!(left[0] > left[2] && right[2] > right[0], "sampled colors scale with the tip");
+                } else {
+                    assert!(left[1] > 0.9 && right[1] > 0.9, "mixing must retain color output");
+                }
+                b.mix_settings.color_output = false;
+                let empty = paint(&b, &point, 64, 64);
+                assert_eq!(empty.rgba(32, 32)[3], 0.0, "transport alone must not paint foreground");
+            }
+        }
+    }
+}
+
+#[test]
+fn low_flow_spacing_tracks_live_pressure_without_changing_dab_geometry() {
+    let points = [StrokePoint::new(0., 0., 0.25), StrokePoint::new(200., 0., 1.)];
+    let mut b = BrushSettings { c3_tip_math: true, size: 40., hardness: 0., pressure_flow: true, spacing: 0.5, ..brush() };
+    let full = dabs_of(&b, &points);
+    b.flow = 0.02;
+    let low = dabs_of(&b, &points);
+    assert!(low.len() > full.len(), "low flow's smaller visible footprint needs closer dabs");
+    assert!(low.iter().all(|dab| (dab.radius - 20.).abs() < 1e-6), "flow changes coverage, not geometry");
+    assert!(
+        low.windows(2).last().unwrap()[1].center.x - low.windows(2).last().unwrap()[0].center.x > low[1].center.x - low[0].center.x,
+        "pressure increases the live footprint and spacing"
+    );
+    let zero = BrushSettings { flow: 0.0, ..b.clone() };
+    assert!(dabs_of(&zero, &points).len() <= full.len(), "invisible flow must not flood the dab buffer");
+    let mut renderer = StrokeRenderer::new(&b, None, 1.0).record_dabs();
+    renderer.push(&points[..1]);
+    renderer.push(&points[1..]);
+    renderer.finish();
+    assert_eq!(renderer.dabs(), low.as_slice(), "input chunking must not change spacing");
 }

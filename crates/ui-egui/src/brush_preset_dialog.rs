@@ -80,7 +80,7 @@ pub fn body(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>, 
         // The tip as the preset cards draw it, and the size under it.
         let (r, _) = ui.allocate_exact_size(vec2(PREVIEW, PREVIEW), egui::Sense::hover());
         ui.painter().rect_filled(r, t.radius_sm, t.field);
-        let tip = crate::brush_preview::tip_texture(ui.ctx(), "new-preset-tip", &brush.tip, (brush.hardness, brush.angle, brush.roundness), 64, t.text);
+        let tip = crate::brush_preview::tip_texture(ui.ctx(), "new-preset-tip", &brush, 64, t.text);
         let side = (PREVIEW - 30.0) * crate::brush_sections::thumb_scale(brush.size);
         let tr = egui::Rect::from_center_size(pos2(r.center().x, r.top() + 8.0 + (PREVIEW - 30.0) / 2.0), vec2(side, side));
         ui.painter().image(tip.id(), tr, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);

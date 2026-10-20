@@ -3942,3 +3942,101 @@ curves	Smooth	Згладити
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Якір: Затримка
+	Anchor Smooth	Якір: Згладжування
+	Anchor X	Якір X
+	Anchor Y	Якір Y
+	Blur Jitter	Розмиття: Коливання
+	Blur Strength	Розмиття: Сила
+	Canvas Material	Матеріал полотна
+	Choose Pattern	Вибрати візерунок
+	Color Attributes	Атрибути кольору
+	Complementary Color	Доповняльний колір
+	Concentration	Концентрація
+	Contour Strength	Контур: Сила
+	Coordinates:	Координати:
+	Darkening	Затемнення
+	Density Jitter	Щільність: Коливання
+	Drag panels	Перетягувати панелі
+	Draw with the pen in the canvas to calibrate pressure response.	Малюйте пером на полотні для калібрування реакції на натиск.
+	Edge Control	Керування краями
+	Enable Color Attributes	Увімкнути: Атрибути кольору
+	Enable Inertia	Увімкнути: Інерція
+	Enable Mixing	Увімкнути: Змішування
+	Enable Pigment	Увімкнути: Пігмент
+	Enable Stroke Motion	Увімкнути: Рух мазка
+	Expansion	Розширення
+	Fixed Width	Фіксована ширина
+	Flow Algorithm:	Алгоритм подачі:
+	Fluid	Рідина
+	Gaussian Mask	Гаусова маска
+	Grain Density	Щільність зерна
+	Hardness Jitter	Жорсткість: Коливання
+	Highlight Brightness	Яскравість відблисків
+	Highlight Ratio	Частка відблисків
+	Image Palette Color	Колір палітри зображення
+	Import a C3 preset with a packaged canvas pattern.	Імпортуйте набір C3 із вбудованим візерунком полотна.
+	Inertia	Інерція
+	Invert Blur Pressure	Інверсія натиску: Розмиття
+	Invert Length Pressure	Інверсія натиску: Довжина
+	Jitter	Коливання
+	Length Jitter	Довжина: Коливання
+	Liquidity	Плинність
+	Minimum Angle	Мінімум: Кут
+	Minimum Blur	Мінімум: Розмиття
+	Minimum Count	Мінімум: Підрахунок
+	Minimum Distance	Мінімум: Відстань
+	Minimum Hardness	Мінімум: Жорсткість
+	Minimum Length	Мінімум: Довжина
+	Minimum Scatter	Мінімум: Розсіювання
+	Minimum Spacing	Мінімум: Інтервал
+	Minimum Strength	Мінімум: Сила
+	Minimum Stroke Jitter	Мінімум: Мазок: Коливання
+	Minimum Width	Мінімум: Ширина
+	Mixing	Змішування
+	Mixing Strength	Змішування: Сила
+	Outline	Обведення
+	Output Strength	Сила виводу
+	Painting Settings…	Налаштування малювання…
+	Painting…	Малювання…
+	Pattern:	Візерунок:
+	Pigment	Пігмент
+	Pressure Controls Anchor Delay	Керування натиском: Якір: Затримка
+	Pressure Controls Contour	Керування натиском: Контур
+	Pressure Controls Fluid	Керування натиском: Рідина
+	Pressure for Flow	Натиск для подачі
+	Primary Strength	Основна сила
+	Range Jitter	Діапазон: Коливання
+	Saturation Boost	Підсилення насиченості
+	Saturation Protection	Захист насиченості
+	Saturation Record	Запам’ятовування насиченості
+	Secondary Strength	Додаткова сила
+	Show Color Values	Показати значення кольору
+	Single Tip	Один кінчик
+	Smudge Output	Вивід розмазування
+	Soft Coverage	М’яке покриття
+	Spacing Jitter	Інтервал: Коливання
+	Strength Jitter	Сила: Коливання
+	Stroke Jitter	Мазок: Коливання
+	Stroke Motion	Рух мазка
+	Stroke Smoothing	Згладжування мазка
+	Tilt Delay	Затримка нахилу
+	Use Grain Parameters	Використовувати: Параметри зерна
+	Use Pressure Curve	Використовувати: Крива натиску
+	Use Sampled Pattern	Використовувати: Зразок візерунка
+	Use Wet Edge Parameters	Використовувати: Параметри вологих країв
+	Use the eyedropper on the canvas to sample a pattern.	Візьміть зразок візерунка піпеткою на полотні.
+	Water	Вода
+	Watercolor 2	Акварель 2
+	Wet Edge Mode	Режим вологих країв
+	Whole Stroke	Увесь мазок
+	Width Mode	Режим ширини
+
+	Eyedropper Saturation Protection	Захист насиченості піпетки
+	Loop Hue Slider	Зациклити повзунок тону
+	Translucent Selection	Напівпрозоре виділення
+
+	Primary Brush	Основний пензель
+	Secondary Brush	Додатковий пензель
+	Color Output	Нанесення кольору

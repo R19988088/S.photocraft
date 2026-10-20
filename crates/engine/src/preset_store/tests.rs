@@ -744,3 +744,63 @@ fn material_presets_survive_update_copy_restart_and_export_import() {
     imported.execute("tools.setBrush", json!({"reset":true})).unwrap();
     assert!(imported.tools.brush.grain.is_none() && imported.tools.brush.wet_edge.is_none());
 }
+
+#[test]
+fn c3_full_secondary_resources_round_trip_and_load_on_demand() {
+    let dir = TempDir::new("c3-secondary");
+    let (mut s, w) = session(&dir);
+    assert!(w.is_empty());
+    let mut p = sampled("C3 Dual", "C3", tip8(5, 4, 1));
+    let mut secondary = BrushSettings { size: 23.0, tip: TipShape::Sampled(tip8(7, 3, 5)), ..Default::default() };
+    secondary.texture.enabled = true;
+    secondary.texture.pattern = Pattern::Tile(tip16(4, 6, 9));
+    secondary.canvas_material = Some(photocraft_paint::canvas_material::CanvasMaterial { pattern: Pattern::Tile(tip16(7, 3, 5)), ..Default::default() });
+    p.brush.dual_brush.enabled = true;
+    p.brush.dual_brush.full_parameters = Some(Box::new(secondary));
+    s.tools.presets.push(p);
+    s.brush_presets_changed();
+    s.sync_preset_store();
+    let stored = user(&s);
+    let d = stored.last().unwrap().brush.dual_brush.full_parameters.as_ref().unwrap();
+    assert!(matches!(&d.tip,TipShape::Stored(r) if !r.is_loaded()));
+    assert!(matches!(&d.texture.pattern,Pattern::Stored(r) if !r.is_loaded()));
+    let (loaded, w) = session(&dir);
+    assert!(w.is_empty(), "{w:?}");
+    assert_eq!(user(&loaded), stored);
+    let mut b = user(&loaded).last().unwrap().brush.clone();
+    loaded.load_brush_tips(&mut b).unwrap();
+    let secondary = b.dual_brush.full_parameters.as_ref().unwrap();
+    assert_eq!(secondary.tip.bitmap().unwrap(), &tip8(7, 3, 5));
+    assert_eq!(secondary.texture.pattern.bitmap().unwrap(), &tip16(4, 6, 9));
+    assert_eq!(secondary.canvas_material.as_ref().unwrap().pattern.bitmap().unwrap(), &tip16(7, 3, 5));
+}
+
+#[test]
+fn standalone_canvas_presets_round_trip_without_brush_entries() {
+    use photocraft_paint::canvas_material::{CanvasMaterial, CanvasPreset};
+    let dir = TempDir::new("standalone-canvas");
+    let (mut s, warnings) = session(&dir);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let brushes = s.tools.presets.len();
+    let canvas = CanvasPreset {
+        id: "paper-1".into(),
+        name: "Watercolor paper".into(),
+        material: CanvasMaterial {
+            preset_id: Some("paper-1".into()),
+            pattern: Pattern::Tile(tip16(17, 23, 9)),
+            scale: 1.75,
+            blend_mode: photocraft_paint::AttributeMode::Multiply,
+            ..Default::default()
+        },
+        preserved_parameters: [("canvas.opacity".into(), "65".into())].into(),
+    };
+    s.tools.canvas_presets.push(canvas.clone());
+    s.tools.canvas_presets_rev += 1;
+    s.sync_preset_store();
+    assert!(s.preset_store.as_mut().unwrap().take_warnings().is_empty());
+    drop(s);
+    let (s, warnings) = session(&dir);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(s.tools.canvas_presets, vec![canvas]);
+    assert_eq!(s.tools.presets.len(), brushes);
+}

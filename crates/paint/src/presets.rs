@@ -10,7 +10,10 @@ use crate::procedural::{bristle_tip, chalk_tip, charcoal_tip, grass_tip, leaf_ti
 /// Preset groups, in panel order.
 pub const GROUPS: [&str; 4] = ["General", "Dry Media", "Wet Media", "Special Effects"];
 
-fn preset(group: &str, name: &str, brush: BrushSettings) -> BrushPreset {
+fn preset(group: &str, name: &str, mut brush: BrushSettings) -> BrushPreset {
+    brush.c3_tip_math = true;
+    brush.texture.c3_math = true;
+    brush.build_up = false;
     BrushPreset { name: name.to_string(), brush, builtin: true, group: group.to_string(), folder: Vec::new(), captures: Default::default() }
 }
 
@@ -277,7 +280,14 @@ fn special_effects(base: &BrushSettings) -> Vec<BrushPreset> {
                     flip_y_jitter: true,
                     ..Default::default()
                 },
-                scattering: Scattering { enabled: true, scatter: Dynamic::jitter(1.5), both_axes: true, count: 2, count_jitter: Dynamic::jitter(0.5) },
+                scattering: Scattering {
+                    enabled: true,
+                    scatter: Dynamic::jitter(1.5),
+                    both_axes: true,
+                    count: 2,
+                    count_jitter: Dynamic::jitter(0.5),
+                    ..Default::default()
+                },
                 ..base.clone()
             },
         ),
@@ -320,7 +330,14 @@ fn special_effects(base: &BrushSettings) -> Vec<BrushPreset> {
                     flip_y_jitter: true,
                     ..Default::default()
                 },
-                scattering: Scattering { enabled: true, scatter: Dynamic::jitter(1.2), both_axes: true, count: 2, count_jitter: Dynamic::jitter(0.5) },
+                scattering: Scattering {
+                    enabled: true,
+                    scatter: Dynamic::jitter(1.2),
+                    both_axes: true,
+                    count: 2,
+                    count_jitter: Dynamic::jitter(0.5),
+                    ..Default::default()
+                },
                 color_dynamics: ColorDynamics {
                     enabled: true,
                     per_tip: true,

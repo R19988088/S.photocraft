@@ -4022,3 +4022,101 @@ layerLabel	No Color	Sem cor
 	Increase Brush Hardness	Aumentar dureza do pincel
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Âncora: Atraso
+	Anchor Smooth	Âncora: Suavização
+	Anchor X	Âncora X
+	Anchor Y	Âncora Y
+	Blur Jitter	Desfoque: Variação
+	Blur Strength	Desfoque: Intensidade
+	Canvas Material	Material da tela
+	Choose Pattern	Escolher padrão
+	Color Attributes	Atributos de cor
+	Complementary Color	Cor complementar
+	Concentration	Concentração
+	Contour Strength	Contorno: Intensidade
+	Coordinates:	Coordenadas:
+	Darkening	Escurecimento
+	Density Jitter	Densidade: Variação
+	Drag panels	Arrastar painéis
+	Draw with the pen in the canvas to calibrate pressure response.	Desenhe com a caneta na tela para calibrar a resposta à pressão.
+	Edge Control	Controle de bordas
+	Enable Color Attributes	Ativar: Atributos de cor
+	Enable Inertia	Ativar: Inércia
+	Enable Mixing	Ativar: Mistura
+	Enable Pigment	Ativar: Pigmento
+	Enable Stroke Motion	Ativar: Movimento do traço
+	Expansion	Expansão
+	Fixed Width	Largura fixa
+	Flow Algorithm:	Algoritmo de fluxo:
+	Fluid	Fluido
+	Gaussian Mask	Máscara gaussiana
+	Grain Density	Densidade do grão
+	Hardness Jitter	Dureza: Variação
+	Highlight Brightness	Brilho dos realces
+	Highlight Ratio	Proporção dos realces
+	Image Palette Color	Cor da paleta de imagem
+	Import a C3 preset with a packaged canvas pattern.	Importe uma predefinição C3 com um padrão de tela incluído.
+	Inertia	Inércia
+	Invert Blur Pressure	Inverter pressão: Desfoque
+	Invert Length Pressure	Inverter pressão: Comprimento
+	Jitter	Variação
+	Length Jitter	Comprimento: Variação
+	Liquidity	Fluidez
+	Minimum Angle	Mínimo: Ângulo
+	Minimum Blur	Mínimo: Desfoque
+	Minimum Count	Mínimo: Contagem
+	Minimum Distance	Mínimo: Distância
+	Minimum Hardness	Mínimo: Dureza
+	Minimum Length	Mínimo: Comprimento
+	Minimum Scatter	Mínimo: Dispersão
+	Minimum Spacing	Mínimo: Espaçamento
+	Minimum Strength	Mínimo: Intensidade
+	Minimum Stroke Jitter	Mínimo: Traço: Variação
+	Minimum Width	Mínimo: Largura
+	Mixing	Mistura
+	Mixing Strength	Mistura: Intensidade
+	Outline	Contorno
+	Output Strength	Intensidade de saída
+	Painting Settings…	Configurações de pintura…
+	Painting…	Pintura…
+	Pattern:	Padrão:
+	Pigment	Pigmento
+	Pressure Controls Anchor Delay	Controle por pressão: Âncora: Atraso
+	Pressure Controls Contour	Controle por pressão: Contorno
+	Pressure Controls Fluid	Controle por pressão: Fluido
+	Pressure for Flow	Pressão para o fluxo
+	Primary Strength	Intensidade principal
+	Range Jitter	Intervalo: Variação
+	Saturation Boost	Aumento da saturação
+	Saturation Protection	Proteção da saturação
+	Saturation Record	Registro de saturação
+	Secondary Strength	Intensidade secundária
+	Show Color Values	Mostrar valores de cor
+	Single Tip	Ponta única
+	Smudge Output	Saída do borrar
+	Soft Coverage	Cobertura suave
+	Spacing Jitter	Espaçamento: Variação
+	Strength Jitter	Intensidade: Variação
+	Stroke Jitter	Traço: Variação
+	Stroke Motion	Movimento do traço
+	Stroke Smoothing	Suavização do traço
+	Tilt Delay	Atraso da inclinação
+	Use Grain Parameters	Usar: Parâmetros de grão
+	Use Pressure Curve	Usar: Curva de pressão
+	Use Sampled Pattern	Usar: Padrão amostrado
+	Use Wet Edge Parameters	Usar: Parâmetros de bordas úmidas
+	Use the eyedropper on the canvas to sample a pattern.	Use o conta-gotas na tela para amostrar um padrão.
+	Water	Água
+	Watercolor 2	Aquarela 2
+	Wet Edge Mode	Modo de bordas úmidas
+	Whole Stroke	Traço inteiro
+	Width Mode	Modo de largura
+
+	Eyedropper Saturation Protection	Proteção de saturação do conta-gotas
+	Loop Hue Slider	Controle de matiz cíclico
+	Translucent Selection	Seleção translúcida
+
+	Primary Brush	Pincel principal
+	Secondary Brush	Pincel secundário
+	Color Output	Saída de cor

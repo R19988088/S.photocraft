@@ -8,7 +8,7 @@
 //! - `engine.commands`: list commands with enablement
 //! - `ui.inspect`: full UI state (tool, panels, views, dialogs, windows, window size); the menu
 //!   tree is `ui.menu.list`
-//! - `ui.set {tool?, panels?, dock?, dockTabs?, dockWidth?, colorPanel?, maskTarget?, vectorMaskTarget?, selectionMode?, zoom?, center?, rotation?, fit?, theme?, brushSection?, brushTab?, brushesView?, brushPicker?, brushPickerName?, brushPickerStroke?, brushPickerTip?, brushPickerScale?, brushSize?}`:
+//! - `ui.set {tool?, panels?, dock?, dockTabs?, dockWidth?, colorPanel?, maskTarget?, vectorMaskTarget?, selectionMode?, zoom?, center?, rotation?, fit?, theme?, brushSection?, brushTab?, brushLane?, brushSecondarySection?, brushesView?, brushPicker?, brushPickerName?, brushPickerStroke?, brushPickerTip?, brushPickerScale?, brushSize?}`:
 //!   change UI state; any other field is an error ([`UI_SET_FIELDS`])
 //! - `ui.dialog.open {kind, fields?}` (kinds: newDocument, about, layerStyle {effect?}, colorPicker {target: foreground|background}, command {command}) / `ui.dialog.set {dialog, field, value}` / `ui.dialog.confirm {dialog, wait?}` / `ui.dialog.cancel {dialog}`
 //! - `ui.dialog.apply {dialog}`: commit Preferences changes without closing the dialog
@@ -131,7 +131,7 @@ pub enum Outcome {
 /// field's value is validated before the first one is applied, so a typo, an unknown field, a
 /// bad value or a bad nested key can't reply with success while nothing — or only half of it —
 /// changed (#412).
-pub const UI_SET_FIELDS: [&str; 38] = [
+pub const UI_SET_FIELDS: [&str; 40] = [
     "tool",
     "strokeTrace",
     "panels",
@@ -149,6 +149,8 @@ pub const UI_SET_FIELDS: [&str; 38] = [
     "theme",
     "brushSection",
     "brushTab",
+    "brushLane",
+    "brushSecondarySection",
     "brushesView",
     "brushPicker",
     "brushPickerName",
@@ -603,6 +605,8 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 };
                 let brush_section = uint_field(p, "brushSection")?;
                 let brush_tab = uint_field(p, "brushTab")?;
+                let brush_lane = uint_field(p, "brushLane")?;
+                let brush_secondary_section = uint_field(p, "brushSecondarySection")?;
                 let brushes_view = match p.get("brushesView") {
                     Some(v) => serde_json::from_value(v.clone()).map(Some).map_err(|e| format!("brushesView: {e} (list, grid)"))?,
                     None => None,
@@ -782,6 +786,12 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 }
                 if let Some(i) = brush_tab {
                     app.ui.brush_tab = (i as usize).min(1);
+                }
+                if let Some(i) = brush_lane {
+                    app.ui.brush_lane = (i as usize).min(1);
+                }
+                if let Some(i) = brush_secondary_section {
+                    app.ui.brush_secondary_section = (i as usize).min(crate::brush_panel::SECTIONS.len() - 1);
                 }
                 if let Some(v) = brushes_view {
                     app.ui.brushes_panel.view = v;

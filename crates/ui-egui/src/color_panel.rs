@@ -29,6 +29,9 @@ pub(crate) fn menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 fn set_color(app: &mut PhotocraftApp, c: [f32; 4]) {
     let target = if app.ui.color_panel.background { "background" } else { "foreground" };
+    if target == "foreground" && app.session.tools.brush.pattern_enabled {
+        let _ = app.run("tools.setColorSource", json!({"pattern":false}));
+    }
     if app.run("tools.setColors", json!({(target):c})).is_ok() && target == "foreground" {
         crate::type_tool::foreground_changed(app);
     }
@@ -223,6 +226,7 @@ fn sources(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: Rect) {
     ui.painter().rect_stroke(fg, t.radius_sm, Stroke::new(if app.ui.color_panel.background { 1. } else { 2. }, t.accent), StrokeKind::Inside);
     if response.clicked() {
         app.ui.color_panel.background = false;
+        let _ = app.run("tools.setColorSource", json!({"pattern":false}));
     }
     if response.double_clicked() {
         crate::color_picker_ui::open(app, "foreground");
@@ -261,6 +265,7 @@ fn sources(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: Rect) {
 }
 
 pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    color_source(app, ui);
     let bg = app.ui.color_panel.background;
     let color = if bg { app.session.tools.background } else { app.session.tools.foreground };
     let key = egui::Id::new(("color-field-hue", bg));
@@ -325,6 +330,46 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             && i.pointer.interact_pos().is_some_and(|p| Rect::from_min_max(rect.min, ui.min_rect().max).contains(p))
     });
     popup.open_memory(open.then_some(egui::SetOpenCommand::Bool(true))).show(|ui| menu(app, ui));
+}
+
+fn color_source(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let pattern = app.session.tools.brush.pattern_enabled;
+    ui.horizontal(|ui| {
+        if ui.selectable_label(!pattern, tl!("Solid")).clicked() {
+            let _ = app.run("tools.setColorSource", json!({"pattern":false}));
+        }
+        if ui.selectable_label(pattern, tl!("Pattern")).clicked() {
+            let _ = app.run("tools.setColorSource", json!({"pattern":true}));
+        }
+        if let Some(patch) = app.session.tools.brush.sampled_pattern.as_ref() {
+            let (r, response) = ui.allocate_exact_size(vec2(28., 28.), Sense::click());
+            let t = Tokens::get(ui.ctx());
+            ui.painter().rect_filled(r, t.radius_sm, t.field);
+            let nx = patch.width.min(28);
+            let ny = patch.height.min(28);
+            for yy in 0..ny {
+                for xx in 0..nx {
+                    let at = (yy * patch.height / ny) as usize * patch.width as usize + (xx * patch.width / nx) as usize;
+                    if let Some(c) = patch.pixels.get(at) {
+                        let cell = Rect::from_min_max(
+                            r.min + vec2(xx as f32 / nx as f32 * r.width(), yy as f32 / ny as f32 * r.height()),
+                            r.min + vec2((xx + 1) as f32 / nx as f32 * r.width(), (yy + 1) as f32 / ny as f32 * r.height()),
+                        );
+                        ui.painter().rect_filled(cell, 0., crate::panels::c32(*c));
+                    }
+                }
+            }
+            ui.painter().rect_stroke(r, t.radius_sm, Stroke::new(1., if pattern { t.accent } else { t.field_border }), StrokeKind::Inside);
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Sampled Pattern"));
+            if response.on_hover_text(tl!("Use Sampled Pattern")).clicked() {
+                let _ = app.run("tools.setColorSource", json!({"pattern":true}));
+            }
+        }
+    });
+    if pattern && app.session.tools.brush.sampled_pattern.is_none() {
+        ui.label(tl!("Use the eyedropper on the canvas to sample a pattern."));
+    }
+    ui.add_space(4.);
 }
 
 pub(crate) fn remember_hsva(mut h: egui::ecolor::Hsva, remembered: (f32, f32), strength: f32) -> egui::ecolor::Hsva {
@@ -408,6 +453,21 @@ fn extract_colors(pixels: &[u8]) -> Vec<[f32; 4]> {
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn color_source_switch_preserves_patch_and_selecting_solid_color_deactivates_it() {
+        let mut h = harness(PaletteMode::HueCube);
+        h.get_by_label("Pattern").click();
+        h.run_steps(2);
+        assert!(h.state().session.tools.brush.pattern_enabled);
+        assert!(h.state().session.tools.brush.sampled_pattern.is_none());
+        h.get_by_label("Solid").click();
+        h.run_steps(2);
+        assert!(!h.state().session.tools.brush.pattern_enabled);
+        h.state_mut().session.tools.brush.pattern_enabled = true;
+        set_color(h.state_mut(), [0.8, 0.2, 0.1, 1.]);
+        assert!(!h.state().session.tools.brush.pattern_enabled);
+    }
 
     #[test]
     fn near_black_sampling_retains_saturation_without_changing_sampled_rgb() {

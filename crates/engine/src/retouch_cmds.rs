@@ -139,6 +139,8 @@ pub fn stroke_brush(base: &BrushSettings, p: &Value) -> BrushSettings {
         // Brush Settings › Brush Tip Shape › Spacing, as the Brush uses it (#2140).
         spacing: pct("spacing", base.spacing * 100.0, 1.0, 1000.0),
         erase: false,
+        // Retouch tools keep their calibrated Photoshop footprint; C3 applies to Brush/Eraser/Smudge.
+        c3_tip_math: false,
         ..base.clone()
     }
 }
@@ -146,21 +148,15 @@ pub fn stroke_brush(base: &BrushSettings, p: &Value) -> BrushSettings {
 /// Parse the shared brush params into a stroke on a layer (`None` when an alpha channel or the
 /// Quick Mask is targeted).
 fn parse_brush(s: &Session, p: &Value, cmd: &str) -> Result<(Stroke, Option<LayerId>)> {
-    let pts: Vec<StrokePoint> = p
-        .get("points")
-        .and_then(Value::as_array)
-        .ok_or_else(|| bad(cmd, "missing `points`"))?
-        .iter()
-        .filter_map(|v| {
-            let a = v.as_array()?;
-            Some(StrokePoint::new(a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2).and_then(Value::as_f64).unwrap_or(1.0) as f32))
-        })
-        .collect();
+    let pts = crate::brush_cmds::parse_points(p, cmd)?;
     if pts.is_empty() {
         return Err(bad(cmd, "`points` is empty"));
     }
     crate::brush_cmds::check_coords(&pts, cmd)?;
-    let brush = stroke_brush(&s.tools.brush, p);
+    let mut brush = stroke_brush(&s.tools.brush, p);
+    if cmd == "paint.smudge" {
+        brush.c3_tip_math = s.tools.brush.c3_tip_math;
+    }
     crate::brush_cmds::validate_brush(&brush, cmd)?;
     if crate::channel_cmds::is_channel_target(p) {
         return Ok((Stroke { brush, points: pts }, None));
@@ -1067,14 +1063,80 @@ impl DabTool {
     }
 }
 
+/// Retain the original v1 tool for ordinary presets; C3 effects share the brush lanes.
+fn shared_smudge(stroke: &mut Stroke, p: &Value, cmd: &str, base: &BrushSettings) -> bool {
+    if cmd != "paint.smudge" {
+        return false;
+    }
+    let b = &mut stroke.brush;
+    if flag(p, "fingerPainting", false) {
+        b.c3_tip_math = false;
+        b.mix_settings.outputs_smudge = false;
+        return false;
+    }
+    let advanced = b.c3_tip_math
+        || b.mix_settings.enabled
+        || b.mix_settings.outputs_smudge
+        || b.mix_settings.algorithm != photocraft_paint::transport::MixAlgorithm::V1
+        || b.dual_brush.enabled
+        || b.color_attributes.enabled
+        || b.wet_edges
+        || b.pigment.as_ref().is_some_and(|p| p.enabled)
+        || b.mix_settings.blur_strength > 0.0;
+    if !advanced {
+        return false;
+    }
+    if p.get("opacity").is_none() {
+        b.opacity = base.opacity;
+    }
+    if p.get("flow").is_none() {
+        b.flow = base.flow;
+    }
+    let legacy_default = !b.c3_tip_math && !b.mix_settings.enabled && b.mix_settings.strength <= 0.0;
+    b.erase = false;
+    b.mix_settings.enabled = true;
+    b.mix_settings.outputs_smudge = true;
+    b.mix_settings.color_output = false;
+    if p.get("strength").is_some() || legacy_default {
+        b.mix_settings.strength = num(p, "strength", 50.0).clamp(0.0, 100.0) / 100.0;
+    }
+    if let Some(secondary) = &mut b.dual_brush.full_parameters {
+        secondary.erase = false;
+        secondary.mix_settings.outputs_smudge = true;
+        secondary.mix_settings.color_output = false;
+        secondary.mix_settings.enabled = true;
+    }
+    true
+}
+
 /// Dodge, Burn, Sponge, Blur, Sharpen and Smudge: each dab edits a working copy in order
 /// (`apply_dab_stroke`). Blur, Sharpen and Smudge can sample all layers.
 fn dab_cmd(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
-    let (stroke, id) = parse_brush(s, p, cmd)?;
+    let (mut stroke, id) = parse_brush(s, p, cmd)?;
+    let shared = shared_smudge(&mut stroke, p, cmd, &s.tools.brush);
     let (tool, label) = DabTool::parse(s, cmd, p, &stroke)?;
     let all = matches!(tool, DabTool::Focus { .. } | DabTool::Smudge { .. }) && sample_all_layers(p);
     let dmg = run_stroke(s, label, id, p, |pre, surf, sel, lock| {
         let fmt = surf.format();
+        if shared {
+            if all {
+                let mut bounds = photocraft_paint::StrokeRenderer::new(&stroke.brush, Some(fmt), 1.0);
+                bounds.push(&stroke.points);
+                bounds.finish();
+                let rect = bounds.bounds().inflate(127);
+                if u64::from(rect.width()).saturating_mul(u64::from(rect.height())) > MAX_STROKE_PIXELS {
+                    return Err(bad(cmd, "stroke too large"));
+                }
+                let mut sampling = Surface::new(fmt);
+                composite_region(pre, id, SampleLayers::All, rect, fmt).write(&mut sampling);
+                let mut renderer = photocraft_paint::StrokeRenderer::on_surface(&stroke.brush, &sampling, 1.0);
+                renderer.push(&stroke.points);
+                renderer.finish();
+                let target_pre = surf.clone();
+                return Ok(renderer.composite(&target_pre, surf, sel, lock, true));
+            }
+            return Ok(photocraft_paint::render_stroke(surf, &stroke.brush, &stroke.points, sel, lock, 1.0));
+        }
         let mut effect = tool.effect(fmt, stroke.brush.spacing);
         let mut sampler = all.then(|| AllLayers::new(pre, fmt));
         Ok(apply_dab_stroke(surf, &stroke, sel, lock, tool.halo(), |work, fp| match &mut sampler {
@@ -1094,6 +1156,7 @@ pub struct LiveDab {
     pub doc: std::sync::Arc<Document>,
     cmd: String,
     renderer: photocraft_paint::StrokeRenderer,
+    shared_transport: bool,
     done: usize,
     effect: DabEffect,
     halo: i32,
@@ -1121,7 +1184,8 @@ impl LiveDab {
         if sample_all_layers(p) {
             return Err(bad(cmd, "Sample All Layers strokes aren't previewed live"));
         }
-        let (stroke, id) = parse_brush(s, p, cmd)?;
+        let (mut stroke, id) = parse_brush(s, p, cmd)?;
+        shared_smudge(&mut stroke, p, cmd, &s.tools.brush);
         let (tool, _) = DabTool::parse(s, cmd, p, &stroke)?;
         let (halo, spacing) = (tool.halo(), stroke.brush.spacing);
         Self::with_effect(s, cmd, p, stroke, id, halo, |pre| tool.effect(pre.format(), spacing))
@@ -1144,11 +1208,17 @@ impl LiveDab {
         let pre_surf = surf.clone();
         let effect = effect(&pre_surf);
         // `apply_dab_stroke` generates the same dabs (`dabs`: zoom 1, no smoothing scale).
-        let renderer = photocraft_paint::StrokeRenderer::new(&stroke.brush, None, 1.0).record_dabs();
+        let shared_transport = cmd == "paint.smudge" && stroke.brush.mix_settings.outputs_smudge;
+        let renderer = if shared_transport {
+            photocraft_paint::StrokeRenderer::on_surface(&stroke.brush, &pre_surf, 1.0).record_dabs()
+        } else {
+            photocraft_paint::StrokeRenderer::new(&stroke.brush, None, 1.0).record_dabs()
+        };
         let mut live = Self {
             doc: std::sync::Arc::new(doc),
             cmd: cmd.into(),
             renderer,
+            shared_transport,
             done: 0,
             effect,
             halo,
@@ -1184,6 +1254,12 @@ impl LiveDab {
     pub fn push(&mut self, pts: &[StrokePoint]) -> Result<Rect> {
         crate::brush_cmds::check_coords(pts, &self.cmd)?;
         self.renderer.push(pts);
+        if self.shared_transport {
+            let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.id, &self.params)?;
+            let damage = self.renderer.composite(&self.pre_surf, surf, self.sel.as_ref(), self.lock, false);
+            self.bounds = self.bounds.union(&damage);
+            return Ok(damage);
+        }
         let ctx = self.renderer.ctx.clone();
         let new: Vec<_> = self.renderer.dabs().get(self.done..).unwrap_or_default().to_vec();
         let mut dmg = Rect::EMPTY;

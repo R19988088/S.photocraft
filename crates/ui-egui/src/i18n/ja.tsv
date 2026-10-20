@@ -3911,3 +3911,101 @@ curves	Smooth	スムーズ
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	アンカー: 遅延
+	Anchor Smooth	アンカー: 滑らかさ
+	Anchor X	アンカー X
+	Anchor Y	アンカー Y
+	Blur Jitter	ぼかしの揺らぎ
+	Blur Strength	ぼかし: 強さ
+	Canvas Material	キャンバス素材
+	Choose Pattern	パターンを選択
+	Color Attributes	色の属性
+	Complementary Color	補色
+	Concentration	濃度
+	Contour Strength	輪郭: 強さ
+	Coordinates:	座標：
+	Darkening	暗くする
+	Density Jitter	密度の揺らぎ
+	Drag panels	パネルをドラッグ
+	Draw with the pen in the canvas to calibrate pressure response.	キャンバスにペンで描いて筆圧応答を調整します。
+	Edge Control	エッジ制御
+	Enable Color Attributes	色の属性を有効化
+	Enable Inertia	慣性を有効化
+	Enable Mixing	混色を有効化
+	Enable Pigment	顔料を有効化
+	Enable Stroke Motion	ストロークの動きを有効化
+	Expansion	拡張
+	Fixed Width	固定幅
+	Flow Algorithm:	流量アルゴリズム：
+	Fluid	流体
+	Gaussian Mask	ガウスマスク
+	Grain Density	粒子密度
+	Hardness Jitter	硬さの揺らぎ
+	Highlight Brightness	ハイライトの明るさ
+	Highlight Ratio	ハイライトの比率
+	Image Palette Color	画像パレットの色
+	Import a C3 preset with a packaged canvas pattern.	キャンバス模様を含む C3 プリセットを読み込みます。
+	Inertia	慣性
+	Invert Blur Pressure	筆圧を反転: ぼかし
+	Invert Length Pressure	筆圧を反転: 長さ
+	Jitter	揺らぎ
+	Length Jitter	長さの揺らぎ
+	Liquidity	流動性
+	Minimum Angle	最小角度
+	Minimum Blur	最小ぼかし
+	Minimum Count	最小カウント
+	Minimum Distance	最小距離
+	Minimum Hardness	最小硬さ
+	Minimum Length	最小長さ
+	Minimum Scatter	最小散布
+	Minimum Spacing	最小間隔
+	Minimum Strength	最小強さ
+	Minimum Stroke Jitter	最小ストロークの揺らぎ
+	Minimum Width	最小幅
+	Mixing	混色
+	Mixing Strength	混色: 強さ
+	Outline	輪郭線
+	Output Strength	出力の強さ
+	Painting Settings…	描画設定…
+	Painting…	描画…
+	Pattern:	パターン：
+	Pigment	顔料
+	Pressure Controls Anchor Delay	アンカー: 遅延を筆圧で制御
+	Pressure Controls Contour	輪郭を筆圧で制御
+	Pressure Controls Fluid	流体を筆圧で制御
+	Pressure for Flow	流量の筆圧制御
+	Primary Strength	主ブラシの強さ
+	Range Jitter	範囲の揺らぎ
+	Saturation Boost	彩度の増加
+	Saturation Protection	彩度の保護
+	Saturation Record	彩度の記録
+	Secondary Strength	副ブラシの強さ
+	Show Color Values	色の値を表示
+	Single Tip	単一のブラシ先端
+	Smudge Output	指先の出力
+	Soft Coverage	柔らかな被覆
+	Spacing Jitter	間隔の揺らぎ
+	Strength Jitter	強さの揺らぎ
+	Stroke Jitter	ストロークの揺らぎ
+	Stroke Motion	ストロークの動き
+	Stroke Smoothing	ストロークの平滑化
+	Tilt Delay	傾きの遅延
+	Use Grain Parameters	粒子パラメーターを使用
+	Use Pressure Curve	筆圧カーブを使用
+	Use Sampled Pattern	採取したパターンを使用
+	Use Wet Edge Parameters	ウェットエッジのパラメーターを使用
+	Use the eyedropper on the canvas to sample a pattern.	キャンバス上のスポイトでパターンを採取します。
+	Water	水分
+	Watercolor 2	水彩 2
+	Wet Edge Mode	ウェットエッジモード
+	Whole Stroke	ストローク全体
+	Width Mode	幅モード
+
+	Eyedropper Saturation Protection	スポイトの彩度保護
+	Loop Hue Slider	色相スライダーを循環
+	Translucent Selection	半透明の選択範囲
+
+	Primary Brush	メインブラシ
+	Secondary Brush	サブブラシ
+	Color Output	色を出力

@@ -3234,3 +3234,104 @@ curves	Smooth	Glätten
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Anker: Verzögerung
+	Anchor Smooth	Anker: Glättung
+	Anchor X	Anker X
+	Anchor Y	Anker Y
+	Blur Jitter	Weichzeichnung: Zufallsvariation
+	Blur Strength	Weichzeichnung: Stärke
+	Canvas Material	Leinwandmaterial
+	Choose Pattern	Muster auswählen
+	Color Attributes	Farbeigenschaften
+	Complementary Color	Komplementärfarbe
+	Concentration	Konzentration
+	Contour Strength	Kontur: Stärke
+	Coordinates:	Koordinaten:
+	Darkening	Abdunklung
+	Density Jitter	Dichte: Zufallsvariation
+	Drag panels	Bedienfelder ziehen
+	Draw with the pen in the canvas to calibrate pressure response.	Zeichne mit dem Stift auf der Leinwand, um die Druckreaktion zu kalibrieren.
+	Edge Control	Kantensteuerung
+	Enable Color Attributes	Aktivieren: Farbeigenschaften
+	Enable Inertia	Aktivieren: Trägheit
+	Enable Mixing	Aktivieren: Farbmischung
+	Enable Pigment	Aktivieren: Pigment
+	Enable Stroke Motion	Aktivieren: Strichbewegung
+	Expansion	Ausdehnung
+	Fixed Width	Feste Breite
+	Flow Algorithm:	Flussalgorithmus:
+	Fluid	Flüssigkeit
+	Gaussian Mask	Gaußsche Maske
+	Grain Density	Korndichte
+	Grain Size	Körnung: Größe
+	Hardness Jitter	Härte: Zufallsvariation
+	Highlight Brightness	Glanzlichthelligkeit
+	Highlight Ratio	Glanzlichtanteil
+	Highlight Strength	Lichter: Stärke
+	Image Palette Color	Farbe der Bildpalette
+	Import a C3 preset with a packaged canvas pattern.	Importiere eine C3-Vorgabe mit enthaltenem Leinwandmuster.
+	Inertia	Trägheit
+	Invert Blur Pressure	Druck umkehren: Weichzeichnung
+	Invert Length Pressure	Druck umkehren: Länge
+	Jitter	Zufallsvariation
+	Length Jitter	Länge: Zufallsvariation
+	Liquidity	Fließfähigkeit
+	Minimum Angle	Minimum: Winkel
+	Minimum Blur	Minimum: Weichzeichnung
+	Minimum Count	Minimum: Zähler
+	Minimum Distance	Minimum: Abstand
+	Minimum Hardness	Minimum: Härte
+	Minimum Length	Minimum: Länge
+	Minimum Scatter	Minimum: Streuung
+	Minimum Spacing	Minimum: Abstand
+	Minimum Strength	Minimum: Stärke
+	Minimum Stroke Jitter	Minimum: Strich: Zufallsvariation
+	Minimum Width	Minimum: Breite
+	Mixing	Farbmischung
+	Mixing Strength	Farbmischung: Stärke
+	Outline	Umriss
+	Output Strength	Ausgabestärke
+	Painting Settings…	Maleinstellungen…
+	Painting…	Malen…
+	Pattern:	Muster:
+	Pigment	Pigment
+	Pressure Controls Anchor Delay	Drucksteuerung: Anker: Verzögerung
+	Pressure Controls Contour	Drucksteuerung: Kontur
+	Pressure Controls Fluid	Drucksteuerung: Flüssigkeit
+	Pressure for Flow	Stiftdruck für Fluss
+	Primary Strength	Primäre Stärke
+	Range Jitter	Bereich: Zufallsvariation
+	Saturation Boost	Sättigungsverstärkung
+	Saturation Protection	Sättigungsschutz
+	Saturation Record	Sättigungsspeicher
+	Secondary Strength	Sekundäre Stärke
+	Show Color Values	Farbwerte anzeigen
+	Single Tip	Einzelne Spitze
+	Smudge Output	Wischfinger-Ausgabe
+	Soft Coverage	Weiche Abdeckung
+	Spacing Jitter	Abstand: Zufallsvariation
+	Strength Jitter	Stärke: Zufallsvariation
+	Stroke Jitter	Strich: Zufallsvariation
+	Stroke Motion	Strichbewegung
+	Stroke Smoothing	Strichglättung
+	Tilt Delay	Neigungsverzögerung
+	Use Grain Parameters	Verwenden: Kornparameter
+	Use Pressure Curve	Verwenden: Druckkurve
+	Use Sampled Pattern	Verwenden: Aufgenommenes Muster
+	Use Wet Edge Parameters	Verwenden: Parameter für nasse Kanten
+	Use the eyedropper on the canvas to sample a pattern.	Nimm mit der Pipette auf der Leinwand ein Muster auf.
+	Water	Wasser
+	Watercolor	Aquarell
+	Watercolor 2	Aquarell 2
+	Wet Edge Mode	Modus für nasse Kanten
+	Whole Stroke	Gesamter Strich
+	Width Mode	Breitenmodus
+
+	Eyedropper Saturation Protection	Sättigungsschutz der Pipette
+	Loop Hue Slider	Farbtonregler zyklisch
+	Translucent Selection	Halbtransparente Auswahl
+
+	Primary Brush	Hauptpinsel
+	Secondary Brush	Zweitpinsel
+	Color Output	Farbausgabe

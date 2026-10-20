@@ -88,6 +88,31 @@ fn import_abr(s: &mut Session, p: &Value) -> Result<Value> {
     )
 }
 
+fn import_c3(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "brush.presets.importC3";
+    let (bytes, stem) = file_bytes(p, cmd, "C3 schema-5 JSON or ZIP package")?;
+    let group = match p.get("group") {
+        Some(v) => v.as_str().map(str::trim).filter(|g| !g.is_empty()).ok_or_else(|| bad(cmd, "`group` must be a non-empty string"))?.to_string(),
+        None if !stem.is_empty() => stem,
+        None => "Imported C3 Brushes".to_string(),
+    };
+    let imp = photocraft_io::c3::read_c3(&bytes, &group).map_err(|e| bad(cmd, e))?;
+    let canvas_count = imp.canvas_presets.len();
+    let mut result = add_abr_presets(s, p, group, photocraft_io::abr_map::AbrImport { presets: imp.presets, warnings: imp.warnings, version: imp.version })?;
+    for preset in imp.canvas_presets {
+        if let Some(existing) = s.tools.canvas_presets.iter_mut().find(|p| p.id == preset.id) {
+            *existing = preset;
+        } else {
+            s.tools.canvas_presets.push(preset);
+        }
+    }
+    if canvas_count > 0 {
+        s.tools.canvas_presets_rev = s.tools.canvas_presets_rev.saturating_add(1);
+    }
+    result["canvasCount"] = json!(canvas_count);
+    Ok(result)
+}
+
 fn add_abr_presets(s: &mut Session, p: &Value, group: String, imp: photocraft_io::abr_map::AbrImport) -> Result<Value> {
     // Re-importing a file replaces its group instead of duplicating it.
     if p.get("replace").and_then(Value::as_bool).unwrap_or(true) {
@@ -109,6 +134,7 @@ fn add_abr_presets(s: &mut Session, p: &Value, group: String, imp: photocraft_io
         let mut b = pr.brush.clone().picked_over(&s.tools.brush);
         s.load_brush_tips(&mut b).map_err(|e| bad("brush.presets.importAbr", e))?;
         s.tools.brush = b;
+        s.tools.current_preset = Some(first.clone());
         s.tools.brush_changed();
     }
     // Distinct folder paths the file brought (its Photoshop folders, nested inside `group`).
@@ -202,6 +228,16 @@ fn import_image(s: &mut Session, p: &Value) -> Result<Value> {
 /// Brush-file import command specs.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        CommandSpec {
+            id: "brush.presets.importC3",
+            label: "Import C3 Brushes…",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"path":string?,"data":base64?,"group":string?,"replace":bool=true,"select":bool=false} → {group,imported,count,folders,version,warnings}"#,
+            enabled: always,
+            run: import_c3,
+            journal: true,
+        },
         CommandSpec {
             id: "brush.presets.importAbr",
             label: "Import Brushes…",
@@ -531,5 +567,24 @@ mod tests {
         let taken = vec!["A".to_string(), "a 2".to_string()];
         assert_eq!(unique("a", &taken), "a 3");
         assert_eq!(unique("B", &taken), "B");
+    }
+}
+
+#[cfg(test)]
+mod c3_tests {
+    use super::*;
+    #[test]
+    fn c3_command_import_select_and_replace_are_available_without_document() {
+        let mut s = Session::new();
+        let doc = json!({"schemaVersion":5,"packageID":"c3","name":"Ink","groups":[],"presets":[{"id":"ink","name":"C3 Ink","tool":"brush","parameters":{"size":37,"opacity":0.25},"sections":{"dualBrush":{"enabled":true,"parameters":{"size":19,"flow":0.5}}}}]});
+        let data = photocraft_paint::tile::b64_encode(&serde_json::to_vec(&doc).unwrap());
+        let result = s.execute("brush.presets.importC3", json!({"data":data,"group":"C3","select":true})).unwrap();
+        assert_eq!(result["count"], 1);
+        assert_eq!(s.tools.current_preset.as_deref(), Some("C3 Ink"));
+        assert_eq!(s.tools.brush.size, 37.0);
+        assert_eq!(s.tools.brush.dual_brush.full_parameters.as_ref().unwrap().flow, 0.5);
+        s.execute("brush.presets.importC3", json!({"data":data,"group":"C3"})).unwrap();
+        assert_eq!(s.tools.presets.iter().filter(|p| p.group == "C3").count(), 1);
+        assert!(s.execute("brush.presets.importC3", json!({"data":"bad"})).is_err());
     }
 }

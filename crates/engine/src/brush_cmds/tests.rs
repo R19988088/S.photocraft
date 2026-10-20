@@ -52,6 +52,13 @@ fn stroke_accepts_full_points_brush_and_preset() {
 }
 
 #[test]
+fn stroke_rejects_malformed_points_instead_of_dropping_them() {
+    assert!(parse_points(&json!({"points": [[1, 2], ["bad", 3]]}), "paint.stroke").is_err());
+    assert!(parse_points(&json!({"points": [{"x": 1}]}), "paint.stroke").is_err());
+    assert!(parse_points(&json!({"points": [[1, 2], {"x": 3, "y": 4}]}), "paint.stroke").is_ok());
+}
+
+#[test]
 fn paint_commands_bound_hostile_time_and_reject_oversized_brushes() {
     let mut s = session(32, 32);
     let timed = s.execute(
@@ -860,7 +867,7 @@ fn out_of_range_scatter_is_rejected_and_the_maximum_still_paints() {
     let scatter = |j: f64| json!({"scattering": {"enabled": true, "bothAxes": true, "scatter": {"jitter": j}}});
     let dual = |j: f64| json!({"dualBrush": {"enabled": true, "bothAxes": true, "size": 6, "scatter": j}});
     let stroke = json!({"points": [[10, 10]]});
-    for (j, shown) in [(1e38, "1e38"), (10.01, "10.01"), (1e39, "inf"), (-1.0, "-1.0")] {
+    for (j, shown) in [(1e38, "1e38"), (50.01, "50.01"), (1e39, "inf"), (-1.0, "-1.0")] {
         for (patch, what) in [(scatter(j), "scatter"), (dual(j), "dual brush scatter")] {
             let mut s = new();
             let before = s.tools.brush.clone();
@@ -878,19 +885,18 @@ fn out_of_range_scatter_is_rejected_and_the_maximum_still_paints() {
     let mut s = new();
     assert!(s.execute("tools.setBrush", json!({ "brush": scatter(1e38) })).is_err());
     assert!(s.execute("paint.stroke", stroke.clone()).is_ok());
-    // The maximum (1000 %) is accepted and paints a finite, well-formed dab.
-    for patch in [scatter(10.0), dual(10.0)] {
+    // C3's maximum (5000 %) is accepted and paints a finite, well-formed dab.
+    for patch in [scatter(50.0), dual(50.0)] {
         let mut s = new();
         s.execute("tools.setBrush", json!({ "brush": patch })).unwrap();
         let r = s.execute("paint.stroke", stroke.clone()).unwrap();
         let d: Vec<i64> = r["damage"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
         assert!(d[0].abs() < 1000 && d[1].abs() < 1000 && d[2] > 0 && d[3] > 0, "{r}");
     }
-    // Control: 200 % scatter paints where it did before the cap (the soft default tip reaches a
-    // little past its radius).
+    // The C3 default scatters in the stroke frame and clips the soft mask to its tip bounds.
     let mut s = new();
     s.execute("tools.setBrush", json!({ "brush": scatter(2.0) })).unwrap();
-    assert_eq!(s.execute("paint.stroke", stroke).unwrap(), json!({"damage": [15, 12, 27, 27]}));
+    assert_eq!(s.execute("paint.stroke", stroke).unwrap(), json!({"damage": [13, 16, 25, 25]}));
 }
 
 #[test]
@@ -1155,4 +1161,47 @@ fn material_parameters_reject_out_of_range_without_changing_brush() {
         assert!(s.execute("tools.setBrush", json!({"brush":patch})).is_err());
         assert_eq!(s.tools.brush, before);
     }
+}
+
+#[test]
+fn c3_secondary_slider_patch_keeps_shared_bitmaps_and_journals_only_the_scalar() {
+    let tip = photocraft_paint::GrayTile::from_fn(64, 32, |x, y| ((x + y) % 2) as f32);
+    let mut b = BrushSettings::default();
+    let mut secondary = BrushSettings { tip: TipShape::Sampled(tip.clone()), ..Default::default() };
+    secondary.texture.pattern = photocraft_paint::Pattern::Tile(tip.clone());
+    b.dual_brush.full_parameters = Some(Box::new(secondary));
+    let changed = merge_brush(&b, &json!({"dualBrush":{"fullParameters":{"opacity":0.4}}}), "test").unwrap();
+    let other = changed.dual_brush.full_parameters.as_ref().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&tip.data, &other.tip.bitmap().unwrap().data));
+    assert!(std::sync::Arc::ptr_eq(&tip.data, &other.texture.pattern.bitmap().unwrap().data));
+    let patch = brush_patch(&b, &changed);
+    assert_eq!(patch, json!({"dualBrush":{"fullParameters":{"opacity":0.4_f32}}}));
+    let main = merge_brush(&b, &json!({"opacity":0.2}), "test").unwrap();
+    assert_eq!(main.dual_brush.full_parameters, b.dual_brush.full_parameters);
+    assert_eq!(brush_patch(&b, &main), json!({"opacity":0.2_f32}));
+}
+
+#[test]
+fn mixing_brush_outputs_color_despite_legacy_preset_switch() {
+    let mut s = session(64, 64);
+    s.execute(
+        "tools.setBrush",
+        json!({"brush": {
+            "pressureSize": false, "size": 16,
+            "mixSettings": {"enabled": true, "strength": 0.5, "colorOutput": false},
+            "dualBrush": {"fullParameters": {"mixSettings": {"colorOutput": false}}}
+        }}),
+    )
+    .unwrap();
+    let params = json!({"points": [[32, 32]], "color": "#00ff00"});
+    let resolved = resolve_brush(&s, &params, "paint.stroke").unwrap();
+    assert!(resolved.mix_settings.color_output);
+    assert!(resolved.dual_brush.full_parameters.as_ref().unwrap().mix_settings.color_output);
+    let live = LiveStroke::begin(&s, &params).unwrap();
+    let layer = s.active().unwrap().active_layer.unwrap();
+    let live_pixel = live.doc.layer(layer).unwrap().surface().unwrap().rgba(32, 32);
+    assert!(live_pixel[1] > 0.9 && live_pixel[3] > 0.9);
+    s.execute("paint.stroke", params).unwrap();
+    let pixel = rgba(&s, 32, 32);
+    assert!(pixel[1] > 0.9 && pixel[3] > 0.9);
 }

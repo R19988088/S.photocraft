@@ -67,6 +67,9 @@ pub const MAX_INDEX_BYTES: u64 = 4 << 20;
 pub const ACTIONS_FILE: &str = "actions.json";
 /// Largest Actions file read or written.
 pub const MAX_ACTIONS_BYTES: u64 = 16 << 20;
+/// Standalone canvas materials, including their embedded texture images.
+pub const CANVAS_PRESETS_FILE: &str = "canvas-presets.json";
+pub const MAX_CANVAS_PRESETS_BYTES: u64 = 32 << 20;
 /// The whole store never grows beyond this; further groups are skipped with a warning.
 pub const MAX_STORE_BYTES: u64 = 2 << 30;
 /// Largest tip side accepted from disk.
@@ -314,11 +317,19 @@ struct TipRefs {
     dual_tip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     texture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secondary_tip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secondary_texture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    canvas: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secondary_canvas: Option<String>,
 }
 
 impl TipRefs {
     fn hashes(&self) -> impl Iterator<Item = &String> {
-        [&self.tip, &self.dual_tip, &self.texture].into_iter().flatten()
+        [&self.tip, &self.dual_tip, &self.texture, &self.secondary_tip, &self.secondary_texture, &self.canvas, &self.secondary_canvas].into_iter().flatten()
     }
 }
 
@@ -392,7 +403,7 @@ enum Bitmap<'a> {
 }
 
 /// The bitmaps of a preset's settings: sampled tip, Dual Brush tip, texture tile.
-fn bitmaps(b: &BrushSettings) -> [Option<Bitmap<'_>>; 3] {
+fn bitmaps(b: &BrushSettings) -> [Option<Bitmap<'_>>; 7] {
     fn tip(t: &TipShape) -> Option<Bitmap<'_>> {
         match t {
             TipShape::Round => None,
@@ -405,7 +416,20 @@ fn bitmaps(b: &BrushSettings) -> [Option<Bitmap<'_>>; 3] {
         Pattern::Tile(g) => Some(Bitmap::Full(g)),
         Pattern::Stored(r) => Some(Bitmap::Stored(r)),
     };
-    [tip(&b.tip), tip(&b.dual_brush.tip), texture]
+    let secondary = b.dual_brush.full_parameters.as_deref();
+    let secondary_texture = secondary.and_then(|b| match &b.texture.pattern {
+        Pattern::Procedural { .. } => None,
+        Pattern::Tile(g) => Some(Bitmap::Full(g)),
+        Pattern::Stored(r) => Some(Bitmap::Stored(r)),
+    });
+    fn canvas(b: &BrushSettings) -> Option<Bitmap<'_>> {
+        match &b.canvas_material.as_ref()?.pattern {
+            Pattern::Tile(g) => Some(Bitmap::Full(g)),
+            Pattern::Stored(r) => Some(Bitmap::Stored(r)),
+            _ => None,
+        }
+    }
+    [tip(&b.tip), tip(&b.dual_brush.tip), texture, secondary.and_then(|b| tip(&b.tip)), secondary_texture, canvas(b), secondary.and_then(canvas)]
 }
 
 /// A copy of `b` without its bitmaps (stored as tip files): no bitmap is cloned.
@@ -416,7 +440,14 @@ fn settings_only(b: &mut BrushSettings) -> BrushSettings {
         Pattern::Procedural { .. } => None,
         _ => Some(std::mem::take(&mut b.texture.pattern)),
     };
-    let out = b.clone();
+    let canvas = b.canvas_material.as_mut().map(|m| std::mem::take(&mut m.pattern));
+    let secondary = b.dual_brush.full_parameters.take();
+    let mut out = b.clone();
+    b.dual_brush.full_parameters = secondary;
+    out.dual_brush.full_parameters = b.dual_brush.full_parameters.as_deref_mut().map(|secondary| Box::new(settings_only(secondary)));
+    if let (Some(m), Some(pattern)) = (b.canvas_material.as_mut(), canvas) {
+        m.pattern = pattern;
+    }
     b.tip = tip;
     b.dual_brush.tip = dual;
     if let Some(t) = texture {
@@ -426,8 +457,8 @@ fn settings_only(b: &mut BrushSettings) -> BrushSettings {
 }
 
 /// Point `b`'s bitmaps at stored tiles (`refs` in [`bitmaps`] order); a `None` leaves a slot.
-fn set_stored(b: &mut BrushSettings, refs: [Option<StoredTile>; 3]) {
-    let [tip, dual, texture] = refs;
+fn set_stored(b: &mut BrushSettings, refs: [Option<StoredTile>; 7]) {
+    let [tip, dual, texture, secondary_tip, secondary_texture, canvas, secondary_canvas] = refs;
     if let Some(r) = tip {
         b.tip = TipShape::Stored(r);
     }
@@ -436,6 +467,20 @@ fn set_stored(b: &mut BrushSettings, refs: [Option<StoredTile>; 3]) {
     }
     if let Some(r) = texture {
         b.texture.pattern = Pattern::Stored(r);
+    }
+    if let (Some(m), Some(r)) = (b.canvas_material.as_mut(), canvas) {
+        m.pattern = Pattern::Stored(r);
+    }
+    if let Some(secondary) = b.dual_brush.full_parameters.as_deref_mut() {
+        if let (Some(m), Some(r)) = (secondary.canvas_material.as_mut(), secondary_canvas) {
+            m.pattern = Pattern::Stored(r);
+        }
+        if let Some(r) = secondary_tip {
+            secondary.tip = TipShape::Stored(r);
+        }
+        if let Some(r) = secondary_texture {
+            secondary.texture.pattern = Pattern::Stored(r);
+        }
     }
 }
 
@@ -448,7 +493,15 @@ fn join_tips(mut b: BrushSettings, refs: &TipRefs, tiles: &HashMap<String, Store
             Some(h) => tiles.get(h).cloned().map(Some),
         }
     };
-    let r = [get(&refs.tip)?, get(&refs.dual_tip)?, get(&refs.texture)?];
+    let r = [
+        get(&refs.tip)?,
+        get(&refs.dual_tip)?,
+        get(&refs.texture)?,
+        get(&refs.secondary_tip)?,
+        get(&refs.secondary_texture)?,
+        get(&refs.canvas)?,
+        get(&refs.secondary_canvas)?,
+    ];
     set_stored(&mut b, r);
     Some(b)
 }
@@ -550,6 +603,8 @@ pub struct PresetStore {
     actions_rev: u64,
     /// `actions.json` exists but failed to load: left on disk untouched, so it is never written.
     actions_skipped: bool,
+    canvas_rev: u64,
+    canvas_skipped: bool,
     warnings: Vec<String>,
     /// Full tips loaded for brushes in use (behind a lock so `&Session` paths can load).
     cache: Mutex<TipCache>,
@@ -568,6 +623,7 @@ pub struct Opened {
     pub warnings: Vec<String>,
     /// Recorded actions (`actions.json`). Empty when the file is missing or unreadable.
     pub actions: Vec<crate::actions_cmds::Action>,
+    pub canvas_presets: Vec<photocraft_paint::canvas_material::CanvasPreset>,
 }
 
 /// Load a store (any thread; the desktop app does this in the background at start).
@@ -644,6 +700,9 @@ pub fn open(backend: Box<dyn PresetBackend>) -> Opened {
     let loaded_actions = load_actions(backend.as_ref(), &mut warnings);
     let actions_skipped = loaded_actions.is_none();
     let actions = loaded_actions.unwrap_or_default();
+    let loaded_canvas = load_canvas_presets(backend.as_ref(), &mut warnings);
+    let canvas_skipped = loaded_canvas.is_none();
+    let canvas_presets = loaded_canvas.unwrap_or_default();
     let mut store = PresetStore {
         backend,
         synced_rev: None,
@@ -653,6 +712,8 @@ pub fn open(backend: Box<dyn PresetBackend>) -> Opened {
         index: None,
         actions_rev: 0,
         actions_skipped,
+        canvas_rev: 0,
+        canvas_skipped,
         warnings: Vec::new(),
         cache: Mutex::new(TipCache { limit: TIP_CACHE_BYTES, ..Default::default() }),
     };
@@ -710,7 +771,7 @@ pub fn open(backend: Box<dyn PresetBackend>) -> Opened {
     let hidden_builtins = index.as_ref().map(|i| i.hidden_builtins.clone()).unwrap_or_default();
     let order = index.as_ref().map(|i| i.order.clone()).unwrap_or_default();
     store.index = index;
-    Opened { store, presets, hidden_builtins, order, warnings, actions }
+    Opened { store, presets, hidden_builtins, order, warnings, actions, canvas_presets }
 }
 
 /// `actions.json`: a missing file is an empty list. Anything else unreadable is a warning.
@@ -732,6 +793,26 @@ fn load_actions(backend: &dyn PresetBackend, warnings: &mut Vec<String>) -> Opti
         }
         Err(e) => {
             warnings.push(format!("actions: {ACTIONS_FILE} skipped: {e}"));
+            None
+        }
+    }
+}
+
+fn load_canvas_presets(backend: &dyn PresetBackend, warnings: &mut Vec<String>) -> Option<Vec<photocraft_paint::canvas_material::CanvasPreset>> {
+    let loaded = backend.read(CANVAS_PRESETS_FILE, MAX_CANVAS_PRESETS_BYTES);
+    if loaded.as_ref().is_err_and(|e| missing_file(e)) {
+        return Some(Vec::new());
+    }
+    match loaded.and_then(|bytes| serde_json::from_slice::<Vec<photocraft_paint::canvas_material::CanvasPreset>>(&bytes).map_err(|e| e.to_string())) {
+        Ok(presets) if presets.iter().all(|p| !p.id.is_empty() && p.material.is_valid() && p.material.pattern.bitmap().is_none_or(|t| t.is_valid())) => {
+            Some(presets)
+        }
+        Ok(_) => {
+            warnings.push(format!("canvas presets: {CANVAS_PRESETS_FILE} skipped: invalid material"));
+            None
+        }
+        Err(e) => {
+            warnings.push(format!("canvas presets: {CANVAS_PRESETS_FILE} skipped: {e}"));
             None
         }
     }
@@ -984,7 +1065,10 @@ impl PresetStore {
         let mut infos = BTreeMap::new();
         let mut new_bytes = 0u64;
         for p in items.iter_mut() {
-            let mut refs: [Option<StoredTile>; 3] = [None, None, None];
+            if p.brush.dual_brush.full_parameters.as_deref().is_some_and(|b| b.dual_brush.full_parameters.is_some()) {
+                return Err(format!("preset `{}` contains nested secondary brushes; only one secondary brush is supported", p.name));
+            }
+            let mut refs: [Option<StoredTile>; 7] = [None, None, None, None, None, None, None];
             for (slot, bm) in refs.iter_mut().zip(bitmaps(&p.brush)) {
                 let tile = match bm {
                     None => continue,
@@ -1015,7 +1099,15 @@ impl PresetStore {
                 *slot = Some(tile);
             }
             let key = |r: &Option<StoredTile>| r.as_ref().map(|t| t.key.clone());
-            let tips = TipRefs { tip: key(&refs[0]), dual_tip: key(&refs[1]), texture: key(&refs[2]) };
+            let tips = TipRefs {
+                tip: key(&refs[0]),
+                dual_tip: key(&refs[1]),
+                texture: key(&refs[2]),
+                secondary_tip: key(&refs[3]),
+                secondary_texture: key(&refs[4]),
+                canvas: key(&refs[5]),
+                secondary_canvas: key(&refs[6]),
+            };
             stored.push(StoredPreset {
                 name: p.name.clone(),
                 brush: settings_only(&mut p.brush),
@@ -1040,6 +1132,34 @@ impl PresetStore {
         let presets = items.iter().map(|p| (**p).clone()).collect();
         self.groups.insert(file.to_string(), Synced { presets, tips: hashes, bytes: bytes.len() as u64, stale: false });
         Ok(())
+    }
+
+    pub fn sync_canvas_presets(&mut self, list: &[photocraft_paint::canvas_material::CanvasPreset], rev: u64) {
+        if self.canvas_rev == rev {
+            return;
+        }
+        if self.canvas_skipped {
+            self.warnings.push(format!("Couldn't save canvas presets: {CANVAS_PRESETS_FILE} could not be read, so it was left unchanged"));
+            self.canvas_rev = rev;
+            return;
+        }
+        let bytes = match serde_json::to_vec(list) {
+            Ok(bytes) if bytes.len() as u64 <= MAX_CANVAS_PRESETS_BYTES => bytes,
+            Ok(_) => {
+                self.warnings.push(format!("canvas presets: the library is too large to save ({} MB limit)", MAX_CANVAS_PRESETS_BYTES >> 20));
+                self.canvas_rev = rev;
+                return;
+            }
+            Err(e) => {
+                self.warnings.push(format!("Couldn't save canvas presets: {e}"));
+                self.canvas_rev = rev;
+                return;
+            }
+        };
+        match self.backend.write(CANVAS_PRESETS_FILE, &bytes) {
+            Ok(()) => self.canvas_rev = rev,
+            Err(e) => self.warnings.push(format!("Couldn't save canvas presets: {e}")),
+        }
     }
 
     /// Write the Actions list when `rev` differs from the last load or write.
@@ -1091,7 +1211,7 @@ impl Session {
     /// built-in of the same name; presets created before the store finished loading win), hide
     /// deleted built-ins, then sync. Returns the load warnings.
     pub fn attach_preset_store(&mut self, opened: Opened) -> Vec<String> {
-        let Opened { store, presets, hidden_builtins, order, mut warnings, actions: disk } = opened;
+        let Opened { store, presets, hidden_builtins, order, mut warnings, actions: disk, canvas_presets } = opened;
         let lib = &mut self.tools.presets;
         lib.retain(|p| !(p.builtin && hidden_builtins.iter().any(|h| h.eq_ignore_ascii_case(&p.name))));
         for p in presets {
@@ -1107,6 +1227,20 @@ impl Session {
             lib.sort_by_key(|p| pos.get(&p.name.to_lowercase()).copied().unwrap_or(usize::MAX));
         }
         self.preset_store = Some(store);
+        if self.tools.canvas_presets.is_empty() {
+            self.tools.canvas_presets = canvas_presets;
+            self.tools.canvas_presets_rev = 1;
+            if let Some(st) = self.preset_store.as_mut() {
+                st.canvas_rev = 1;
+            }
+        } else {
+            for preset in canvas_presets {
+                if !self.tools.canvas_presets.iter().any(|have| have.id == preset.id) {
+                    self.tools.canvas_presets.push(preset);
+                }
+            }
+            self.tools.canvas_presets_rev = self.tools.canvas_presets_rev.saturating_add(1).max(1);
+        }
         // In-memory actions (created before the store finished loading) win on name. Disk-only
         // names are appended. An empty session takes the disk list and does not rewrite it.
         if self.actions.list.is_empty() {
@@ -1151,6 +1285,7 @@ impl Session {
                 }
             }
             st.sync_actions(&self.actions.list, actions_rev);
+            st.sync_canvas_presets(&self.tools.canvas_presets, self.tools.canvas_presets_rev);
         }
     }
 
@@ -1173,6 +1308,14 @@ impl Session {
         }
         if let Pattern::Stored(r) = &mut b.texture.pattern {
             load(r)?;
+        }
+        if let Some(m) = b.canvas_material.as_mut()
+            && let Pattern::Stored(r) = &mut m.pattern
+        {
+            load(r)?;
+        }
+        if let Some(secondary) = b.dual_brush.full_parameters.as_deref_mut() {
+            self.load_brush_tips(secondary)?;
         }
         Ok(())
     }
@@ -1210,6 +1353,17 @@ fn link_stored_tips(st: &PresetStore, b: &mut BrushSettings) -> bool {
     {
         b.texture.pattern = Pattern::Stored(StoredTile { full: Some(Arc::new(g)), ..r });
         linked = true;
+    }
+    if let Some(m) = b.canvas_material.as_mut()
+        && let Pattern::Tile(g) = &m.pattern
+        && let Some(r) = link(g)
+        && let Pattern::Tile(g) = std::mem::take(&mut m.pattern)
+    {
+        m.pattern = Pattern::Stored(StoredTile { full: Some(Arc::new(g)), ..r });
+        linked = true;
+    }
+    if let Some(secondary) = b.dual_brush.full_parameters.as_deref_mut() {
+        linked |= link_stored_tips(st, secondary);
     }
     linked
 }

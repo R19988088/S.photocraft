@@ -104,6 +104,7 @@ impl Curve {
                 let pressure = if pressure == 0 { 0 } else { pressure.max(PRESSURE_FLOOR) };
                 let mix = |a: f32, b: f32| a + (b - a) * t as f32;
                 StrokePoint {
+                    is_pen: self.a.sample.is_pen || self.b.sample.is_pen,
                     x: cubic(self.a.x, first_control.0, incoming.0, self.b.x, t) as f64 / 256.0,
                     y: cubic(self.a.y, first_control.1, incoming.1, self.b.y, t) as f64 / 256.0,
                     pressure: pressure_value(pressure),

@@ -86,6 +86,7 @@ mod param_check;
 mod path_edit_cmds;
 pub mod pattern_cmds;
 pub mod pattern_fill_cmds;
+mod pattern_sample_cmds;
 pub mod perspective_crop_cmds;
 pub mod photo_cmds;
 pub mod pick_cmds;
@@ -315,6 +316,8 @@ pub struct ToolState {
     /// Bumped whenever `presets` changes ([`Session::brush_presets_changed`]); the preset store
     /// syncs when it moves.
     pub presets_rev: u64,
+    pub canvas_presets: Vec<photocraft_paint::canvas_material::CanvasPreset>,
+    pub canvas_presets_rev: u64,
     /// Mixer Brush paint carried between strokes.
     pub mixer: photocraft_paint::mixer::MixerState,
     /// The coalescing key of the running `tools.setBrush` gesture and the brush before it, so the
@@ -396,11 +399,16 @@ impl Default for ToolState {
             background: [1.0, 1.0, 1.0, 1.0],
             // Photoshop's Brush tool starts at 10 % Smoothing.
             brush: photocraft_paint::BrushSettings {
+                c3_tip_math: true,
+                mix_settings: photocraft_paint::transport::BrushMixSettings { strength: 0.5, ..Default::default() },
+                texture: photocraft_paint::brush::Texture { c3_math: true, ..Default::default() },
                 smoothing: photocraft_paint::brush::Smoothing { amount: 0.1, ..Default::default() },
                 ..Default::default()
             },
             presets: photocraft_paint::presets::builtin(),
             presets_rev: 0,
+            canvas_presets: Vec::new(),
+            canvas_presets_rev: 0,
             mixer: Default::default(),
             brush_gesture: None,
             current_preset: None,

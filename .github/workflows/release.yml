@@ -1,0 +1,57 @@
+name: Release 0.2
+on:
+  push:
+    tags: ['0.2']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-15
+            platform: macos-universal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.platform }}
+      - name: Build Windows portable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Arch x64 -PortableOnly
+      - name: Build macOS universal
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          bash packaging/macos/package.sh --arch universal
+          ditto -c -k --keepParent target/macos-package/PhotoCraft.app dist/release/photocraft-0.2.0-macos-universal-app.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photocraft-0.2-${{ matrix.platform }}
+          path: dist/release/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish 0.2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view 0.2 >/dev/null 2>&1 || gh release create 0.2 --target "$GITHUB_SHA" --title 'PhotoCraft 0.2' --notes 'C3 笔刷分类与混色更新。Windows x64 绿色版；macOS 通用版（Apple Silicon / Intel，本地签名，未公证）。'
+          gh release upload 0.2 artifacts/* --clobber

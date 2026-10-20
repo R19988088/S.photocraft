@@ -3242,3 +3242,107 @@ curves	Smooth	Lisser
 	Tablet	数位板
 
 	Tablet pressure	数位板压感
+
+	Anchor Delay	Ancrage: Retard
+	Anchor Smooth	Ancrage: Lissage
+	Anchor X	Ancrage X
+	Anchor Y	Ancrage Y
+	Blur Jitter	Flou: Variation
+	Blur Strength	Flou: Intensité
+	Canvas Material	Matériau de la toile
+	Choose Pattern	Choisir un motif
+	Color Attributes	Attributs de couleur
+	Complementary Color	Couleur complémentaire
+	Concentration	Concentration
+	Contour Strength	Contour: Intensité
+	Coordinates:	Coordonnées:
+	Darkening	Assombrissement
+	Density Jitter	Densité: Variation
+	Drag panels	Déplacer les panneaux
+	Draw with the pen in the canvas to calibrate pressure response.	Dessinez au stylet sur la toile pour étalonner la réponse à la pression.
+	Edge Control	Contrôle des bords
+	Enable Color Attributes	Activer: Attributs de couleur
+	Enable Inertia	Activer: Inertie
+	Enable Mixing	Activer: Mélange
+	Enable Pigment	Activer: Pigment
+	Enable Stroke Motion	Activer: Mouvement du trait
+	Expansion	Expansion
+	Fixed Width	Largeur fixe
+	Flow Algorithm:	Algorithme de débit:
+	Fluid	Fluide
+	Gaussian Mask	Masque gaussien
+	Grain Density	Densité du grain
+	Grain Size	Grain: Taille
+	Hardness Jitter	Dureté: Variation
+	Highlight Brightness	Luminosité des reflets
+	Highlight Ratio	Proportion des reflets
+	Highlight Strength	Reflets: Intensité
+	Image Palette Color	Couleur de la palette d’image
+	Import a C3 preset with a packaged canvas pattern.	Importez un préréglage C3 contenant un motif de toile.
+	Inertia	Inertie
+	Invert Blur Pressure	Inverser la pression: Flou
+	Invert Length Pressure	Inverser la pression: Longueur
+	Jitter	Variation
+	Length	Longueur
+	Length Jitter	Longueur: Variation
+	Liquidity	Fluidité
+	Minimum Angle	Minimum: Angle
+	Minimum Blur	Minimum: Flou
+	Minimum Count	Minimum: Compteur
+	Minimum Distance	Minimum: Distance
+	Minimum Hardness	Minimum: Dureté
+	Minimum Length	Minimum: Longueur
+	Minimum Scatter	Minimum: Diffusion
+	Minimum Spacing	Minimum: Espacement
+	Minimum Strength	Minimum: Intensité
+	Minimum Stroke Jitter	Minimum: Trait: Variation
+	Minimum Width	Minimum: Largeur
+	Mixing	Mélange
+	Mixing Strength	Mélange: Intensité
+	Outline	Contour
+	Output Strength	Intensité de sortie
+	Painting Settings…	Paramètres de peinture…
+	Painting…	Peinture…
+	Pattern:	Motif:
+	Pigment	Pigment
+	Pressure Controls Anchor Delay	Contrôle par pression: Ancrage: Retard
+	Pressure Controls Contour	Contrôle par pression: Contour
+	Pressure Controls Fluid	Contrôle par pression: Fluide
+	Pressure for Flow	Pression pour le débit
+	Primary Strength	Intensité principale
+	Range Jitter	Plage: Variation
+	Saturation Boost	Renforcement de la saturation
+	Saturation Protection	Protection de la saturation
+	Saturation Record	Mémorisation de la saturation
+	Secondary Strength	Intensité secondaire
+	Show Color Values	Afficher les valeurs de couleur
+	Single Tip	Pointe unique
+	Smudge Output	Sortie du doigt
+	Soft Coverage	Couverture douce
+	Softness	Douceur
+	Spacing Jitter	Espacement: Variation
+	Strength	Intensité
+	Strength Jitter	Intensité: Variation
+	Stroke Jitter	Trait: Variation
+	Stroke Motion	Mouvement du trait
+	Stroke Smoothing	Lissage du trait
+	Tilt Delay	Retard de l’inclinaison
+	Use Grain Parameters	Utiliser: Paramètres du grain
+	Use Pressure Curve	Utiliser: Courbe de pression
+	Use Sampled Pattern	Utiliser: Motif échantillonné
+	Use Wet Edge Parameters	Utiliser: Paramètres des bords humides
+	Use the eyedropper on the canvas to sample a pattern.	Utilisez la pipette sur la toile pour échantillonner un motif.
+	Water	Eau
+	Watercolor	Aquarelle
+	Watercolor 2	Aquarelle 2
+	Wet Edge Mode	Mode des bords humides
+	Whole Stroke	Trait entier
+	Width Mode	Mode de largeur
+
+	Eyedropper Saturation Protection	Protection de la saturation de la pipette
+	Loop Hue Slider	Curseur de teinte en boucle
+	Translucent Selection	Sélection translucide
+
+	Primary Brush	Pinceau principal
+	Secondary Brush	Pinceau secondaire
+	Color Output	Dépôt de couleur

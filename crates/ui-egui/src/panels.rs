@@ -27,7 +27,7 @@ const TOOL_SECTIONS: &[&[&[Tool]]] = &[
     ],
     &[
         &[Tool::Remove, Tool::SpotHealing, Tool::Healing, Tool::Patch, Tool::ContentAwareMove, Tool::RedEye],
-        &[Tool::Brush, Tool::Pencil, Tool::MixerBrush, Tool::ColorReplacement],
+        &[Tool::Brush, Tool::Pencil, Tool::ColorReplacement],
         &[Tool::CloneStamp, Tool::PatternStamp],
         &[Tool::HistoryBrush],
         &[Tool::Eraser, Tool::BackgroundEraser, Tool::MagicEraser],
@@ -1044,6 +1044,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         ui.add_enabled_ui(!block, |ui| {
                             brush_preset_chip(ui, b, &mut app.ui);
                             crate::brush_picker::settings_toggle(app, ui);
+                            brush_size_slider(ui, b);
                             pressure_button(ui, &mut b.pressure_size, tl!("Pressure for Size"));
                         });
                         widgets::vline(ui, 22.0);
@@ -1053,7 +1054,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         } else {
                             opt_label(ui, tl!("Mode"));
                             let held = app.held_erase;
-                            paint_mode_dropdown(ui, "brush-mode", b, &mut app.ui.tool_options.brush_clear, held);
+                            brush_attribute_controls(ui, b, &mut app.ui.tool_options.brush_clear, held);
                         }
                         ui.add_enabled_ui(!block, |ui| {
                             percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, 62.0);
@@ -1063,20 +1064,17 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         ui.add_enabled_ui(!block && !crate::eraser_ui::pencil_mode(app, app.ui.tool), |ui| {
                             percent_field(ui, tl!("Flow"), &mut b.flow, 1.0..=100.0, 62.0);
                             pressure_button(ui, &mut b.pressure_flow, tl!("Pressure for Flow"));
-                            let airbrush = icons::button(ui, "sparkles", 24.0, b.build_up, tl!("Enable airbrush-style build-up effects"));
-                            if crate::brush_picker::named(airbrush, "Enable airbrush-style build-up effects").clicked() {
-                                b.build_up = !b.build_up;
-                            }
+
                         });
                         opt_label(ui, tl!("Smoothing"));
                         smoothing_field(ui, b, 58.0);
-                        smoothing_options(ui, b);
                     }
                     // Pencil: Photoshop's options (no hardness or flow: the pencil is always hard).
                     Tool::Pencil => {
                         brush_preset_chip(ui, b, &mut app.ui);
                         crate::brush_picker::settings_toggle(app, ui);
                         widgets::vline(ui, 22.0);
+                        brush_size_slider(ui, b);
                         if !t.pro {
                             opt_label(ui, tl!("Size"));
                             widgets::value_field(ui, &mut b.size, 1.0..=photocraft_engine::paint::MAX_BRUSH_SIZE, "px", 76.0);
@@ -1100,6 +1098,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         ui.add_enabled_ui(!block, |ui| {
                             opt_label(ui, tl!("Size"));
                             widgets::value_field(ui, &mut b.size, 1.0..=photocraft_engine::paint::MAX_BRUSH_SIZE, "px", 76.0);
+                            brush_size_slider(ui, b);
                             pressure_button(ui, &mut b.pressure_size, tl!("Pressure for Size"));
                         });
                         widgets::vline(ui, 22.0);
@@ -1108,7 +1107,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         } else {
                             opt_label(ui, tl!("Mode"));
                             let held = app.held_erase;
-                            paint_mode_dropdown(ui, "brush-mode", b, &mut app.ui.tool_options.brush_clear, held);
+                            brush_attribute_controls(ui, b, &mut app.ui.tool_options.brush_clear, held);
                         }
                         // A Pencil-mode Eraser is always hard and at full flow (Photoshop).
                         let fixed = block || crate::eraser_ui::pencil_mode(app, app.ui.tool);
@@ -3957,21 +3956,68 @@ fn paint_mode_dropdown(ui: &mut egui::Ui, id: &str, b: &mut photocraft_engine::B
     }
 }
 
+/// The main colour attribute and its strength share the existing Mode position.
+fn brush_attribute_controls(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings, clear: &mut bool, _held: bool) {
+    use photocraft_engine::paint::AttributeMode;
+    let modes: Vec<_> = AttributeMode::ALL.into_iter().map(|mode| (mode, mode.label())).collect();
+    if widgets::dropdown(ui, "brush-mode", &mut b.color_attributes.blend, &modes, 96.0) {
+        b.color_attributes.enabled = true;
+        b.mode = BlendMode::Normal;
+        *clear = false;
+    }
+    let mut strength = b.color_attributes.blend_strength * 100.0;
+    let response = ui
+        .scope(|ui| {
+            ui.set_width(72.0);
+            widgets::slider(ui, &mut strength, 0.0..=100.0, None).on_hover_text(tl!("Strength"))
+        })
+        .inner;
+    let field = widgets::value_field(ui, &mut strength, 0.0..=100.0, "%", 48.0);
+    if response.changed() || field.changed() {
+        b.color_attributes.blend_strength = strength / 100.0;
+        b.color_attributes.enabled = true;
+    }
+}
+
 /// Options-bar Smoothing % (the brush's stroke smoothing; the live stroke and the commit use it).
 fn smoothing_field(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings, width: f32) {
-    let mut sm = (b.smoothing.amount * 100.0).round();
+    let mut sm = (b.motion.smoothing * 100.0).round();
     if widgets::value_field(ui, &mut sm, 0.0..=100.0, "%", width).changed() {
-        b.smoothing.enabled = true;
-        b.smoothing.amount = (sm / 100.0).clamp(0.0, 1.0);
+        b.motion.enabled = true;
+        b.motion.smoothing = (sm / 100.0).clamp(0.0, 1.0);
+    }
+}
+
+/// Options-bar brush size: a logarithmic slider keeps small diameters easy to set.
+fn brush_size_slider(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings) {
+    let max = photocraft_engine::paint::MAX_BRUSH_SIZE;
+    let mut log_size = b.size.clamp(1.0, max).ln();
+    let response = ui
+        .scope(|ui| {
+            ui.set_width(88.0);
+            widgets::slider(ui, &mut log_size, 0.0..=max.ln(), None).on_hover_text(tl!("Size"))
+        })
+        .inner;
+    if response.changed() {
+        b.size = log_size.exp().round().clamp(1.0, max);
     }
 }
 
 /// Options-bar gear beside Smoothing: Photoshop's smoothing options popup, edited on the brush
 /// like the Smoothing % (so they stay per tool and reach the live stroke and the commit).
+#[allow(dead_code)]
 fn smoothing_options(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings) {
     let resp = icons::button(ui, "settings", 24.0, false, tl!("Set additional smoothing options"));
     let resp = crate::brush_picker::named(resp, "Set additional smoothing options");
     egui::Popup::from_toggle_button_response(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        if b.c3_tip_math {
+            widgets::checkbox(ui, &mut b.motion.enabled, tl!("Enable Stroke Motion"));
+            let mut delay = b.motion.tilt_delay * 100.0;
+            if widgets::slider_row(ui, tl!("Tilt Delay"), &mut delay, 0.0..=100.0, "%", None).changed() {
+                b.motion.tilt_delay = delay / 100.0;
+            }
+            return;
+        }
         let s = &mut b.smoothing;
         widgets::checkbox(ui, &mut s.pulled_string, tl!("Pulled String Mode"));
         widgets::checkbox(ui, &mut s.catch_up, tl!("Stroke Catch-up"));
@@ -4635,17 +4681,17 @@ mod color_tests {
 
     #[test]
     fn double_clicking_a_chip_opens_its_color_picker() {
+        use egui_kittest::kittest::Queryable;
         let app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         let mut h = field_harness(app);
-        let min = h.ctx.input(|i| i.viewport_rect()).min;
-        // The foreground point is where the chips overlap: the foreground is on top there.
-        for (p, target) in [(vec2(20.0, 75.0), "background"), (vec2(30.0, 30.0), "foreground")] {
+        for (label, target) in [("Background Color", "background"), ("Foreground Color", "foreground")] {
             h.state_mut().ui.dialogs.clear();
             // Past the last double-click, so this one isn't counted as a triple-click.
             h.run_steps(40);
-            click(&mut h, min + p);
+            let p = h.get_by_label(label).rect().center();
+            click(&mut h, p);
             assert!(h.state().ui.dialogs.is_empty(), "a single click only picks the chip");
-            click(&mut h, min + p);
+            click(&mut h, p);
             let [d] = h.state().ui.dialogs.as_slice() else { panic!("one Color Picker") };
             assert_eq!(d.fields.get("__colorPicker").and_then(Value::as_str), Some(target));
         }
@@ -5462,7 +5508,7 @@ mod type_flyout_tests {
         let index = TOOL_SECTIONS.iter().flat_map(|section| section.iter()).position(|slot| slot.contains(&Tool::Brush)).unwrap();
         let slot = TOOL_SECTIONS.iter().flat_map(|section| section.iter()).nth(index).copied().unwrap();
         // Photoshop's Brush group, Color Replacement after the Mixer Brush.
-        assert_eq!(slot, &[Tool::Brush, Tool::Pencil, Tool::MixerBrush, Tool::ColorReplacement]);
+        assert_eq!(slot, &[Tool::Brush, Tool::Pencil, Tool::ColorReplacement]);
         let bx = if Tokens::get(&ctx).pro { 30.0 } else { 36.0 };
         let mut buttons: Vec<Rect> = ctx.viewport(|v| {
             v.prev_pass
@@ -5538,7 +5584,7 @@ mod toolbar_hidden_tests {
         let slots: usize = TOOL_SECTIONS.iter().map(|section| section.len()).sum();
         hide(&mut app, &Tool::ALL);
         assert_eq!(tool_buttons(&mut app), all - slots, "every tool slot is gone when every tool is hidden");
-        hide(&mut app, &[Tool::Brush, Tool::Pencil, Tool::MixerBrush, Tool::ColorReplacement]);
+        hide(&mut app, &[Tool::Brush, Tool::Pencil, Tool::ColorReplacement]);
         assert_eq!(tool_buttons(&mut app), all - 1, "a slot whose tools are all hidden is gone");
         hide(&mut app, &[Tool::Sponge]);
         assert_eq!(tool_buttons(&mut app), all, "a slot with a visible tool stays");

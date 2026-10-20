@@ -1,6 +1,4 @@
-//! The Brush Settings panel's section bodies (Photoshop's right-hand side): Brush Tip Shape with
-//! its tip grid and angle/roundness widget, Shape Dynamics, Scattering, Texture, Dual Brush, Color
-//! Dynamics, Transfer, Brush Pose, Build-up and Smoothing. Each edits a working copy of the brush;
+//! The Brush Settings panel's eight reference categories. Each edits a working copy of the brush;
 //! the panel turns the difference into one `tools.setBrush` call.
 
 use egui::{Color32, RichText, Sense, Stroke, pos2, vec2};
@@ -12,9 +10,12 @@ use crate::theme::{self, Tokens};
 use crate::widgets;
 use paint::material::{GrainSettings, WetColorMode, WetEdgeControl, WetEdgeSettings, WetOutline, WetStyle, WetWidthMode};
 
-pub const CONTROLS: [(Control, &str); 8] = [
+pub const CONTROLS: [(Control, &str); 11] = [
     (Control::Off, "Off"),
-    (Control::Fade, "Fade"),
+    (Control::DistanceFade, "Fade"),
+    (Control::PenPressureInverse, "Inverse Pen Pressure"),
+    (Control::Speed, "Speed"),
+    (Control::PressureRelease, "Pressure Release"),
     (Control::PenPressure, "Pen Pressure"),
     (Control::PenTilt, "Pen Tilt"),
     (Control::StylusWheel, "Stylus Wheel"),
@@ -22,6 +23,28 @@ pub const CONTROLS: [(Control, &str); 8] = [
     (Control::InitialDirection, "Initial Direction"),
     (Control::Direction, "Direction"),
 ];
+
+fn reference_controls(id: &str) -> Vec<(Control, &'static str)> {
+    use paint::brush::{
+        REFERENCE_BASE_CONTROLS, REFERENCE_PIGMENT_CONTROLS, REFERENCE_SHAPE_CONTROLS, REFERENCE_SIZE_CONTROLS, REFERENCE_SPACING_CONTROLS,
+        REFERENCE_TEXTURE_CONTROLS,
+    };
+    let allowed = match id {
+        "brush-size-ctl" | "hardness-control" | "brush-opacity-ctl" | "brush-flow-ctl" | "brush-angle-ctl" => REFERENCE_SIZE_CONTROLS,
+        "scatter-spacing-control" => REFERENCE_SPACING_CONTROLS,
+        "brush-depth-ctl" => REFERENCE_TEXTURE_CONTROLS,
+        "thickness" | "visual-height" => REFERENCE_PIGMENT_CONTROLS,
+        "stroke-jitter-control" | "brush-round-ctl" | "brush-scatter-ctl" | "brush-count-ctl" | "inertia-control" => REFERENCE_SHAPE_CONTROLS,
+        _ => REFERENCE_BASE_CONTROLS,
+    };
+    allowed
+        .iter()
+        .map(|&control| {
+            let label = if control == Control::Fade { "Fade" } else { CONTROLS.iter().find(|(value, _)| *value == control).map_or("Off", |(_, label)| *label) };
+            (control, label)
+        })
+        .collect()
+}
 
 pub const MASK_MODES: [(MaskMode, &str); 10] = [
     (MaskMode::Multiply, "Multiply"),
@@ -71,7 +94,7 @@ fn dim(ui: &mut egui::Ui, s: &str) {
 /// Whether a dynamic's control has a 0..1 input its own response curve shapes (not Off, not the
 /// direction controls, not Angle Jitter, whose controls set an angle).
 pub(crate) fn takes_curve(control: Control, angle: bool) -> bool {
-    !angle && matches!(control, Control::Fade | Control::PenPressure | Control::PenTilt | Control::StylusWheel | Control::Rotation)
+    !angle && control != Control::Off
 }
 
 /// egui memory key of the open/closed state of a dynamic's curve editor.
@@ -87,8 +110,7 @@ fn control_row(ui: &mut egui::Ui, id: &str, d: &mut Dynamic, angle: bool) {
     let mut open: bool = ui.data(|m| m.get_temp(open_id)).unwrap_or(false);
     ui.horizontal(|ui| {
         dim(ui, tl!("Control:"));
-        let n = if angle || matches!(d.control, Control::InitialDirection | Control::Direction) { 8 } else { 6 };
-        widgets::dropdown(ui, id, &mut d.control, &CONTROLS[..n], 130.0);
+        widgets::dropdown(ui, id, &mut d.control, &reference_controls(id), 130.0);
         if d.control == Control::Fade {
             let mut steps = d.fade_steps as f32;
             if widgets::value_field(ui, &mut steps, 1.0..=9999.0, "", 56.0).on_hover_text(tl!("Fade steps")).changed() {
@@ -277,8 +299,8 @@ fn tip_grid(ui: &mut egui::Ui, id: &str, presets: &[BrushPreset], highlight: Opt
                     } else if resp.hovered() {
                         ui.painter().rect_filled(cell, 3.0, t.hover);
                     }
-                    let (tip, size, hard, angle, round, _) = preset_tip(p);
-                    let tex = brush_preview::tip_texture(ui.ctx(), &format!("{id}:{}", p.name), tip, (hard, angle, round), 34, t.text);
+                    let (_, size, _, _, _, _) = preset_tip(p);
+                    let tex = brush_preview::tip_texture(ui.ctx(), &format!("{id}:{}", p.name), &p.brush, 34, t.text);
                     let ir = egui::Rect::from_center_size(pos2(cell.center().x, cell.top() + 20.0), vec2(34.0, 34.0) * thumb_scale(size));
                     ui.painter().image(tex.id(), ir, egui::Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
                     ui.painter().text(
@@ -309,6 +331,8 @@ fn tip_shape(ui: &mut egui::Ui, b: &mut BrushSettings, presets: &[BrushPreset], 
     if let Some(p) = tip_grid(ui, "brush-tip-grid", presets, highlight).and_then(|i| presets.get(i)) {
         let (pt, ps, ph, pa, pr, psp) = preset_tip(p);
         b.tip = pt.clone();
+        b.triangle = p.brush.triangle;
+        b.c3_tip_math = p.brush.c3_tip_math;
         b.size = ps;
         b.hardness = ph;
         b.angle = pa;
@@ -316,16 +340,32 @@ fn tip_shape(ui: &mut egui::Ui, b: &mut BrushSettings, presets: &[BrushPreset], 
         b.spacing = psp;
         return Some(p.name.clone());
     }
+    let mut shape = if b.triangle {
+        1u8
+    } else if matches!(b.tip, TipShape::Round) {
+        0
+    } else {
+        2
+    };
+    let mut shapes = vec![(0u8, "Round Tip"), (1, "Triangle")];
+    if shape == 2 {
+        shapes.push((2, "Sampled Tip"));
+    }
+    if widgets::dropdown(ui, "brush-tip-shape", &mut shape, &shapes, 130.0) {
+        b.triangle = shape == 1;
+        if shape != 2 {
+            b.tip = TipShape::Round;
+            b.c3_tip_math = true;
+        }
+    }
     let orig = b.tip.bitmap_size().map(|(w, h)| w.max(h) as f32);
     size_row(ui, tl!("Size"), &mut b.size, MAX_BRUSH_SIZE, orig);
-    ui.horizontal(|ui| {
-        widgets::checkbox(ui, &mut b.flip_x, tl!("Flip X"));
-        ui.add_space(8.0);
-        widgets::checkbox(ui, &mut b.flip_y, tl!("Flip Y"));
-    });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ellipse_widget(ui, &mut b.angle, &mut b.roundness);
+        let mut widget_angle = if b.c3_tip_math { -b.angle } else { b.angle };
+        if ellipse_widget(ui, &mut widget_angle, &mut b.roundness) {
+            b.angle = if b.c3_tip_math { -widget_angle } else { widget_angle };
+        }
         ui.add_space(8.0);
         ui.vertical(|ui| {
             ui.add_space(10.0);
@@ -347,14 +387,9 @@ fn tip_shape(ui: &mut egui::Ui, b: &mut BrushSettings, presets: &[BrushPreset], 
         });
     });
     ui.add_space(6.0);
-    ui.add_enabled_ui(matches!(b.tip, TipShape::Round), |ui| {
-        pct(ui, tl!("Hardness"), &mut b.hardness, 1.0);
-    });
-    // Unchecked, the pointer's speed sets the spacing (Photoshop).
-    widgets::checkbox(ui, &mut b.spacing_enabled, tl!("Spacing")).on_hover_text(tl!("Off: the speed of the pointer sets the spacing"));
-    ui.add_space(2.0);
-    let on = b.spacing_enabled;
-    ui.add_enabled_ui(on, |ui| signed_pct(ui, tl!("Spacing"), &mut b.spacing, 0.01, 10.0));
+    if signed_pct(ui, tl!("Spacing"), &mut b.spacing, 0.01, 10.0) {
+        b.spacing_enabled = true;
+    }
     None
 }
 
@@ -363,33 +398,37 @@ fn shape_dynamics(ui: &mut egui::Ui, b: &mut BrushSettings) {
     pct(ui, tl!("Size Jitter"), &mut sd.size.jitter, 1.0);
     control_row(ui, "brush-size-ctl", &mut sd.size, false);
     minimum_row(ui, tl!("Minimum Diameter"), &mut sd.size);
-    // Tilt Scale applies with the size control on Pen Tilt (greyed out otherwise, like Photoshop).
-    let tilt = sd.size.control == Control::PenTilt;
-    ui.add_enabled_ui(tilt, |ui| pct(ui, tl!("Tilt Scale"), &mut sd.tilt_scale, 2.0));
+    dynamic(ui, "stroke-jitter-control", tl!("Stroke Jitter"), &mut sd.stroke_jitter, 10.0, Some(tl!("Minimum Stroke Jitter")), false);
     ui.add_space(6.0);
-    dynamic(ui, "brush-angle-ctl", tl!("Angle Jitter"), &mut sd.angle, 1.0, None, true);
+    let mut degrees = sd.angle.jitter * 360.0;
+    if num(ui, tl!("Angle Jitter"), &mut degrees, 0.0..=360.0, "°") {
+        sd.angle.jitter = degrees / 360.0;
+    }
+    control_row(ui, "brush-angle-ctl", &mut sd.angle, true);
+    minimum_row(ui, tl!("Minimum Angle"), &mut sd.angle);
     dynamic(ui, "brush-round-ctl", tl!("Roundness Jitter"), &mut sd.roundness, 1.0, Some(tl!("Minimum Roundness")), false);
-    ui.horizontal(|ui| {
-        widgets::checkbox(ui, &mut sd.flip_x_jitter, tl!("Flip X Jitter"));
-        ui.add_space(8.0);
-        widgets::checkbox(ui, &mut sd.flip_y_jitter, tl!("Flip Y Jitter"));
-    });
-    ui.add_space(2.0);
-    widgets::checkbox(ui, &mut sd.brush_projection, tl!("Brush Projection")).on_hover_text(tl!("Apply the pen's tilt and rotation to the tip shape"));
 }
 
 fn scattering(ui: &mut egui::Ui, b: &mut BrushSettings) {
     let sc = &mut b.scattering;
-    pct(ui, tl!("Scatter"), &mut sc.scatter.jitter, 10.0);
-    widgets::checkbox(ui, &mut sc.both_axes, tl!("Both Axes"));
+    pct(ui, tl!("Scatter"), &mut sc.scatter.jitter, if b.c3_tip_math { 50.0 } else { 10.0 });
+    pct(ui, tl!("Range Jitter"), &mut sc.range_jitter, 1.0);
+    dynamic(ui, "scatter-spacing-control", tl!("Spacing Jitter"), &mut sc.spacing_jitter, 1.0, Some(tl!("Minimum Spacing")), false);
     ui.add_space(2.0);
     control_row(ui, "brush-scatter-ctl", &mut sc.scatter, false);
+    minimum_row(ui, tl!("Minimum Scatter"), &mut sc.scatter);
     ui.add_space(6.0);
     let mut c = sc.count as f32;
     if num(ui, tl!("Count"), &mut c, 1.0..=16.0, "") {
         sc.count = c as u32;
     }
     dynamic(ui, "brush-count-ctl", tl!("Count Jitter"), &mut sc.count_jitter, 1.0, None, false);
+    ui.add_enabled_ui(sc.count_jitter.control != Control::Off, |ui| {
+        let mut minimum = sc.minimum_count.unwrap_or(sc.count_jitter.minimum * sc.count as f32).max(1.0);
+        if num(ui, tl!("Minimum Count"), &mut minimum, 1.0..=16.0, "") {
+            sc.minimum_count = Some(minimum);
+        }
+    });
 }
 
 /// The pattern swatch: the (adjusted) texture as the stroke sees it.
@@ -484,6 +523,17 @@ fn texture(ui: &mut egui::Ui, b: &mut BrushSettings) {
     if num(ui, tl!("Contrast"), &mut ct, -50.0..=100.0, "") {
         tx.contrast = if ct < 0.0 { ct / 50.0 } else { ct / 100.0 };
     }
+    ui.horizontal(|ui| {
+        dim(ui, tl!("Coordinates:"));
+        use paint::brush::TextureCoordinateMode as M;
+        widgets::dropdown(
+            ui,
+            "texture-coordinates",
+            &mut tx.coordinate_mode,
+            &[(M::CanvasLocked, "Canvas Locked"), (M::StrokeLocked, "Stroke Locked"), (M::TipLocal, "Tip Local")],
+            130.0,
+        );
+    });
     widgets::checkbox(ui, &mut tx.each_tip, tl!("Texture Each Tip"));
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -500,46 +550,56 @@ fn texture(ui: &mut egui::Ui, b: &mut BrushSettings) {
     });
 }
 
-fn dual_brush(ui: &mut egui::Ui, b: &mut BrushSettings, presets: &[BrushPreset]) {
-    let d = &mut b.dual_brush;
+pub(crate) fn secondary_defaults(b: &BrushSettings) -> BrushSettings {
+    b.dual_brush.resolved_brush(b).unwrap_or_else(|| {
+        let d = &b.dual_brush;
+        BrushSettings {
+            tip: d.tip.clone(),
+            size: d.size,
+            hardness: d.hardness,
+            roundness: d.roundness,
+            angle: d.angle,
+            spacing: d.spacing,
+            opacity: d.opacity,
+            flow: d.flow,
+            pressure_size: false,
+            grain: d.grain.clone(),
+            wet_edges: d.wet_edges,
+            wet_edge: d.wet_edge.clone(),
+            scattering: paint::Scattering {
+                enabled: d.scatter > 0.0 || d.count > 1,
+                scatter: Dynamic::jitter(d.scatter),
+                both_axes: d.both_axes,
+                count: d.count,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    })
+}
+
+pub(crate) fn dual_brush_header(ui: &mut egui::Ui, b: &mut BrushSettings) {
+    pct(ui, tl!("Primary Strength"), &mut b.dual_brush.primary_strength, 1.0);
+    let mut strength = if b.dual_brush.enabled { b.dual_brush.secondary_strength } else { 0.0 };
+    pct(ui, tl!("Secondary Strength"), &mut strength, 1.0);
+    if strength != (if b.dual_brush.enabled { b.dual_brush.secondary_strength } else { 0.0 }) {
+        b.dual_brush.enabled = strength > 0.0;
+        b.dual_brush.secondary_strength = strength;
+    }
     ui.horizontal(|ui| {
         dim(ui, tl!("Mode:"));
-        widgets::dropdown(ui, "brush-dual-mode", &mut d.mode, &MASK_MODES, 120.0);
-        ui.add_space(8.0);
-        widgets::checkbox(ui, &mut d.flip, tl!("Flip"));
-    });
-    ui.add_space(4.0);
-    // The dual tip is a sub-setting, not a selection: no persistent highlight (a look-alike match
-    // would highlight an arbitrary duplicate).
-    if let Some(p) = tip_grid(ui, "brush-dual-grid", presets, None).and_then(|i| presets.get(i)) {
-        let (pt, ps, ph, pa, pr, psp) = preset_tip(p);
-        d.tip = pt.clone();
-        d.size = ps;
-        d.hardness = ph;
-        d.angle = pa;
-        d.roundness = pr;
-        d.spacing = psp;
-    }
-    let orig = d.tip.bitmap_size().map(|(w, h)| w.max(h) as f32);
-    size_row(ui, tl!("Size"), &mut d.size, 2500.0, orig);
-    signed_pct(ui, tl!("Spacing"), &mut d.spacing, 0.01, 10.0);
-    pct(ui, tl!("Scatter"), &mut d.scatter, 10.0);
-    widgets::checkbox(ui, &mut d.both_axes, tl!("Both Axes"));
-    ui.add_space(4.0);
-    let mut c = d.count as f32;
-    if num(ui, tl!("Count"), &mut c, 1.0..=16.0, "") {
-        d.count = c as u32;
-    }
-    ui.collapsing(tl!("Grain"), |ui| {
-        let mut enabled = d.grain.is_some();
-        if widgets::checkbox(ui, &mut enabled, tl!("Enable Grain")).changed() {
-            d.grain = enabled.then(GrainSettings::default);
-        }
-        ui.add_enabled_ui(enabled, |ui| grain_settings(ui, &mut d.grain));
-    });
-    ui.collapsing(tl!("Wet Edges"), |ui| {
-        widgets::checkbox(ui, &mut d.wet_edges, tl!("Enable Wet Edges"));
-        ui.add_enabled_ui(d.wet_edges, |ui| wet_settings(ui, &mut d.wet_edge));
+        let modes = [
+            (MaskMode::Normal, "Normal"),
+            (MaskMode::Multiply, "Multiply"),
+            (MaskMode::Darken, "Darken"),
+            (MaskMode::Overlay, "Overlay"),
+            (MaskMode::ColorDodge, "Color Dodge"),
+            (MaskMode::ColorBurn, "Color Burn"),
+            (MaskMode::LinearBurn, "Linear Burn"),
+            (MaskMode::HardMix, "Hard Mix"),
+            (MaskMode::LinearHeight, "Linear Height"),
+        ];
+        widgets::dropdown(ui, "brush-dual-mode", &mut b.dual_brush.mode, &modes, 130.0);
     });
 }
 
@@ -547,36 +607,28 @@ fn color_dynamics(ui: &mut egui::Ui, b: &mut BrushSettings) {
     let c = &mut b.color_dynamics;
     widgets::checkbox(ui, &mut c.per_tip, tl!("Apply Per Tip"));
     ui.add_space(6.0);
-    dynamic(ui, "brush-fgbg-ctl", tl!("Foreground/Background Jitter"), &mut c.fg_bg, 1.0, None, false);
-    pct(ui, tl!("Hue Jitter"), &mut c.hue_jitter, 1.0);
-    pct(ui, tl!("Saturation Jitter"), &mut c.saturation_jitter, 1.0);
-    pct(ui, tl!("Brightness Jitter"), &mut c.brightness_jitter, 1.0);
-    signed_pct(ui, tl!("Purity"), &mut c.purity, -1.0, 1.0);
+    for (id, label, amount, control, minimum) in [
+        ("hue", "Hue Jitter", &mut c.hue_jitter, &mut c.hue_control, &mut c.hue_minimum),
+        ("saturation", "Saturation Jitter", &mut c.saturation_jitter, &mut c.saturation_control, &mut c.saturation_minimum),
+        ("brightness", "Brightness Jitter", &mut c.brightness_jitter, &mut c.brightness_control, &mut c.brightness_minimum),
+        ("purity", "Purity", &mut c.purity, &mut c.purity_control, &mut c.purity_minimum),
+    ] {
+        ui.push_id(id, |ui| {
+            signed_pct(ui, tl!(label), amount, if id == "purity" { -1.0 } else { 0.0 }, 1.0);
+            material_control(ui, id, control, &mut 25);
+            pct(ui, tl!("Minimum"), minimum, 1.0);
+        });
+    }
 }
 
 fn transfer(ui: &mut egui::Ui, b: &mut BrushSettings) {
+    ui.horizontal(|ui| {
+        dim(ui, tl!("Flow Algorithm:"));
+        widgets::dropdown(ui, "brush-flow-algorithm", &mut b.flow_algorithm_version, &[(1u8, "Version 1"), (2u8, "Version 2")], 130.0);
+    });
     let tr = &mut b.transfer;
     dynamic(ui, "brush-opacity-ctl", tl!("Opacity Jitter"), &mut tr.opacity, 1.0, Some(tl!("Minimum")), false);
     dynamic(ui, "brush-flow-ctl", tl!("Flow Jitter"), &mut tr.flow, 1.0, Some(tl!("Minimum")), false);
-    dynamic(ui, "brush-wet-ctl", tl!("Wetness Jitter"), &mut tr.wetness, 1.0, Some(tl!("Minimum")), false);
-    dynamic(ui, "brush-mix-ctl", tl!("Mix Jitter"), &mut tr.mix, 1.0, Some(tl!("Minimum")), false);
-}
-
-/// The Mixer Brush options the brush carries (Photoshop shows them in the Mixer Brush's options
-/// bar; `paint.mixerBrush` uses them unless its params override them).
-fn mixer_options(ui: &mut egui::Ui, b: &mut BrushSettings) {
-    let t = Tokens::get(ui.ctx());
-    ui.add_space(4.0);
-    widgets::hairline(ui);
-    ui.add_space(4.0);
-    ui.label(RichText::new(tl!("Mixer Brush")).font(theme::semibold(11.5)).color(t.text_dim));
-    ui.add_space(2.0);
-    let m = &mut b.mixer;
-    pct(ui, tl!("Wet"), &mut m.wet, 1.0);
-    pct(ui, tl!("Load"), &mut m.load, 1.0);
-    pct(ui, tl!("Mix"), &mut m.mix, 1.0);
-    pct(ui, tl!("Flow"), &mut m.flow, 1.0);
-    widgets::checkbox(ui, &mut m.sample_all_layers, "Sample All Layers");
 }
 
 /// Tilt is stored in degrees (±90, W3C Pointer Events); Photoshop shows it as ±100 %.
@@ -587,6 +639,7 @@ fn tilt(ui: &mut egui::Ui, label: &str, deg: &mut f32) {
     }
 }
 
+#[allow(dead_code)] // Pose is not part of the reference categories.
 fn pose(ui: &mut egui::Ui, b: &mut BrushSettings) {
     let p = &mut b.pose;
     tilt(ui, tl!("Tilt X"), &mut p.tilt_x);
@@ -600,6 +653,7 @@ fn pose(ui: &mut egui::Ui, b: &mut BrushSettings) {
     widgets::checkbox(ui, &mut p.override_pressure, tl!("Override Pressure"));
 }
 
+#[allow(dead_code)] // Smoothing is not part of the reference categories.
 fn smoothing(ui: &mut egui::Ui, b: &mut BrushSettings) {
     let s = &mut b.smoothing;
     pct(ui, tl!("Smoothing"), &mut s.amount, 1.0);
@@ -612,19 +666,7 @@ fn smoothing(ui: &mut egui::Ui, b: &mut BrushSettings) {
 fn material_control(ui: &mut egui::Ui, id: &str, control: &mut Control, fade_steps: &mut u32) {
     ui.horizontal(|ui| {
         dim(ui, tl!("Control:"));
-        widgets::dropdown(
-            ui,
-            id,
-            control,
-            &[
-                (Control::Off, tl!("Off")),
-                (Control::PenPressure, tl!("Pen Pressure")),
-                (Control::Direction, tl!("Direction")),
-                (Control::PenTilt, tl!("Pen Tilt")),
-                (Control::Rotation, tl!("Rotation")),
-            ],
-            130.0,
-        );
+        widgets::dropdown(ui, id, control, &reference_controls(id), 130.0);
         if *control == Control::Fade {
             let mut n = *fade_steps as f32;
             if num(ui, tl!("Fade steps"), &mut n, 1.0..=9999.0, "") {
@@ -636,9 +678,6 @@ fn material_control(ui: &mut egui::Ui, id: &str, control: &mut Control, fade_ste
 
 fn grain_settings(ui: &mut egui::Ui, settings: &mut Option<GrainSettings>) {
     let mut g = settings.clone().unwrap_or_default();
-    if settings.is_none() && widgets::secondary_button(ui, tl!("Use Grain Parameters"), 0.0).clicked() {
-        *settings = Some(g.clone());
-    }
     let before = g.clone();
     pct(ui, tl!("Grain Density"), &mut g.density, 1.0);
     num(ui, tl!("Grain Size"), &mut g.size, 1.0..=300.0, "");
@@ -652,9 +691,6 @@ fn grain_settings(ui: &mut egui::Ui, settings: &mut Option<GrainSettings>) {
 
 fn wet_settings(ui: &mut egui::Ui, settings: &mut Option<WetEdgeSettings>) {
     let mut w = settings.clone().unwrap_or_default();
-    if settings.is_none() && widgets::secondary_button(ui, tl!("Use Wet Edge Parameters"), 0.0).clicked() {
-        *settings = Some(w.clone());
-    }
     let before = w.clone();
     ui.horizontal(|ui| {
         dim(ui, tl!("Wet Edge Mode"));
@@ -728,35 +764,314 @@ fn material_num(ui: &mut egui::Ui, label: &str, value: &mut f32, max: f32) {
 /// Returns the name of a preset whose tip was picked in the Brush Tip Shape grid, for
 /// `brush.presets.setCurrent`.
 pub fn section_body(ui: &mut egui::Ui, b: &mut BrushSettings, i: usize, presets: &[BrushPreset], current: Option<&str>) -> Option<String> {
+    section_body_with_canvas(ui, b, i, presets, current, &[])
+}
+
+pub(crate) fn section_body_with_canvas(
+    ui: &mut egui::Ui,
+    b: &mut BrushSettings,
+    i: usize,
+    presets: &[BrushPreset],
+    current: Option<&str>,
+    _canvases: &[paint::canvas_material::CanvasPreset],
+) -> Option<String> {
     let t = Tokens::get(ui.ctx());
     let note = |ui: &mut egui::Ui, s: &str| {
         ui.label(RichText::new(s).color(t.text_faint).font(theme::medium(11.5)));
     };
-    if i == 0 {
-        return tip_shape(ui, b, presets, current);
-    }
     match i {
-        1 => shape_dynamics(ui, b),
-        2 => scattering(ui, b),
-        3 => texture(ui, b),
-        4 => dual_brush(ui, b, presets),
-        5 => color_dynamics(ui, b),
-        6 => {
+        0 => return tip_shape(ui, b, presets, current),
+        1 => {
+            size_row(ui, tl!("Size"), &mut b.size, MAX_BRUSH_SIZE, None);
+            ui.add_enabled_ui(b.c3_tip_math || matches!(b.tip, TipShape::Round), |ui| {
+                pct(ui, tl!("Hardness"), &mut b.hardness, 1.0);
+                dynamic(ui, "hardness-control", tl!("Hardness Jitter"), &mut b.hardness_dynamic, 1.0, Some(tl!("Minimum Hardness")), false);
+            });
+            pct(ui, tl!("Opacity"), &mut b.opacity, 1.0);
+            pct(ui, tl!("Flow"), &mut b.flow, 1.0);
+            let old_shape = b.shape_dynamics.clone();
+            shape_dynamics(ui, b);
+            if b.shape_dynamics != old_shape {
+                b.shape_dynamics.enabled = true;
+            }
+            let old_scatter = b.scattering.clone();
+            scattering(ui, b);
+            if b.scattering != old_scatter {
+                b.scattering.enabled = true;
+            }
+            let old_transfer = b.transfer.clone();
             transfer(ui, b);
-            mixer_options(ui, b);
+            if b.transfer != old_transfer {
+                b.transfer.enabled = true;
+            }
+            grain_settings(ui, &mut b.grain);
+            inertia_settings(ui, b);
         }
-        7 => pose(ui, b),
-        8 => grain_settings(ui, &mut b.grain),
-        9 => wet_settings(ui, &mut b.wet_edge),
-        10 => {
-            note(ui, tl!("Airbrush: keeps depositing paint while the pointer rests."));
-            ui.add_space(6.0);
-            num(ui, tl!("Rate"), &mut b.build_up_rate, 1.0..=200.0, "/s");
+        2 => motion_settings(ui, b),
+        3 => {
+            ui.add_enabled_ui(b.texture.enabled, |ui| texture(ui, b));
+            widgets::checkbox(ui, &mut b.protect_texture, tl!("Protect Texture"));
         }
-        11 => smoothing(ui, b),
-        _ => note(ui, "Keeps the current pattern and scale when you switch to another textured brush preset."),
+        4 => {
+            color_attributes(ui, &mut b.color_attributes);
+            ui.separator();
+            color_dynamics(ui, b);
+        }
+        5 => {
+            ui.add_enabled_ui(b.wet_edges, |ui| wet_settings(ui, &mut b.wet_edge));
+        }
+        6 => {
+            ui.add_enabled_ui(b.mix_settings.enabled, |ui| mix_settings(ui, &mut b.mix_settings));
+        }
+        7 => pigment_settings(ui, &mut b.pigment, true),
+        _ => note(ui, ""),
     }
     None
+}
+
+fn signed_curve(ui: &mut egui::Ui, id: &str, curve: &mut Option<paint::pigment_material::SignedCurve>) {
+    let mut value = curve.clone().unwrap_or_else(|| paint::pigment_material::SignedCurve {
+        points: std::array::from_fn(|i| {
+            let x = i as f32 / 6.0;
+            [x, x]
+        }),
+        enabled: true,
+    });
+    if effect_curve_graph(ui, id, &mut value, true) {
+        *curve = Some(value);
+    }
+}
+
+fn effect_curve_graph(ui: &mut egui::Ui, id: &str, curve: &mut paint::pigment_material::SignedCurve, signed: bool) -> bool {
+    let before = curve.clone();
+    let minimum = if signed { -1.0 } else { 0.0 };
+    ui.push_id(id, |ui| {
+        if signed {
+            widgets::checkbox(ui, &mut curve.enabled, tl!("Enabled"));
+        }
+        let t = Tokens::get(ui.ctx());
+        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width().min(260.0), 120.0), Sense::click_and_drag());
+        let graph = rect.shrink(7.0);
+        ui.painter().rect_filled(rect, t.radius_sm, t.field);
+        ui.painter().line_segment([pos2(graph.left(), graph.center().y), pos2(graph.right(), graph.center().y)], Stroke::new(1.0, t.field_border));
+        let to_pos = |p: [f32; 2]| pos2(graph.left() + p[0] * graph.width(), graph.bottom() - (p[1] - minimum) / (1.0 - minimum) * graph.height());
+        let points: Vec<_> = (0..=128)
+            .map(|i| {
+                let x = i as f32 / 128.0;
+                to_pos([x, curve.value(x)])
+            })
+            .collect();
+        ui.painter().add(egui::Shape::line(points, Stroke::new(1.5, t.accent)));
+        for p in curve.points {
+            ui.painter().circle_filled(to_pos(p), 3.5, t.text);
+        }
+        if (response.dragged() || response.clicked())
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let key = ui.id().with("signed-curve-point");
+            let selected = (if response.drag_started() || response.clicked() {
+                let nearest = curve
+                    .points
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| to_pos(**a).distance_sq(pos).total_cmp(&to_pos(**b).distance_sq(pos)))
+                    .map_or(0, |(i, _)| i);
+                ui.data_mut(|d| d.insert_temp(key, nearest));
+                nearest
+            } else {
+                ui.data(|d| d.get_temp::<usize>(key)).unwrap_or(0)
+            })
+            .min(6);
+            let y = ((graph.bottom() - pos.y) / graph.height() * (1.0 - minimum) + minimum).clamp(minimum, 1.0);
+            let x = if selected == 0 {
+                0.0
+            } else if selected == 6 {
+                1.0
+            } else {
+                let lo = curve.points[selected - 1][0];
+                let hi = curve.points[selected + 1][0];
+                let margin = ((hi - lo) * 0.1).min(0.001);
+                ((pos.x - graph.left()) / graph.width()).clamp(lo + margin, hi - margin)
+            };
+            curve.points[selected] = [x, y];
+            curve.normalize_handles_with_minimum(minimum);
+        }
+    });
+    *curve != before
+}
+
+pub(crate) fn pigment_settings(ui: &mut egui::Ui, settings: &mut Option<paint::pigment_material::PigmentSettings>, _primary: bool) {
+    let mut p = settings.clone().unwrap_or_default();
+    let before = p.clone();
+    for (id, label, value, minimum, jitter, control) in [
+        ("thickness", "Thickness", &mut p.thickness, &mut p.thickness_minimum, &mut p.thickness_jitter, &mut p.thickness_control),
+        (
+            "visual-height",
+            "Texture Strength",
+            &mut p.visual_thickness,
+            &mut p.visual_thickness_minimum,
+            &mut p.visual_thickness_jitter,
+            &mut p.visual_thickness_control,
+        ),
+    ] {
+        ui.push_id(id, |ui| {
+            widgets::slider_row(ui, tl!(label), value, 0.0..=100.0, "", None);
+            widgets::slider_row(ui, tl!("Minimum"), minimum, 0.0..=100.0, "", None);
+            widgets::slider_row(ui, tl!("Jitter"), jitter, 0.0..=100.0, "", None);
+            material_control(ui, id, control, &mut 25);
+        });
+    }
+    signed_curve(ui, "pigment-thickness-curve", &mut p.thickness_curve);
+    pct(ui, tl!("Highlight Strength"), &mut p.highlight_strength, 1.0);
+    pct(ui, tl!("Highlight Brightness"), &mut p.highlight_brightness, 1.0);
+    pct(ui, tl!("Highlight Ratio"), &mut p.highlight_ratio, 1.0);
+    if p != before {
+        *settings = Some(p);
+    }
+}
+
+fn mix_settings(ui: &mut egui::Ui, m: &mut paint::transport::BrushMixSettings) {
+    use paint::transport::MixAlgorithm as A;
+    widgets::dropdown(ui, "mix-algorithm", &mut m.algorithm, &[(A::V1, "v1"), (A::V2, "v2"), (A::V3, "v3")], 130.0);
+    reference_effect_curve(ui, "mix-pressure-curve", tl!("Mixing Strength"), &mut m.mix_pressure_curve, m.strength);
+    reference_effect_curve(ui, "blur-pressure-curve", tl!("Blur Strength"), &mut m.blur_pressure_curve, m.blur_strength);
+}
+
+fn reference_effect_curve(ui: &mut egui::Ui, id: &str, label: &str, curve: &mut Option<paint::pigment_material::SignedCurve>, strength: f32) {
+    let mut value = curve.clone().unwrap_or_else(|| paint::pigment_material::SignedCurve {
+        points: [[0.0, 0.0], [0.1, 0.0], [0.2, strength], [0.3, strength], [0.53, strength], [0.77, 0.0], [1.0, 0.0]],
+        enabled: true,
+    });
+    let before = value.clone();
+    ui.push_id(id, |ui| {
+        widgets::checkbox(ui, &mut value.enabled, label);
+    });
+    effect_curve_graph(ui, id, &mut value, false);
+    if value != before {
+        *curve = Some(value);
+    }
+}
+
+pub(crate) fn color_attributes(ui: &mut egui::Ui, attributes: &mut paint::brush::ColorAttributes) {
+    let modes: Vec<_> = paint::AttributeMode::ALL.into_iter().map(|m| (m, m.label())).collect();
+    ui.label(tl!("Blend Attribute"));
+    widgets::dropdown(ui, "blend-attribute", &mut attributes.blend, &modes, 130.0);
+    pct(ui, tl!("Strength"), &mut attributes.blend_strength, 1.0);
+    ui.label(tl!("Color Attribute"));
+    ui.horizontal(|ui| {
+        widgets::dropdown(ui, "color-attribute", &mut attributes.color, &modes, 130.0);
+        let mut value = (attributes.color_strength * 100.0).round();
+        let response = ui
+            .scope(|ui| {
+                ui.set_width(88.0);
+                widgets::slider(ui, &mut value, 0.0..=100.0, None).on_hover_text(tl!("Strength"))
+            })
+            .inner;
+        if response.changed() {
+            attributes.color_strength = value / 100.0;
+        }
+        if widgets::value_field(ui, &mut value, 0.0..=100.0, "%", 52.0).changed() {
+            attributes.color_strength = value / 100.0;
+        }
+    });
+}
+
+fn motion_settings(ui: &mut egui::Ui, b: &mut BrushSettings) {
+    use paint::motion::GuideMode;
+    let motion = &mut b.motion;
+    ui.add_enabled_ui(motion.enabled, |ui| {
+        widgets::dropdown(ui, "motion-guide-mode", &mut motion.guide_mode, &[(GuideMode::Off, "Off"), (GuideMode::Anchor, "Anchor")], 150.0);
+        signed_pct(ui, tl!("Anchor X"), &mut motion.anchor_point_x, -1.0, 1.0);
+        signed_pct(ui, tl!("Anchor Y"), &mut motion.anchor_point_y, -1.0, 1.0);
+        pct(ui, tl!("Anchor Delay"), &mut motion.anchor_delay, 1.0);
+        pct(ui, tl!("Anchor Smooth"), &mut motion.anchor_smooth, 1.0);
+        pct(ui, tl!("Stroke Smoothing"), &mut motion.smoothing, 1.0);
+        widgets::checkbox(ui, &mut motion.anchor_delay_pressure_enabled, tl!("Pressure Controls Anchor Delay"));
+        pct(ui, tl!("Tilt Delay"), &mut motion.tilt_delay, 1.0);
+    });
+}
+
+fn inertia_settings(ui: &mut egui::Ui, b: &mut BrushSettings) {
+    let inertia = &mut b.inertia;
+    let before = inertia.clone();
+    pct(ui, tl!("Inertia"), &mut inertia.amount, 1.0);
+    num(ui, tl!("Minimum Distance"), &mut inertia.min_distance, 0.0..=10000.0, " px");
+    widgets::dropdown(ui, "inertia-control", &mut inertia.control, &reference_controls("inertia-control"), 160.0);
+    if *inertia != before {
+        inertia.enabled = inertia.amount > 0.0;
+    }
+}
+
+#[allow(dead_code)] // Canvas material is not part of the reference categories.
+fn canvas_settings(ui: &mut egui::Ui, b: &mut BrushSettings, presets: &[BrushPreset], canvases: &[paint::canvas_material::CanvasPreset]) {
+    let Some(m) = b.canvas_material.as_mut() else { return };
+    ui.horizontal(|ui| {
+        dim(ui, tl!("Pattern:"));
+        let selected = canvases
+            .iter()
+            .find(|p| Some(p.id.as_str()) == m.preset_id.as_deref())
+            .map(|p| p.name.as_str())
+            .or(m.preset_id.as_deref())
+            .unwrap_or(tl!("Choose Pattern"));
+        egui::ComboBox::from_id_salt("canvas-material-preset").selected_text(selected).show_ui(ui, |ui| {
+            for preset in canvases {
+                if ui.selectable_label(m.preset_id.as_deref() == Some(&preset.id), &preset.name).clicked() {
+                    *m = preset.material.clone();
+                    m.enabled = true;
+                }
+            }
+            for preset in presets {
+                if let Some(other) = &preset.brush.canvas_material
+                    && other.pattern.bitmap().is_some()
+                    && ui.selectable_label(m.preset_id == other.preset_id, &preset.name).clicked()
+                {
+                    *m = other.clone();
+                    m.enabled = true;
+                }
+            }
+        });
+    });
+    if m.pattern.bitmap().is_none() {
+        dim(ui, tl!("Import a C3 preset with a packaged canvas pattern."));
+    }
+    pct(ui, tl!("Scale"), &mut m.scale, 10.0);
+    m.scale = m.scale.max(0.01);
+    pct(ui, tl!("Strength"), &mut m.strength, 1.0);
+    let modes: Vec<_> = [
+        paint::AttributeMode::Normal,
+        paint::AttributeMode::Multiply,
+        paint::AttributeMode::Overlay,
+        paint::AttributeMode::WatercolorBurn,
+        paint::AttributeMode::LinearBurn,
+    ]
+    .into_iter()
+    .map(|m| (m, m.label()))
+    .collect();
+    widgets::dropdown(ui, "canvas-material-mode", &mut m.blend_mode, &modes, 160.0);
+    let mut curve = canvas_edit_curve(&m.curve);
+    if effect_curve_graph(ui, "canvas-color-curve", &mut curve, false) {
+        m.set_curve(curve.points.to_vec());
+    }
+}
+
+fn canvas_edit_curve(points: &[[f32; 2]]) -> paint::pigment_material::SignedCurve {
+    let points = if let Ok(points) = <[[f32; 2]; 7]>::try_from(points) {
+        points
+    } else {
+        let at = |x: f32| {
+            points.windows(2).find(|p| x <= p[1][0]).map_or(x, |p| {
+                let t = ((x - p[0][0]) / (p[1][0] - p[0][0]).max(f32::EPSILON)).clamp(0.0, 1.0);
+                p[0][1] + (p[1][1] - p[0][1]) * t
+            })
+        };
+        let anchors = [[0.0, points.first().map_or(0.0, |p| p[1])], [0.5, at(0.5)], [1.0, points.last().map_or(1.0, |p| p[1])]];
+        std::array::from_fn(|i| {
+            let lane = usize::from(i > 3);
+            let t = (i - lane * 3) as f32 / 3.0;
+            std::array::from_fn(|axis| anchors[lane][axis] + (anchors[lane + 1][axis] - anchors[lane][axis]) * t)
+        })
+    };
+    paint::pigment_material::SignedCurve { points, enabled: true }
 }
 
 #[cfg(test)]
@@ -769,7 +1084,7 @@ mod tests {
     };
 
     fn minimum_brush() -> BrushSettings {
-        let mut b = BrushSettings::default();
+        let mut b = BrushSettings { size: 137.0, ..Default::default() };
         b.shape_dynamics.size.minimum = 0.2;
         b.shape_dynamics.roundness.minimum = 0.35;
         b.transfer.opacity.minimum = 0.4;
@@ -781,7 +1096,7 @@ mod tests {
 
     fn section_harness(section: usize, b: BrushSettings) -> Harness<'static, BrushSettings> {
         let mut ready = false;
-        let mut h = Harness::builder().with_size(vec2(340.0, 1100.0)).build_ui_state(
+        let mut h = Harness::builder().with_size(vec2(340.0, 3600.0)).build_ui_state(
             move |ui, b: &mut BrushSettings| {
                 if !ready {
                     crate::PhotocraftApp::setup_context(ui.ctx(), theme::ThemeKind::ProMedium);
@@ -802,7 +1117,7 @@ mod tests {
         for kind in theme::ThemeKind::ALL {
             let mut b = BrushSettings::default();
             b.color_dynamics.hue_jitter = 0.37;
-            let mut h = section_harness(5, b.clone());
+            let mut h = section_harness(4, b.clone());
             crate::PhotocraftApp::setup_context(&h.ctx, kind);
             h.run_steps(3);
             let label = h.get_by_label("Hue Jitter").rect();
@@ -817,6 +1132,20 @@ mod tests {
             assert!(h.query_all_by_role(Role::SpinButton).any(|n| n.accesskit_node().numeric_value() == Some(37.0)));
             assert_eq!(h.state(), &b, "rendering does not change saved brush settings");
         }
+    }
+
+    #[test]
+    fn secondary_tip_panel_exposes_independent_opacity_and_flow() {
+        let mut brush = BrushSettings::default();
+        brush.dual_brush.enabled = true;
+        brush.dual_brush.opacity = 0.63;
+        brush.dual_brush.flow = 0.28;
+        let secondary = secondary_defaults(&brush);
+        let h = section_harness(1, secondary);
+        assert!(h.get_by_label("Opacity").rect().is_positive());
+        assert!(h.get_by_label("Flow").rect().is_positive());
+        assert_eq!(h.state().opacity, 0.63);
+        assert_eq!(h.state().flow, 0.28);
     }
 
     fn set_controls(b: &mut BrushSettings, control: Control) {
@@ -835,7 +1164,7 @@ mod tests {
     /// #3825: all six minimum fields follow their own Control; jitter remains editable.
     #[test]
     fn minimum_fields_are_disabled_only_when_their_control_is_off() {
-        for (section, values) in [(1, vec![20.0, 35.0]), (6, vec![40.0, 55.0, 60.0, 75.0])] {
+        for (section, values) in [(1, vec![20.0, 35.0]), (1, vec![40.0, 55.0])] {
             let mut h = section_harness(section, minimum_brush());
             for (control, _) in CONTROLS {
                 set_controls(h.state_mut(), control);
@@ -850,7 +1179,7 @@ mod tests {
                 );
             }
             set_controls(h.state_mut(), Control::PenPressure);
-            if section == 1 {
+            if values[0] == 20.0 {
                 h.state_mut().shape_dynamics.size.control = Control::Off;
             } else {
                 h.state_mut().transfer.opacity.control = Control::Off;
