@@ -315,16 +315,9 @@ fn section_list(app: &mut PhotocraftApp, ui: &mut egui::Ui, b: &mut BrushSetting
 }
 
 fn settings_tab(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        for (lane, label) in [(0, "Primary Brush"), (1, "Secondary Brush")] {
-            if widgets::pill_tab(ui, tl!(label), app.ui.brush_lane == lane).clicked() {
-                app.ui.brush_lane = lane;
-            }
-        }
-    });
     let before = app.session.tools.brush.clone();
     let mut brush = before.clone();
-    ui.collapsing(tl!("Dual Brush"), |ui| crate::brush_sections::dual_brush_header(ui, &mut brush));
+    crate::brush_sections::dual_brush_header(ui, &mut brush, &mut app.ui.brush_lane);
     commit_gesture(app, ui.ctx(), &before, &brush);
     ui.add_space(6.0);
     ui.push_id(("brush-lane", app.ui.brush_lane), |ui| settings_lane(app, ui));

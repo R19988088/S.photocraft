@@ -578,15 +578,26 @@ pub(crate) fn secondary_defaults(b: &BrushSettings) -> BrushSettings {
     })
 }
 
-pub(crate) fn dual_brush_header(ui: &mut egui::Ui, b: &mut BrushSettings) {
-    pct(ui, tl!("Primary Strength"), &mut b.dual_brush.primary_strength, 1.0);
-    let mut strength = if b.dual_brush.enabled { b.dual_brush.secondary_strength } else { 0.0 };
-    pct(ui, tl!("Secondary Strength"), &mut strength, 1.0);
-    if strength != (if b.dual_brush.enabled { b.dual_brush.secondary_strength } else { 0.0 }) {
-        b.dual_brush.enabled = strength > 0.0;
-        b.dual_brush.secondary_strength = strength;
-    }
+pub(crate) fn dual_brush_header(ui: &mut egui::Ui, b: &mut BrushSettings, lane: &mut usize) {
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if widgets::pill_tab(ui, tl!("Primary Brush"), *lane == 0).clicked() {
+            *lane = 0;
+        }
+        let mut primary = (b.dual_brush.primary_strength * 100.0).round();
+        if widgets::value_field(ui, &mut primary, 0.0..=100.0, "%", 70.0).changed() {
+            b.dual_brush.primary_strength = primary.round() / 100.0;
+        }
+        ui.add_space(24.0);
+        if widgets::pill_tab(ui, tl!("Secondary Brush"), *lane == 1).clicked() {
+            *lane = 1;
+        }
+        let mut secondary = if b.dual_brush.enabled { (b.dual_brush.secondary_strength * 100.0).round() } else { 0.0 };
+        if widgets::value_field(ui, &mut secondary, 0.0..=100.0, "%", 70.0).changed() {
+            b.dual_brush.enabled = secondary > 0.0;
+            b.dual_brush.secondary_strength = secondary.round() / 100.0;
+        }
+        ui.add_space(12.0);
         dim(ui, tl!("Mode:"));
         let modes = [
             (MaskMode::Normal, "Normal"),
