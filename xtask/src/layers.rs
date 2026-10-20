@@ -73,6 +73,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("web", Class::Exempt),
     ("web-boot", Class::Exempt),
     ("xtask", Class::Exempt),
+    // Vendored external Windows printing dependency.
+    ("winprint", Class::Exempt),
 ];
 
 /// Explicit orderings *within* a layer (earlier may be used by later).
