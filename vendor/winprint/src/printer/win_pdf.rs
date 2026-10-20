@@ -48,7 +48,7 @@ impl PdfRendererLibrary {
             .map_err(WinPdfPrinterError::PdfComponentUnavailable)?;
         // SAFETY: PdfCreateRenderer's ABI is the Windows SDK signature. The owned library
         // outlives the function pointer and every COM renderer created through it.
-        let create = unsafe { *library.get::<CreateRenderer>(b"PdfCreateRenderer\0") }.map_err(WinPdfPrinterError::PdfComponentUnavailable)?;
+        let create = *unsafe { library.get::<CreateRenderer>(b"PdfCreateRenderer\0") }.map_err(WinPdfPrinterError::PdfComponentUnavailable)?;
         Ok(Self { create, _library: library })
     }
 

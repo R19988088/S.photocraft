@@ -3,8 +3,14 @@ on:
   push:
     tags: ['0.23']
   workflow_dispatch:
+    inputs:
+      macos_run_id:
+        description: Reuse completed macOS artifacts from this run; rebuild Windows only
+        type: string
+        default: ''
 permissions:
   contents: write
+  actions: read
 jobs:
   build:
     strategy:
@@ -24,12 +30,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        if: runner.os == 'Windows' || !inputs.macos_run_id
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'Windows' || !inputs.macos_run_id
         with:
           toolchain: '1.95.0'
       - uses: Swatinem/rust-cache@v2
+        if: runner.os == 'Windows' || !inputs.macos_run_id
         with:
           key: release-${{ matrix.platform }}
+          cache-on-failure: true
       - name: Test optional Windows PDF loader
         if: runner.os == 'Windows'
         run: cargo test --locked -p winprint --no-default-features --lib pdf_renderer_
@@ -41,7 +51,7 @@ jobs:
         if: runner.os == 'Windows'
         run: python packaging/windows/check-pdf-imports.py target/x86_64-pc-windows-msvc/release/photocraft.exe target/x86_64-pc-windows-msvc/release/photocraft-cli.exe
       - name: Build macOS ${{ matrix.arch }}
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && !inputs.macos_run_id
         shell: bash
         run: |
           rustup target add ${{ matrix.target }}
@@ -50,6 +60,7 @@ jobs:
           codesign --verify --strict target/macos-package/PhotoCraft.app
           ditto -c -k --keepParent target/macos-package/PhotoCraft.app dist/release/photocraft-0.23.0-macos-${{ matrix.arch }}-app.zip
       - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' || !inputs.macos_run_id
         with:
           name: photocraft-0.23-${{ matrix.platform }}
           path: |
@@ -64,10 +75,23 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Reuse macOS packages
+        if: inputs.macos_run_id
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.macos_run_id }}
+          pattern: photocraft-0.23-macos-*
+          path: artifacts
+          merge-multiple: true
       - name: Publish 0.23
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          test -f artifacts/photocraft-0.23.0-windows-x64-portable.zip
+          test -f artifacts/photocraft-0.23.0-macos-aarch64-app.zip
+          test -f artifacts/photocraft-0.23.0-macos-x86_64-app.zip
+          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/0.23" -f sha="$GITHUB_SHA" -F force=true >/dev/null
           gh release view 0.23 >/dev/null 2>&1 || gh release create 0.23 --target "$GITHUB_SHA" --title 'PhotoCraft 0.23' --notes '修复部分 Windows 系统缺少 PDF 组件时无法启动的问题：仅在需要 PDF 打印时加载组件，缺失时提示。Windows x64 便携版；macOS Apple Silicon / Intel 独立包（本地签名、未公证）。'
           gh release upload 0.23 artifacts/* --clobber
