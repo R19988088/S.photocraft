@@ -1,13 +1,8 @@
-name: Release 0.2
+name: Release 0.23
 on:
   push:
-    tags: ['0.2']
+    tags: ['0.23']
   workflow_dispatch:
-    inputs:
-      macos_only:
-        description: Rebuild only the separate macOS packages
-        type: boolean
-        default: false
 permissions:
   contents: write
 jobs:
@@ -35,22 +30,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.platform }}
+      - name: Test optional Windows PDF loader
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p winprint --no-default-features --lib pdf_renderer_
       - name: Build Windows portable
-        if: runner.os == 'Windows' && !inputs.macos_only
+        if: runner.os == 'Windows'
         shell: pwsh
         run: ./packaging/windows/package.ps1 -Arch x64 -PortableOnly
+      - name: Verify Windows PDF imports
+        if: runner.os == 'Windows'
+        run: python packaging/windows/check-pdf-imports.py target/x86_64-pc-windows-msvc/release/photocraft.exe target/x86_64-pc-windows-msvc/release/photocraft-cli.exe
       - name: Build macOS ${{ matrix.arch }}
         if: runner.os == 'macOS'
         shell: bash
         run: |
           rustup target add ${{ matrix.target }}
           bash packaging/macos/package.sh --arch ${{ matrix.arch }}
-          ditto -c -k --keepParent target/macos-package/PhotoCraft.app dist/release/photocraft-0.2.0-macos-${{ matrix.arch }}-app.zip
+          lipo -verify_arch ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }} target/macos-package/PhotoCraft.app/Contents/MacOS/PhotoCraft
+          codesign --verify --strict target/macos-package/PhotoCraft.app
+          ditto -c -k --keepParent target/macos-package/PhotoCraft.app dist/release/photocraft-0.23.0-macos-${{ matrix.arch }}-app.zip
       - uses: actions/upload-artifact@v4
-        if: runner.os != 'Windows' || !inputs.macos_only
         with:
-          name: photocraft-0.2-${{ matrix.platform }}
-          path: dist/release/*
+          name: photocraft-0.23-${{ matrix.platform }}
+          path: |
+            dist/release/*-portable.zip
+            dist/release/*-app.zip
           if-no-files-found: error
   publish:
     needs: build
@@ -60,16 +64,10 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: Publish 0.2
+      - name: Publish 0.23
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release view 0.2 >/dev/null 2>&1 || gh release create 0.2 --target "$GITHUB_SHA" --title 'PhotoCraft 0.2' --notes 'C3 笔刷分类与混色更新。Windows x64 绿色版；macOS 独立架构版（Apple Silicon / Intel，本地签名，未公证）。'
-          gh release upload 0.2 artifacts/* --clobber
-          gh release edit 0.2 --notes 'C3 笔刷分类与混色更新。Windows x64 绿色版；macOS 分为 Apple Silicon（aarch64）和 Intel（x86_64）独立包，本地签名、未公证。'
-          for asset in photocraft-0.2.0-macos-universal.dmg photocraft-0.2.0-macos-universal-app.zip photocraft-cli-0.2.0-macos-universal.zip; do
-            if gh release view 0.2 --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
-              gh release delete-asset 0.2 "$asset" --yes
-            fi
-          done
+          gh release view 0.23 >/dev/null 2>&1 || gh release create 0.23 --target "$GITHUB_SHA" --title 'PhotoCraft 0.23' --notes '修复部分 Windows 系统缺少 PDF 组件时无法启动的问题：仅在需要 PDF 打印时加载组件，缺失时提示。Windows x64 便携版；macOS Apple Silicon / Intel 独立包（本地签名、未公证）。'
+          gh release upload 0.23 artifacts/* --clobber

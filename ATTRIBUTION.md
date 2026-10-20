@@ -6,6 +6,12 @@ code and original assets are MIT OR Apache-2.0 (see [`LICENSE-MIT`](LICENSE-MIT)
 in the same change; third-party assets must be permissively licensed and keep their license file
 next to them.
 
+## Vendored dependencies
+
+| Path | Title | Author | Source | License |
+|---|---|---|---|---|
+| `vendor/winprint` | Windows printing library with optional PDF renderer loading | ArcticLampyrid and winprint contributors | https://github.com/storytold/winprint.rs/tree/5f80b9baf6b58937c401656634e42d33f00ddf49 | BSD-3-Clause, `vendor/winprint/LICENSE.md` |
+
 ## Bundled in the app
 
 | Path | Title | Author | Source | License |
