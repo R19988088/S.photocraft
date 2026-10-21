@@ -3368,6 +3368,34 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     let bars_id = egui::Id::new(("pc-canvas-bars-hover", idx));
     let over_bars = ctx.data(|d| d.get_temp::<bool>(bars_id)).unwrap_or(false);
     let nav_hovered = response.hovered() || free_hover || over_bars;
+    let shift_navigation = !under_dialog
+        && !ctx.text_edit_focused()
+        && app.drag.is_none()
+        && ui.input(|i| i.modifiers.shift && !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt);
+    crate::rotate_view::shift_navigation(&ctx, response.id.with("shift-navigation"),
+        &mut view, &xf, shift_navigation && response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()), ppp);
+    if nav_hovered && shift_navigation {
+        let (up, down, left, right) = ui.input(|i| (i.key_down(egui::Key::ArrowUp), i.key_down(egui::Key::ArrowDown),
+            i.key_down(egui::Key::ArrowLeft), i.key_down(egui::Key::ArrowRight)));
+        if up != down {
+            let factor = if up { 1.02 } else { 1.0 / 1.02 };
+            let zoom = crate::zoom_levels::clamp(view.zoom * factor, view.doc_size);
+            zoom_about(&mut view, &xf, xf.rect.center(), zoom, false, ppp);
+            ctx.request_repaint();
+        }
+        if left != right {
+            let delta = if right { 2.0 } else { -2.0 };
+            view.rotation = crate::rotate_view::wrap_deg(view.rotation + crate::rotate_view::screen_delta(delta, xf.flip));
+            ctx.request_repaint();
+        }
+    }
+    let reset_angle = !under_dialog && !ctx.text_edit_focused() && nav_hovered
+        && ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if reset_angle {
+        view.rotation = 0.0;
+        crate::rotate_view::reset_shift_navigation(&ctx, response.id.with("shift-navigation"));
+        ctx.request_repaint();
+    }
     // Interface › Enable Animations off: the wheel moves the canvas without a glide (#5721).
     // Enhanced Controls › Enable Gestures off: two fingers on a touch screen neither zoom nor
     // turn the view (#204); the mouse and trackpad are unaffected.
@@ -3567,8 +3595,8 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // (Space) and a middle-button drag still pan, and a secondary window's Hand never stops, as the
     // box is only drawn and driven on the primary canvas.
     let transform_owns_pointer = primary && app.ui.transform.is_some() && temporary.is_none() && !middle;
-    let hand_pan = tool == Tool::Hand && !transform_owns_pointer;
-    if primary && app.stylus.native_active && (hand_pan || middle || under_dialog || stroke_dismissal || !strokes_live(tool)) {
+    let hand_pan = tool == Tool::Hand && !transform_owns_pointer && !shift_navigation;
+    if primary && app.stylus.native_active && (hand_pan || middle || under_dialog || shift_navigation || stroke_dismissal || !strokes_live(tool)) {
         // A temporary view tool or dialog can take the release away from the canvas.
         // Finish the contact before handing it the pointer.
         let saved_override = app.tool_override;
@@ -3597,7 +3625,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         view.center[1] -= d.y;
         // The tool cursors below are skipped while panning: the fist is set here (#2196).
         ctx.set_cursor_icon(crate::tool_cursor::hand(&ctx, true));
-    } else if primary && !stroke_dismissal && temporary.is_none() && !middle && crate::layer_picker::armed(app).is_some() {
+    } else if primary && !stroke_dismissal && !shift_navigation && temporary.is_none() && !middle && crate::layer_picker::armed(app).is_some() {
         // A Properties Levels/Curves eyedropper (layer_picker.rs) owns the image until Esc or another
         // tool; Space and the middle button still pan. It samples on the press.
         if response.hovered()
@@ -3616,8 +3644,13 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             let d = xf.to_doc(p);
             crate::layer_picker::sample_at(app, d[0], d[1]);
         }
-    } else if primary && !stroke_dismissal {
-        let mods = ui.input(|i| i.modifiers);
+    } else if primary && !stroke_dismissal && !shift_navigation {
+        let mut mods = ui.input(|i| i.modifiers);
+        // Z is the C3 straight-stroke modifier; it follows the existing constraint route so
+        // native and recovered pointer samples keep identical snapping and live-stroke behavior.
+        if ui.input(|i| i.key_down(egui::Key::Z)) {
+            mods.shift = true;
+        }
         // An ⌥-click the window manager took never arrives; say so (alt_grab.rs).
         crate::alt_grab::watch(app, &ctx, egui::Id::new(("pc-alt-grab", idx)), rect, tool, !under_dialog);
         // Tools follow the left button; the right one opens the Brush Preset picker or erases
@@ -4298,6 +4331,9 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         crate::rulers::paint_rulers(app, ui, full, &xf, &doc);
     }
     crate::rotate_view::overlay(app, &ctx, &painter, &xf, &mut view, &response);
+    if reset_angle {
+        view.rotation = 0.0;
+    }
     if primary {
         // Tool input can change the stored camera while navigation edits the local view.
         // Merge changed camera values so write-back preserves tool-driven pan and rotation.
