@@ -13,6 +13,12 @@ use crate::state::{Tool, ToolOptions};
 
 /// Explicit choices override temporary pen and held-key tools, even when selecting the same tool.
 pub(crate) fn select(app: &mut PhotocraftApp, tool: Tool) {
+    if tool != app.ui.tool && app.distort.liquify.is_some() {
+        crate::liquify_ui::commit(app);
+        if app.distort.liquify.is_some() {
+            return;
+        }
+    }
     app.stylus.tool_before_eraser = None;
     app.ui.spring = None;
     app.ui.tool = tool;

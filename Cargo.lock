@@ -5149,6 +5149,7 @@ dependencies = [
 name = "photocraft-gpu"
 version = "0.23.0"
 dependencies = [
+ "bytemuck",
  "half",
  "log",
  "photocraft-color",

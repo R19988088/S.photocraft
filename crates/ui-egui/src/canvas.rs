@@ -2083,6 +2083,7 @@ pub(crate) fn retain_gpu_documents(app: &mut PhotocraftApp) {
         // retaining only document ids freed the previews every frame (blank canvas while previewing).
         let mut live: Vec<u64> = app.session.documents().iter().flat_map(|st| [st.doc.id.0, st.doc.id.0 ^ (1u64 << 61), st.doc.id.0 ^ (1u64 << 62)]).collect();
         live.extend(crate::adjust_preview::gpu_keys(app));
+        live.extend(crate::liquify_ui::gpu_key(app));
         gpu.retain(&live);
     }
     crate::background_redraw::retain(app);
@@ -2102,6 +2103,13 @@ pub(crate) fn retain_gpu_documents(app: &mut PhotocraftApp) {
 /// another document (`layer_transfer`).
 pub fn document_area(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     crate::distort_ui::drop_foreign(app);
+    if app.ui.tool == Tool::Liquify
+        && app.distort.liquify.is_none()
+        && app.session.active().is_some()
+        && let Err(error) = crate::liquify_ui::open(app, ui.ctx())
+    {
+        crate::notices::error(app, error);
+    }
     documents(app, ui);
     crate::layer_transfer::finish(app, ui.ctx());
     // Once a frame, not per document view: the right-click or options-bar Brush Preset picker.
@@ -3070,7 +3078,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // Painting must consume this frame's input before uploading its image: painting first
     // displayed the previous stroke step, including a blank frame at pointer-down.
     let crop_camera = primary && crate::crop_mode::moves_image(app);
-    let paint_after_input = crop_camera || (primary && strokes_live(app.ui.tool));
+    let paint_after_input = crop_camera || (primary && (strokes_live(app.ui.tool) || app.ui.tool == Tool::Liquify));
     let paint_canvas = |app: &mut PhotocraftApp, ui: &egui::Ui, view: &View, xf: ViewXform| {
         let point_zoom = view.zoom / ppp;
         let drop_shadow = border == photocraft_engine::prefs::CanvasBorder::DropShadow;
@@ -3093,7 +3101,27 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         // A flipped or pixel-aspect-corrected view draws through the CPU path (the GPU canvas shader
         // has no mirroring or non-square pixels). Rotation stays on the GPU: it is a view uniform.
         let gpu_ok = crate::gpu_canvas::gpu_view_ok(flip, view.rotation, aspect);
-        if app.gpu.is_some()
+        if gpu_ok && let Some(shown) = crate::liquify_ui::canvas_preview(app, &ctx, idx) {
+            on_gpu = true;
+            let params = crate::gpu_canvas::ViewParams {
+                doc: shown.id.0,
+                doc_size: [shown.size.width, shown.size.height],
+                zoom: point_zoom,
+                center: view.center,
+                rotation: if view.rotation.is_finite() { view.rotation.to_radians() } else { 0.0 },
+                shadow: drop_shadow,
+                pixel_grid,
+                view_key: egui::Id::new(("pc-canvas-liquify", ctx.viewport_id(), idx)).value(),
+                display: sync_display_lut(app, &shown, shown.id.0, output),
+                output: output.unwrap_or(0),
+                hdr: hdr_preview(app, &shown),
+                offset: [0.0; 2],
+            };
+            paint_gpu_view(&painter, rect, params, &pattern);
+            if view.rotation == 0.0 {
+                crate::liquify_ui::draw_gpu_overlay(app, &painter, rect, img_rect);
+            }
+        } else if app.gpu.is_some()
             && gpu_ok
             && let Some((k, key, preview_size)) =
                 ensure_adjust_proxy(app, idx, view.zoom).or_else(|| ensure_filter_preview(app, idx, &ctx)).or_else(|| ensure_proxy_preview(app, idx, view.zoom))

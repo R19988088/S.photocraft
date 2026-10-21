@@ -16,6 +16,8 @@ use crate::{PhotocraftApp, icons, widgets};
 /// Photoshop toolbar: divider-separated sections of slots; each slot is a flyout group whose button
 /// shows the group's last-used tool.
 const TOOL_SECTIONS: &[&[&[Tool]]] = &[
+    // Core paint tools stay pinned at the top and cannot be hidden or reordered.
+    &[&[Tool::Brush], &[Tool::Eraser], &[Tool::Smudge], &[Tool::Liquify]],
     &[&[Tool::Move, Tool::Artboard]],
     &[
         &[Tool::RectMarquee, Tool::EllipseMarquee, Tool::SingleRowMarquee, Tool::SingleColumnMarquee],
@@ -27,12 +29,12 @@ const TOOL_SECTIONS: &[&[&[Tool]]] = &[
     ],
     &[
         &[Tool::Remove, Tool::SpotHealing, Tool::Healing, Tool::Patch, Tool::ContentAwareMove, Tool::RedEye],
-        &[Tool::Brush, Tool::Pencil, Tool::ColorReplacement],
+        &[Tool::Pencil, Tool::ColorReplacement],
         &[Tool::CloneStamp, Tool::PatternStamp],
         &[Tool::HistoryBrush],
-        &[Tool::Eraser, Tool::BackgroundEraser, Tool::MagicEraser],
+        &[Tool::BackgroundEraser, Tool::MagicEraser],
         &[Tool::Gradient, Tool::PaintBucket],
-        &[Tool::Blur, Tool::Sharpen, Tool::Smudge],
+        &[Tool::Blur, Tool::Sharpen],
         &[Tool::Dodge, Tool::Burn, Tool::Sponge],
     ],
     &[
@@ -62,10 +64,10 @@ fn visible_sections(hidden: &[String]) -> Vec<Vec<(usize, Vec<Tool>)>> {
     let hidden: Vec<Tool> = hidden.iter().map(String::as_str).filter_map(Tool::from_name).collect();
     let mut index = 0usize;
     let mut sections = Vec::new();
-    for section in TOOL_SECTIONS {
+    for (section_index, section) in TOOL_SECTIONS.iter().enumerate() {
         let mut slots = Vec::new();
         for slot in section.iter() {
-            let tools: Vec<Tool> = slot.iter().copied().filter(|tool| !hidden.contains(tool)).collect();
+            let tools: Vec<Tool> = slot.iter().copied().filter(|tool| section_index == 0 || !hidden.contains(tool)).collect();
             if !tools.is_empty() {
                 slots.push((index, tools));
             }
@@ -5583,11 +5585,24 @@ mod toolbar_hidden_tests {
         let all = tool_buttons(&mut app);
         let slots: usize = TOOL_SECTIONS.iter().map(|section| section.len()).sum();
         hide(&mut app, &Tool::ALL);
-        assert_eq!(tool_buttons(&mut app), all - slots, "every tool slot is gone when every tool is hidden");
+        assert_eq!(tool_buttons(&mut app), all - slots + 4, "the four pinned tools stay when every other tool is hidden");
         hide(&mut app, &[Tool::Brush, Tool::Pencil, Tool::ColorReplacement]);
-        assert_eq!(tool_buttons(&mut app), all - 1, "a slot whose tools are all hidden is gone");
+        assert_eq!(tool_buttons(&mut app), all - 1, "a non-pinned slot whose tools are all hidden is gone");
         hide(&mut app, &[Tool::Sponge]);
         assert_eq!(tool_buttons(&mut app), all, "a slot with a visible tool stays");
+    }
+
+    #[test]
+    fn pinned_paint_tools_stay_first_and_cannot_be_hidden() {
+        let sections = visible_sections(&["Brush".to_string(), "Eraser".to_string(), "Smudge".to_string(), "Liquify".to_string()]);
+        assert_eq!(sections[0].iter().map(|(_, tools)| tools[0]).collect::<Vec<_>>(), [Tool::Brush, Tool::Eraser, Tool::Smudge, Tool::Liquify]);
+        assert!(
+            sections
+                .iter()
+                .skip(1)
+                .flatten()
+                .all(|(_, tools)| !tools.iter().any(|tool| matches!(tool, Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Liquify)))
+        );
     }
 
     #[test]

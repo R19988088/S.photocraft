@@ -141,7 +141,7 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) ->
         crate::caf_ui::pointer(app, ev, mods);
         return true;
     }
-    if app.distort.liquify.is_some() {
+    if app.distort.liquify.is_some() || app.ui.tool == crate::state::Tool::Liquify {
         crate::liquify_ui::pointer(app, ev, mods);
         return true;
     }
@@ -228,6 +228,9 @@ pub fn keys(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
 
 /// Canvas overlay for the on-canvas modes.
 pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
+    if app.ui.tool == crate::state::Tool::Liquify {
+        crate::liquify_ui::draw_cursor(app, painter, xf);
+    }
     if let Some(p) = &app.distort.puppet {
         crate::puppet_ui::draw(p, painter, xf);
     }
@@ -241,6 +244,10 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
 
 /// Options bar for the on-canvas modes. True when drawn.
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
+    if app.distort.liquify.is_some() || app.ui.tool == crate::state::Tool::Liquify {
+        crate::liquify_ui::options_bar(app, ui);
+        return true;
+    }
     if app.distort.puppet.is_some() {
         crate::puppet_ui::options_bar(app, ui);
         return true;
@@ -276,7 +283,7 @@ pub fn drop_foreign(app: &mut PhotocraftApp) {
     }
 }
 
-/// Full-window dialogs (Liquify, Content-Aware Fill, Filter Gallery).
+/// Full-window dialogs and pending on-canvas Liquify scope changes.
 pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     drop_foreign(app);
     if app.distort.caf.is_some() {

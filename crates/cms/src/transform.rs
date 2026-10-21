@@ -93,7 +93,20 @@ pub struct Transform {
     grid8: Vec<[(u32, f32); 256]>,
 }
 
+/// The actual accelerated device-link grid and output shapers used by `eval_fast`.
+/// Consumers must use the CLUT's tetrahedral interpolation, not resample this table.
+pub struct FastGrid<'a> {
+    pub clut: &'a Clut,
+    pub post: Option<&'a [Vec<f32>]>,
+}
+
 impl Transform {
+    pub fn fast_grid(&self) -> Option<FastGrid<'_>> {
+        match &self.core {
+            Core::Grid(clut) => Some(FastGrid { clut, post: self.post.as_ref().map(|p| p.tables.as_slice()) }),
+            _ => None,
+        }
+    }
     /// Transform from `src` to `dst` with `intent`, optionally with black point compensation.
     pub fn new(src: &Profile, dst: &Profile, intent: Intent, bpc: bool) -> Result<Transform, CmsError> {
         Self::with_options(src, dst, TransformOptions { intent, bpc, ..Default::default() })

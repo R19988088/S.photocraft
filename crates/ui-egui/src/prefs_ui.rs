@@ -2339,6 +2339,10 @@ fn toolbar_tab(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     egui::ScrollArea::vertical().max_height(380.0).id_salt("toolbar-scroll").show(ui, |ui| {
         egui::Grid::new("toolbar-grid").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
             for tool in crate::state::Tool::ALL {
+                // Brush, Eraser, Smudge and Liquify are permanently pinned in the toolbar.
+                if matches!(tool, crate::state::Tool::Brush | crate::state::Tool::Eraser | crate::state::Tool::Smudge | crate::state::Tool::Liquify) {
+                    continue;
+                }
                 let name = format!("{tool:?}");
                 let mut on = !hidden.contains(&name);
                 crate::widgets::checkbox(ui, &mut on, tl!(tool.label()));

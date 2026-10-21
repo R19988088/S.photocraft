@@ -38,8 +38,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod bounds;
+pub mod cached_feather;
+mod cached_fields;
 mod fx;
 pub mod health;
+pub mod native_format;
 pub mod plan;
 mod prefix;
 pub mod timing;
@@ -320,6 +323,7 @@ struct FxEntry {
     _pin: Vec<std::sync::Weak<Tile>>,
     /// The shape on the CPU (distance fields are computed from it) and on the GPU.
     shape_cpu: Vec<f32>,
+    override_revision: Option<u64>,
     shape: Tex,
     /// Distance fields: the reach each is exact to, and its texture.
     fields: HashMap<FieldKind, (i32, Tex)>,
@@ -437,7 +441,92 @@ fn texture_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, views: &
 }
 
 /// GPU compositor. Create once per device; call [`Compositor::render`] per refresh.
+/// A live layer replacement whose pixels and alpha never leave the GPU.
+#[derive(Clone)]
+pub struct SourceOverridePage {
+    pub texture: wgpu::Texture,
+    pub shape: wgpu::Texture,
+    pub mask: Option<wgpu::Texture>,
+    pub rect: Rect,
+}
+
+#[derive(Clone)]
+pub struct SourceOverride {
+    /// Nonempty resident pages use their own document rectangles for texture addressing.
+    pub pages: Vec<SourceOverridePage>,
+    pub texture: wgpu::Texture,
+    pub shape: wgpu::Texture,
+    pub mask: Option<wgpu::Texture>,
+    /// Full source extent, including child styles; a single texture uses this as its frame.
+    pub rect: Rect,
+    /// Paint/layer bounds used to anchor patterns and gradients, excluding child styles.
+    pub bounds: Rect,
+    pub revision: u64,
+}
+
+impl SourceOverride {
+    /// Assemble a bounded compositor window using GPU copies only.
+    fn window(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, region: Rect, kind: u8) -> wgpu::Texture {
+        let format = if kind == 0 { self.texture.format() } else { self.shape.format() };
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pc_cached_source_window"),
+            size: wgpu::Extent3d { width: region.width(), height: region.height(), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let mut copy = |source: &wgpu::Texture, rect: Rect| {
+            let r = rect.intersect(&region);
+            if r.is_empty() {
+                return;
+            }
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: source,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: (r.x0 - rect.x0) as u32, y: (r.y0 - rect.y0) as u32, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &output,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: (r.x0 - region.x0) as u32, y: (r.y0 - region.y0) as u32, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d { width: r.width(), height: r.height(), depth_or_array_layers: 1 },
+            );
+        };
+        if self.pages.is_empty() {
+            let source = match kind {
+                0 => Some(&self.texture),
+                1 => Some(&self.shape),
+                _ => self.mask.as_ref(),
+            };
+            if let Some(source) = source {
+                copy(source, self.rect);
+            }
+        } else {
+            for page in &self.pages {
+                let source = match kind {
+                    0 => Some(&page.texture),
+                    1 => Some(&page.shape),
+                    _ => page.mask.as_ref(),
+                };
+                if let Some(source) = source {
+                    copy(source, page.rect);
+                }
+            }
+        }
+        output
+    }
+}
+
 pub struct Compositor {
+    source_overrides: HashMap<LayerId, SourceOverride>,
+    cached_fields: Option<cached_fields::Fields>,
     kit: Kit,
     pool: Vec<(wgpu::Texture, wgpu::TextureView)>,
     residents: HashMap<ResKey, Resident>,
@@ -695,6 +784,8 @@ impl Compositor {
         }
         let dummy = Tex::new(device, "pc_compose_dummy", 1, 1, wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureUsages::TEXTURE_BINDING).view;
         Self {
+            source_overrides: HashMap::new(),
+            cached_fields: None,
             kit: Kit { pipelines, bgl0, bgl1, dummy },
             pool: Vec::new(),
             residents: HashMap::new(),
@@ -1133,7 +1224,22 @@ impl Compositor {
     ) -> Result<Stats, Unsupported> {
         let canvas = doc.bounds();
         let region = region.intersect(&canvas);
-        let plan = plan(doc)?;
+        let mut plan = plan::plan_live(doc, &self.source_overrides)?;
+        if !self.source_overrides.is_empty() {
+            // Cached sources can leave their original bounds. Every intermediate slot is
+            // initialized over the whole chunk before any consumer reads it.
+            for p in &mut plan.passes {
+                if p.transform_owner.is_some_and(|id| self.source_overrides.contains_key(&id)) {
+                    p.clip = None;
+                }
+            }
+            for f in &mut plan.fx {
+                if let Some(source) = self.source_overrides.get(&f.layer.id) {
+                    f.region = if source.pages.is_empty() { source.rect } else { source.rect.inflate(photocraft_compose::effects::margin(f.layer)) };
+                    f.bounds = source.bounds;
+                }
+            }
+        }
         self.check_fx(doc, &plan)?;
         self.pattern_mode = doc.pixel_format().mode;
         self.pattern_doc = doc.id;
@@ -1161,15 +1267,22 @@ impl Compositor {
 
         // Only render owns submission. A caller may discard encode's command buffer, so it
         // cannot establish (or consume) a checkpoint whose GPU copy might never execute.
-        let checkpoint = if flush { self.prefix.prepare(doc, &plan) } else { None };
+        let checkpoint = if flush && self.source_overrides.is_empty() { self.prefix.prepare(doc, &plan) } else { None };
 
         // Effect maps of whole regions first (they may render group shapes through sub-plans);
         // regions larger than the limit are built per cell below.
-        let paged: Vec<bool> = plan.fx.iter().map(|f| self.fx_paged(f.region)).collect();
+        let paged: Vec<bool> = plan
+            .fx
+            .iter()
+            .map(|f| {
+                self.fx_paged(f.region)
+                    || (self.source_overrides.contains_key(&f.layer.id) && u64::from(f.region.width()) * u64::from(f.region.height()) > 1_048_576)
+            })
+            .collect();
         let aprons: Vec<i32> = plan.fx.iter().zip(&paged).map(|(f, &pg)| if pg { Self::fx_apron(doc, f) } else { 0 }).collect();
         for (f, &pg) in plan.fx.iter().zip(&paged) {
             if !pg {
-                self.sync_fx(device, queue, encoder, doc, f, (f.layer.id, None), f.region, &mut stats);
+                self.sync_fx(device, queue, encoder, doc, f, (f.layer.id, None), f.region, &mut stats)?;
             }
         }
         let fr = self.frame_res(device, queue, canvas, &plan);
@@ -1200,13 +1313,13 @@ impl Compositor {
                     continue;
                 }
                 let window = pf.inflate(aprons.get(i).copied().unwrap_or(0)).intersect(&f.region);
-                self.sync_fx(device, queue, encoder, doc, f, (f.layer.id, Some(cell)), window, &mut stats);
+                self.sync_fx(device, queue, encoder, doc, f, (f.layer.id, Some(cell)), window, &mut stats)?;
             }
             let chunks = grid_rects(part, self.chunk);
             stats.chunks += chunks.len();
             work += part.width() as u64 * part.height() as u64 * plan.passes.len() as u64;
             let mut batch = flush.then_some(&mut last_submit);
-            self.run_cell(device, queue, encoder, doc.id, &plan, &paged, cell, &fr, &chunks, checkpoint, &mut stats, sink, &mut batch);
+            self.run_cell(device, queue, encoder, doc.id, &plan, &paged, cell, &fr, &chunks, checkpoint, &mut stats, sink, &mut batch)?;
             // The device was lost in a submit inside the cell: issue no more work.
             if let Some(f) = self.fault() {
                 return Err(Unsupported(f.to_string()));
@@ -1335,7 +1448,7 @@ impl Compositor {
         fr: &FrameRes,
         first_pass: usize,
         stats: &mut Stats,
-    ) -> Bound {
+    ) -> Result<Bound, Unsupported> {
         let cr = cell_rect(cell, self.page);
         let mut views: Vec<(Option<ResidentRef>, Option<ResidentRef>)> = Vec::with_capacity(plan.passes.len());
         let mut keys: Vec<ResKey> = Vec::new();
@@ -1347,16 +1460,19 @@ impl Compositor {
                 continue;
             }
             let (ta, ma) = fr.areas.get(i).copied().unwrap_or((Rect::EMPTY, Rect::EMPTY));
-            let tex =
-                p.tex.as_ref().and_then(|t| self.sync(device, queue, encoder, doc, (t.layer, t.role, cell), t.surface.get(), ta.intersect(&cr), stats)).map(
-                    |(k, r)| {
-                        keys.push(k);
-                        (keys.len() - 1, r)
-                    },
-                );
+            let tex = p
+                .tex
+                .as_ref()
+                .filter(|t| !self.source_overrides.contains_key(&t.layer))
+                .and_then(|t| self.sync(device, queue, encoder, doc, (t.layer, t.role, cell), t.surface.get(), ta.intersect(&cr), stats))
+                .map(|(k, r)| {
+                    keys.push(k);
+                    (keys.len() - 1, r)
+                });
             let mask = p
                 .mask
                 .as_ref()
+                .filter(|m| !self.source_overrides.contains_key(&m.layer))
                 .and_then(|m| self.sync(device, queue, encoder, doc, (m.layer, Role::Mask, cell), m.surface.get(), ma.intersect(&cr), stats))
                 .map(|(k, r)| {
                     keys.push(k);
@@ -1374,7 +1490,7 @@ impl Compositor {
                 Some((t.view.clone(), e.region))
             }));
         }
-        Bound { views, keys, maps }
+        Ok(Bound { views, keys, maps })
     }
 
     /// Run `plan` over the `chunks` of one page cell (document rects, at most a chunk square),
@@ -1396,15 +1512,32 @@ impl Compositor {
         sink: &mut dyn FnMut(&mut wgpu::CommandEncoder, ChunkOut<'_>),
         // The previous intermediate submit, when this refresh may submit in between.
         batch: &mut Option<&mut Option<wgpu::SubmissionIndex>>,
-    ) {
+    ) -> Result<(), Unsupported> {
         if chunks.is_empty() {
-            return;
+            return Ok(());
         }
         // Chunks may hold different checkpoints: bind from the lowest one any of them resumes at.
         let first_pass = checkpoint
             .and_then(|_| chunks.iter().map(|c| self.prefix.restore_point(*c).map(|r| r.pass_end)).try_fold(usize::MAX, |m, p| Some(m.min(p?))))
             .unwrap_or(0);
-        let bound = self.bind_cell(device, queue, encoder, doc, plan, paged, cell, fr, first_pass, stats);
+        let bound = self.bind_cell(device, queue, encoder, doc, plan, paged, cell, fr, first_pass, stats)?;
+        let cell_region = chunks.iter().copied().reduce(|a, b| a.union(&b)).unwrap_or_else(|| cell_rect(cell, self.page));
+        let override_windows: HashMap<LayerId, SourceOverride> = self
+            .source_overrides
+            .iter()
+            .filter(|(id, s)| {
+                !s.pages.is_empty()
+                    && plan.passes.iter().any(|p| p.tex.as_ref().is_some_and(|t| t.layer == **id) || p.mask.as_ref().is_some_and(|m| m.layer == **id))
+            })
+            .map(|(id, s)| {
+                let texture = s.window(device, encoder, cell_region, 0);
+                // Effect maps consume the original override in sync_cached_fx. Composition
+                // samples only colour and masks, so it needs no copied shape window.
+                let shape = s.shape.clone();
+                let mask = s.mask.as_ref().map(|_| s.window(device, encoder, cell_region, 2));
+                (*id, SourceOverride { texture, shape, mask, rect: cell_region, bounds: s.bounds, revision: s.revision, pages: Vec::new() })
+            })
+            .collect();
 
         // Chunk pool.
         while self.pool.len() < plan.slots as usize {
@@ -1439,7 +1572,24 @@ impl Compositor {
             }
             let (tex, mask) = bound.views[i];
             let map = bound.maps[i].as_ref().map(|(_, r)| *r);
-            let w = op_words(p, tex.map(|t| t.1), mask.map(|m| m.1), map);
+            let w = if self.source_overrides.is_empty() {
+                op_words(p, tex.map(|t| t.1), mask.map(|m| m.1), map)
+            } else {
+                let source = p.tex.as_ref().and_then(|t| override_windows.get(&t.layer).or_else(|| self.source_overrides.get(&t.layer)));
+                let mut pass = p.clone();
+                let mask_source = p.mask.as_ref().and_then(|m| override_windows.get(&m.layer).or_else(|| self.source_overrides.get(&m.layer)));
+                if mask_source.is_some_and(|s| s.mask.is_none()) {
+                    pass.mask = None;
+                } else if mask_source.is_some()
+                    && let Some(mask) = pass.mask.as_mut()
+                {
+                    mask.density = 1.0;
+                    mask.default = 1.0;
+                }
+                let mask_rect = mask_source.filter(|s| s.mask.is_some()).map(|s| [s.rect.x0, s.rect.y0, s.rect.width() as i32, s.rect.height() as i32]);
+                let tex_rect = source.map(|s| [s.rect.x0, s.rect.y0, s.rect.width() as i32, s.rect.height() as i32]);
+                op_words(&pass, tex_rect.or_else(|| tex.map(|t| t.1)), mask_rect.or_else(|| mask.map(|m| m.1)), map)
+            };
             let off = (op_base + i as u64 * STRIDE) as usize;
             data[off..][..w.len()].copy_from_slice(&w);
         }
@@ -1463,8 +1613,19 @@ impl Compositor {
             }
             let slot = |s: Option<u32>| s.map_or(dummy, |s| &self.pool[s as usize].1);
             let (tex, mask) = &bound.views[i];
-            let tv = tex.map_or(slot(p.d), |(k, _)| resident_views[k]);
-            let mv = mask.map_or(dummy, |(k, _)| resident_views[k]);
+            let override_view = p
+                .tex
+                .as_ref()
+                .and_then(|t| override_windows.get(&t.layer).or_else(|| self.source_overrides.get(&t.layer)))
+                .map(|s| s.texture.create_view(&Default::default()));
+            let tv = override_view.as_ref().unwrap_or_else(|| tex.map_or(slot(p.d), |(k, _)| resident_views[k]));
+            let mask_view = p
+                .mask
+                .as_ref()
+                .and_then(|m| override_windows.get(&m.layer).or_else(|| self.source_overrides.get(&m.layer)))
+                .and_then(|s| s.mask.as_ref())
+                .map(|m| m.create_view(&Default::default()));
+            let mv = mask_view.as_ref().unwrap_or_else(|| mask.map_or(dummy, |(k, _)| resident_views[k]));
             let lv = fr.luts.get(i).and_then(Option::as_ref).map_or(dummy, |(_, v)| v);
             let map = bound.maps[i].as_ref().map_or(dummy, |(v, _)| v);
             let pat = fr.patterns.get(i).and_then(Option::as_ref).unwrap_or(dummy);
@@ -1494,8 +1655,8 @@ impl Compositor {
                     self.staged = 0;
                     self.recorded = 0;
                     stats.flushes += 1;
-                    if self.fault().is_some() {
-                        return;
+                    if let Some(fault) = self.fault() {
+                        return Err(Unsupported(fault.to_string()));
                     }
                 }
                 // Also after resuming from a lower checkpoint: the chunk moves up to this one.
@@ -1578,6 +1739,7 @@ impl Compositor {
             let (t, v) = &self.pool[plan.root as usize];
             sink(encoder, ChunkOut { rect: *c, texture: t, view: v });
         }
+        Ok(())
     }
 
     /// Upload changed tiles of `surface` within `region` (its tile area inside one page cell);
@@ -1798,6 +1960,114 @@ impl Compositor {
         v
     }
 
+    /// Install resident replacements while a cached canvas edit is active.
+    pub fn set_source_overrides(&mut self, sources: HashMap<LayerId, SourceOverride>) {
+        if !self.source_overrides.is_empty() || !sources.is_empty() {
+            self.prefix.clear();
+        }
+        self.source_overrides = sources;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sync_cached_fx(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        doc: &Document,
+        f: &plan::FxLayer<'_>,
+        key: FxKey,
+        region: Rect,
+        source: &SourceOverride,
+        stats: &mut Stats,
+    ) -> Result<(), Unsupported> {
+        let changed = self.fx.get(&key).is_none_or(|e| e.override_revision != Some(source.revision) || e.region != region);
+        if changed {
+            let texture = if source.pages.is_empty() {
+                self.cached_fields.get_or_insert_with(|| cached_fields::Fields::new(device)).shape_window(
+                    device,
+                    encoder,
+                    &source.shape.create_view(&Default::default()),
+                    [region.x0 - source.rect.x0, region.y0 - source.rect.y0],
+                    [region.width(), region.height()],
+                )?
+            } else {
+                source.window(device, encoder, region, 1)
+            };
+            let shape = Tex { view: texture.create_view(&Default::default()), texture };
+            self.fx.insert(
+                key,
+                FxEntry {
+                    doc: doc.id,
+                    region,
+                    shape_key: 0,
+                    tiles: [None, None],
+                    _pin: Vec::new(),
+                    shape_cpu: Vec::new(),
+                    override_revision: Some(source.revision),
+                    shape,
+                    fields: HashMap::new(),
+                    progs: Vec::new(),
+                    last_used: self.frame,
+                    stamp: self.stamp,
+                },
+            );
+        }
+        let anchor = f.layer.effects.reference.unwrap_or((f64::from(f.bounds.x0), f64::from(f.bounds.y0)));
+        let progs: Vec<fx::MapProgram> =
+            f.layer.effects.items.iter().filter(|e| e.enabled()).map(|e| fx::program_with(e, &doc.global_light, false, &doc.patterns, anchor)).collect();
+        let fields = field_reaches(&progs);
+        for (kind, reach) in fields {
+            let needs = self.fx.get(&key).is_none_or(|e| e.fields.get(&kind).is_none_or(|(old, _)| *old < reach));
+            if needs {
+                let Some(entry) = self.fx.get(&key) else { return Ok(()) };
+                let shape = entry.shape.view.clone();
+                match self.cached_fields.get_or_insert_with(|| cached_fields::Fields::new(device)).encode(
+                    device,
+                    encoder,
+                    &shape,
+                    [region.width(), region.height()],
+                    kind,
+                    reach,
+                ) {
+                    Ok(texture) => {
+                        let view = texture.create_view(&Default::default());
+                        if let Some(e) = self.fx.get_mut(&key) {
+                            e.fields.insert(kind, (reach, Tex { texture, view }));
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        if let Some(e) = self.fx.get_mut(&key) {
+            e.last_used = self.frame;
+            e.stamp = self.stamp;
+            e.progs.resize_with(progs.len(), || ProgState { key: 0, maps: Vec::new() });
+        }
+        for (i, prog) in progs.iter().enumerate() {
+            if prog.maps == 0 {
+                continue;
+            }
+            let Some(e) = self.fx.get_mut(&key) else { return Ok(()) };
+            let same = e.progs[i].key == prog.key && e.progs[i].maps.len() == prog.maps;
+            if !changed && same {
+                continue;
+            }
+            if !same {
+                e.progs[i] = ProgState {
+                    key: prog.key,
+                    maps: (0..prog.maps)
+                        .map(|k| prog.stages.iter().any(|s| s.out == Some(k)).then(|| Tex::map(device, "pc_cached_fx", region, MAP16)))
+                        .collect(),
+                };
+            }
+            stats.fx_programs += 1;
+            self.run_program(device, queue, encoder, key, i, prog, region, stats);
+        }
+        Ok(())
+    }
+
     /// Build or update the effect maps of one layer over `region`: its whole effect region, or
     /// the window of one page cell (`key.1`) grown by the effects' reach.
     #[allow(clippy::too_many_arguments)]
@@ -1811,8 +2081,11 @@ impl Compositor {
         key: FxKey,
         region: Rect,
         stats: &mut Stats,
-    ) {
+    ) -> Result<(), Unsupported> {
         let layer = f.layer;
+        if let Some(source) = self.source_overrides.get(&layer.id).cloned() {
+            return self.sync_cached_fx(device, queue, encoder, doc, f, key, region, &source, stats);
+        }
         let canvas = doc.bounds();
         let is_group = matches!(layer.content, LayerContent::Group(_));
         let shape_key = if is_group { fx::group_key(layer, &doc.global_light, &mut |_| {}) } else { fx::shape_key(layer, canvas) };
@@ -1871,6 +2144,7 @@ impl Compositor {
                         Vec::new()
                     },
                     shape_cpu: vec![0.0; n],
+                    override_revision: None,
                     shape,
                     fields: HashMap::new(),
                     progs: Vec::new(),
@@ -1882,13 +2156,13 @@ impl Compositor {
         }
         // Present: kept or (re)inserted above.
         let stamp = self.stamp;
-        let Some(e) = self.fx.get_mut(&key) else { return };
+        let Some(e) = self.fx.get_mut(&key) else { return Ok(()) };
         e.last_used = frame;
         e.stamp = stamp;
         e.doc = doc.id;
         e.tiles = [content_src.map(fx::snapshot), mask_src.map(fx::snapshot)];
         if region.is_empty() {
-            return;
+            return Ok(());
         }
 
         let t_trace = web_time_now();
@@ -1945,7 +2219,7 @@ impl Compositor {
             if prog.maps == 0 {
                 continue;
             }
-            let Some(e) = self.fx.get_mut(&key) else { return };
+            let Some(e) = self.fx.get_mut(&key) else { return Ok(()) };
             let same = e.progs[i].key == prog.key && e.progs[i].maps.len() == prog.maps;
             let d = if same { damage } else { region };
             if d.is_empty() {
@@ -1960,6 +2234,7 @@ impl Compositor {
             stats.fx_programs += 1;
             self.run_program(device, queue, encoder, key, i, prog, d, stats);
         }
+        Ok(())
     }
 
     /// Record the passes of `prog` (maps of item `item` of `layer`) recomputing damage `d`.

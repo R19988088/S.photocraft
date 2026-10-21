@@ -473,3 +473,40 @@ fn unlocked_or_position_locked_smart_objects_take_distortions() {
         }
     }
 }
+
+#[test]
+fn liquify_group_and_all_scopes_keep_layers_and_commit_once() {
+    for depth in [8, 16, 32] {
+        let mut s = session(depth);
+        let first = s.active().unwrap().active_layer.unwrap();
+        let painted = active_surface(&s);
+        let mut child = Layer::new("child", LayerContent::Raster(painted.clone()));
+        child.opacity = 0.5;
+        let child_id = child.id;
+        let group = Layer::group("group", vec![child]);
+        let group_id = group.id;
+        s.edit("setup", |doc, _| {
+            doc.layers.push(group);
+            Ok(())
+        })
+        .unwrap();
+        let mut p = json!({"layers":[group_id.0],"scope":"group","strokes":[{"tool":"forwardWarp","size":30,"points":[[30,25],[42,25]]}]});
+        let history = s.active().unwrap().history.past_len();
+        s.execute(LIQUIFY, p.clone()).unwrap();
+        let doc = &s.active().unwrap().doc;
+        assert_eq!(doc.layer(first).unwrap().surface().unwrap(), &painted);
+        assert_ne!(doc.layer(child_id).unwrap().surface().unwrap(), &painted);
+        assert_eq!(doc.layer(child_id).unwrap().opacity, 0.5);
+        assert!(doc.layer(group_id).unwrap().is_group());
+        assert_eq!(s.active().unwrap().history.past_len(), history + 1);
+        s.undo();
+        assert_eq!(s.active().unwrap().doc.layer(child_id).unwrap().surface().unwrap(), &painted);
+        p.as_object_mut().unwrap().remove("layers");
+        p["scope"] = json!("all");
+        let result = s.execute(LIQUIFY, p).unwrap();
+        assert!(result["layers"].as_array().unwrap().contains(&json!(first.0)));
+        assert_ne!(s.active().unwrap().doc.layer(first).unwrap().surface().unwrap(), &painted);
+        assert_ne!(s.active().unwrap().doc.layer(child_id).unwrap().surface().unwrap(), &painted);
+        assert_eq!(s.active().unwrap().history.past_len(), history + 1);
+    }
+}

@@ -544,7 +544,6 @@ pub static CATALOG: &[(&[&str], &str, Option<&str>, &str)] = &[
     (&["Filter"], "Camera Raw Filter…", Some("Cmd+Shift+A"), "filter.cameraRaw"),
     (&["Filter"], "Adaptive Wide Angle…", Some("Cmd+Alt+Shift+A"), "filter.adaptiveWideAngle"),
     (&["Filter"], "Lens Correction…", Some("Cmd+Shift+R"), "filter.lensCorrection"),
-    (&["Filter"], "Liquify…", Some("Cmd+Shift+X"), "filter.liquify"),
     (&["Filter"], "Vanishing Point…", Some("Cmd+Alt+V"), "filter.vanishingPoint"),
     (&["Filter"], "---", None, "---"),
     (&["Filter", "Blur"], "Average", None, "filter.blur.average"),

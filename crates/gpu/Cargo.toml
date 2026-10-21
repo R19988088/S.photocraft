@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+bytemuck = { workspace = true }
 half = "2"
 photocraft-geom = { workspace = true }
 photocraft-color = { workspace = true }

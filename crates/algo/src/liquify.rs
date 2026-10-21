@@ -153,6 +153,21 @@ impl LiquifyStroke {
     }
 }
 
+/// Ordered brush commands for a resident GPU field. The CPU schedules dabs using the same
+/// spacing as final replay; displacement and freeze values stay on the GPU.
+#[derive(Clone, Debug)]
+pub struct LiquifyGpuOp {
+    pub tool: LiquifyTool,
+    pub center: [f64; 2],
+    pub delta: [f64; 2],
+    pub radius: f64,
+    pub strength: f64,
+    pub rate: f64,
+    pub density: f64,
+    pub amount: f64,
+    pub polygon: Vec<[f64; 2]>,
+}
+
 /// The displacement field plus the freeze mask, over `bounds` (document pixels).
 #[derive(Clone, Debug)]
 pub struct LiquifyField {
@@ -167,6 +182,9 @@ pub struct LiquifyField {
     pub freeze: Vec<f32>,
     /// Where the brush stroke in progress stands, so dab spacing runs on across its segments.
     cursor: Option<StrokeCursor>,
+    /// Native preview records scheduled dabs without touching the CPU displacement image.
+    pub gpu_only: bool,
+    pub gpu_ops: Vec<LiquifyGpuOp>,
 }
 
 /// Two fields are equal when their displacement and freeze mask are: the stroke cursor is
@@ -209,7 +227,7 @@ impl LiquifyField {
         let cell = cell.clamp(1.0, 64.0);
         let w = (f64::from(bounds.width()) / cell).ceil() as usize + 2;
         let h = (f64::from(bounds.height()) / cell).ceil() as usize + 2;
-        LiquifyField { bounds, cell, w, h, d: vec![[0.0; 2]; w * h], freeze: vec![0.0; w * h], cursor: None }
+        LiquifyField { bounds, cell, w, h, d: vec![[0.0; 2]; w * h], freeze: vec![0.0; w * h], cursor: None, gpu_only: false, gpu_ops: Vec::new() }
     }
 
     /// Document position of node (i, j) (node 0 sits on the first pixel centre).
@@ -253,6 +271,20 @@ impl LiquifyField {
     /// Applies one stroke. Returns the document rectangle whose output changed.
     pub fn apply_stroke(&mut self, s: &LiquifyStroke) -> Rect {
         self.cursor = None;
+        if self.gpu_only && (s.tool.is_global() || s.tool == LiquifyTool::LassoMask) {
+            self.gpu_ops.push(LiquifyGpuOp {
+                tool: s.tool,
+                center: [0.0; 2],
+                delta: [0.0; 2],
+                radius: 0.0,
+                strength: 0.0,
+                rate: 0.0,
+                density: 0.0,
+                amount: s.amount.unwrap_or(if s.tool == LiquifyTool::LassoMask { 1.0 } else { 100.0 }),
+                polygon: s.points.iter().filter_map(|p| Some([*p.first()?, *p.get(1)?])).collect(),
+            });
+            return self.bounds;
+        }
         match s.tool {
             LiquifyTool::LassoMask => return self.apply_lasso(s),
             LiquifyTool::ReconstructAll => {
@@ -457,6 +489,11 @@ impl LiquifyField {
         let density = (s.density / 100.0).clamp(0.0, 1.0);
         if strength <= 0.0 {
             return Rect::EMPTY;
+        }
+        if self.gpu_only {
+            self.gpu_ops.push(LiquifyGpuOp { tool: s.tool, center: c, delta, radius: r, strength, rate, density, amount: 0.0, polygon: Vec::new() });
+            let pad = r.ceil() as i32 + 2;
+            return Rect::new(c[0].floor() as i32 - pad, c[1].floor() as i32 - pad, c[0].ceil() as i32 + pad, c[1].ceil() as i32 + pad).intersect(&self.bounds);
         }
         let (gx0, gy0) = self.to_grid(c[0] - r, c[1] - r);
         let (gx1, gy1) = self.to_grid(c[0] + r, c[1] + r);
@@ -1442,5 +1479,28 @@ mod tests {
             }
         }
         assert!(bad < 96 * 64 / 50, "{bad}");
+    }
+}
+
+#[cfg(test)]
+mod gpu_schedule_tests {
+    use super::*;
+
+    #[test]
+    fn resident_preview_schedules_dabs_without_editing_cpu_pixels() {
+        let mut f = LiquifyField::new(Rect::new(0, 0, 100, 100), 2.0);
+        f.gpu_only = true;
+        let mut stroke = LiquifyStroke::new(LiquifyTool::ForwardWarp, 40.0);
+        stroke.points = vec![vec![30., 40., 1.], vec![50., 40., 1.]];
+        f.apply_stroke(&stroke);
+        assert!(f.is_identity(), "native preview displacement stays exclusively on the GPU");
+        assert_eq!(f.gpu_ops.len(), 20, "one dab every radius/20 pixels");
+        assert!(f.gpu_ops.iter().all(|op| op.delta == [1., 0.]));
+        assert_eq!(f.gpu_ops.first().unwrap().center, [30., 40.]);
+        assert_eq!(f.gpu_ops.last().unwrap().center, [49., 40.]);
+        let freeze = LiquifyStroke::new(LiquifyTool::FreezeAll, 1.0);
+        f.apply_stroke(&freeze);
+        assert!(f.freeze.iter().all(|v| *v == 0.), "freeze values stay resident too");
+        assert_eq!(f.gpu_ops.last().unwrap().tool, LiquifyTool::FreezeAll);
     }
 }

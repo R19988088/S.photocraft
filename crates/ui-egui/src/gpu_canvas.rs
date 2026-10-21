@@ -142,6 +142,10 @@ pub fn supports_f16_canvas(adapter: &wgpu::Adapter) -> bool {
 }
 
 impl GpuCanvas {
+    pub(crate) fn render_state(&self) -> &RenderState {
+        &self.rs
+    }
+
     /// Create pipelines and register resources with the egui renderer.
     pub fn new(rs: &RenderState) -> Self {
         Self::with_tile(rs, None)
@@ -441,6 +445,21 @@ impl GpuCanvas {
         self.upload_rect(doc, [r.x0 as u32, r.y0 as u32], [r.width(), r.height()], &texels(format, &buf.px))
     }
 
+    /// Install GPU-resident per-layer session sources for the document's normal compositor.
+    pub fn set_source_overrides(&self, doc: u64, sources: HashMap<photocraft_doc::LayerId, photocraft_gpu::SourceOverride>) {
+        if let Some(res) = self.rs.renderer.write().callback_resources.get_mut::<Resources>() {
+            res.source_overrides = Some((doc, sources));
+        }
+    }
+
+    pub fn clear_source_overrides(&self, doc: u64) {
+        if let Some(res) = self.rs.renderer.write().callback_resources.get_mut::<Resources>()
+            && res.source_overrides.as_ref().is_some_and(|(id, _)| *id == doc)
+        {
+            res.source_overrides = None;
+        }
+    }
+
     /// Composite `region` of `doc` with the wgpu compositor straight into its display texture
     /// (no CPU pixels, no upload of the composite). `encode_srgb` stores the sRGB encoding of the
     /// composite (linear documents, see `photocraft_engine::display_color`). Returns `Err` when the
@@ -480,6 +499,7 @@ impl GpuCanvas {
                 }
             },
         };
+        comp.set_source_overrides(res.source_overrides.as_ref().filter(|(id, _)| *id == doc.id.0).map(|(_, sources)| sources.clone()).unwrap_or_default());
         comp.set_health(self.health.clone());
         // Measured, not waited for: the timestamps come back a frame or two later.
         comp.measure_gpu_time(device, queue);
@@ -653,7 +673,20 @@ impl GpuCanvas {
                 out.gpu = stats.gpu_time;
                 return out;
             }
-            Err(e) => out.fallback = Some(e.0),
+            Err(e) => {
+                out.fallback = Some(e.0);
+                let active = self
+                    .rs
+                    .renderer
+                    .read()
+                    .callback_resources
+                    .get::<Resources>()
+                    .is_some_and(|r| r.source_overrides.as_ref().is_some_and(|(id, _)| *id == doc.id.0));
+                if active {
+                    out.kind = "gpu-cached-error";
+                    return out;
+                }
+            }
         }
         let px = region.width() as u64 * region.height() as u64;
         if defer && px >= DEFER_PX && self.prepare_texture(key, doc).is_some() {
@@ -1527,6 +1560,7 @@ fn detect_video_memory(_vendor: u32, _device: u32) -> Option<u64> {
 }
 
 struct Resources {
+    source_overrides: Option<(u64, HashMap<photocraft_doc::LayerId, photocraft_gpu::SourceOverride>)>,
     view_bgl: wgpu::BindGroupLayout,
     tile_bgl: wgpu::BindGroupLayout,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -1821,6 +1855,7 @@ impl Resources {
             separate_mip_targets: false,
             compositor: None,
             compositor_failed: None,
+            source_overrides: None,
             health: photocraft_gpu::DeviceHealth::new(),
             compositor_budget: None,
             layer_fit: None,
