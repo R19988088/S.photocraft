@@ -1201,6 +1201,7 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> (std::sync::Ar
     }
     let st = &app.session.documents()[idx];
     if app.ui.transform.is_none()
+        && app.ui.tool != crate::state::Tool::Liquify
         && let Some(gpu) = &app.gpu
     {
         gpu.clear_source_overrides(st.doc.id.0);
@@ -2136,6 +2137,11 @@ pub(crate) fn retain_gpu_documents(app: &mut PhotocraftApp) {
 /// another document (`layer_transfer`).
 pub fn document_area(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     crate::distort_ui::drop_foreign(app);
+    if app.ui.tool == Tool::Liquify && app.distort.liquify.is_none() && app.session.active().is_some() {
+        if let Err(error) = crate::liquify_ui::open(app, ui.ctx()) {
+            crate::notices::error(app, error);
+        }
+    }
     documents(app, ui);
     crate::layer_transfer::finish(app, ui.ctx());
     // Once a frame, not per document view: the right-click or options-bar Brush Preset picker.

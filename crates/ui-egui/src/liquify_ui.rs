@@ -16,7 +16,7 @@ use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::PhotocraftApp;
-use crate::canvas::ToolEvent;
+use crate::canvas::{ToolEvent, ViewXform};
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -49,7 +49,7 @@ impl Default for LiquifyOpts {
     fn default() -> Self {
         LiquifyOpts {
             tool: LiquifyTool::ForwardWarp,
-            scope: "layer".into(),
+            scope: "all".into(),
             size: 100.0,
             density: 50.0,
             pressure: 100.0,
@@ -483,6 +483,65 @@ pub(crate) fn has_pending_edits(app: &PhotocraftApp) -> bool {
     app.distort.liquify.as_ref().is_some_and(|dialog| !dialog.strokes.is_empty() || dialog.cur.is_some())
 }
 
+pub fn draw_cursor(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
+    let Some(d) = app.distort.liquify.as_ref().filter(|_| app.ui.tool == crate::state::Tool::Liquify) else { return };
+    let Some(pointer) = painter.ctx().input(|i| i.pointer.hover_pos()) else { return };
+    let radius_x = (d.opts.size * xf.zoom_x() * 0.5).max(1.0);
+    let radius_y = (d.opts.size * xf.zoom * 0.5).max(1.0);
+    let color = crate::theme::Tokens::get(painter.ctx()).text;
+    painter.add(egui::Shape::ellipse_stroke(pointer, egui::vec2(radius_x, radius_y), egui::Stroke::new(1.0, color)));
+    let hardness = d.opts.density.clamp(0.0, 100.0) / 100.0;
+    if hardness > 0.0 && hardness < 1.0 {
+        let inner_x = (radius_x * hardness).max(1.0);
+        let inner_y = (radius_y * hardness).max(1.0);
+        painter.add(egui::Shape::ellipse_stroke(pointer, egui::vec2(inner_x, inner_y), egui::Stroke::new(1.0, color.gamma_multiply(0.65))));
+    }
+}
+
+/// Compact tool options shown in the main options bar while Liquify is active.
+/// The full properties panel remains available through the control channel; the
+/// in-canvas tool only exposes target scope, size and hardness (density).
+pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
+    if app.distort.liquify.is_none() && app.ui.tool == crate::state::Tool::Liquify {
+        if let Err(error) = open(app, ui.ctx()) {
+            crate::notices::error(app, error);
+            return true;
+        }
+    }
+    let Some(d) = app.distort.liquify.as_mut() else { return false };
+    for tool in LiquifyTool::ALL.into_iter().filter(|tool| *tool != LiquifyTool::Smooth) {
+        let tip = if tool == LiquifyTool::LassoMask {
+            tl!("Freeze Lasso: drag to freeze an area, Alt-drag to thaw it (L)").to_string()
+        } else {
+            tl!(tool.label()).to_string()
+        };
+        if crate::icons::button(ui, tool_icon(tool), 26.0, d.opts.tool == tool, &tip).on_hover_text(tip).clicked() {
+            d.opts.tool = tool;
+        }
+    }
+    widgets::vline(ui, 22.0);
+    let before_scope = d.opts.scope.clone();
+    egui::ComboBox::from_id_salt("liquify-options-scope")
+        .selected_text(scope_label(&d.opts.scope))
+        .show_ui(ui, |ui| {
+            for scope in ["layer", "group", "all"] {
+                ui.selectable_value(&mut d.opts.scope, scope.into(), scope_label(scope));
+            }
+        });
+    if before_scope != d.opts.scope {
+        d.end();
+        d.scope_dirty = true;
+    }
+    ui.scope(|ui| {
+        ui.spacing_mut().slider_width = 90.0;
+        ui.label(tl!("Size"));
+        ui.add(egui::Slider::new(&mut d.opts.size, 1.0..=3000.0).suffix(" px"));
+        ui.label(tl!("Hardness"));
+        ui.add(egui::Slider::new(&mut d.opts.density, 0.0..=100.0).suffix("%"));
+    });
+    true
+}
+
 /// Opens the dialog on the active layer.
 pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
     #[cfg(not(test))]
@@ -507,7 +566,7 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
     let mut d = LiquifyDialog {
         layer,
         targets: vec![layer],
-        cached_scope: "layer".into(),
+        cached_scope: "all".into(),
         scope_dirty: true,
         gpu: None,
         gpu_dirty: true,
@@ -555,6 +614,7 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
         app.distort.liquify = None;
         return Err(error);
     }
+    app.ui.tool = crate::state::Tool::Liquify;
     Ok(())
 }
 
@@ -999,14 +1059,18 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let ops = std::mem::take(&mut d.field.gpu_ops);
         if !ops.is_empty() || d.gpu_dirty {
             gpu.apply_ops(renderer.render_state(), &d.field, &ops, d.gpu_dirty);
-            if let Some(doc) = &d.gpu_doc {
-                renderer.set_source_overrides(doc.id.0, gpu.render_outputs(renderer.render_state(), if d.gpu_dirty { None } else { d.gpu_damage.take() }));
-                if let Err(error) = renderer.composite(doc, doc.bounds(), false) {
+            if let Some(st) = app.session.active() {
+                renderer.set_source_overrides(st.doc.id.0, gpu.render_outputs(renderer.render_state(), if d.gpu_dirty { None } else { d.gpu_damage.take() }));
+                if let Err(error) = renderer.composite(&st.doc, st.doc.bounds(), false) {
                     d.gpu_error = Some(error.0);
                 }
             }
         }
         d.gpu_dirty = false;
+    }
+    // Liquify remains a canvas tool; its legacy full-window Area is never shown.
+    if app.ui.tool == crate::state::Tool::Liquify {
+        return;
     }
     let t = Tokens::get(ctx);
     let screen = ctx.content_rect();
@@ -1440,60 +1504,67 @@ mod tests {
     }
 
     #[test]
-    fn one_move_mouse_drag_keeps_the_press_point_and_schedules_gpu_dabs() {
-        short_drag_input(false);
+    fn selected_liquify_opens_options_and_both_sliders_change_settings() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = app_with_layer();
+        crate::tool_memory::select(&mut app, crate::state::Tool::Liquify);
+        let mut h = Harness::builder().with_size(vec2(1200.0, 80.0)).build_ui_state(
+            |ui, app: &mut PhotocraftApp| {
+                if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    crate::panels::options_bar(app, ui);
+                }
+            },
+            app,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
+        h.run_steps(4);
+        assert!(h.state().distort.liquify.is_some());
+        let sliders: Vec<_> = h.get_all_by_role(egui::accesskit::Role::Slider).map(|n| n.rect()).collect();
+        assert_eq!(sliders.len(), 2);
+        for rect in &sliders {
+            assert!(rect.right() < 1200.0 && rect.bottom() < 80.0, "Liquify controls must fit the options bar");
+        }
+        let before = h.state().distort.liquify.as_ref().unwrap().opts.clone();
+        for rect in sliders {
+            let at = pos2(rect.left() + rect.width() * 0.8, rect.center().y);
+            h.hover_at(at);
+            h.run();
+            h.drag_at(at);
+            h.run();
+            h.drop_at(at);
+            h.run_steps(2);
+        }
+        let after = &h.state().distort.liquify.as_ref().unwrap().opts;
+        assert_ne!(before.size, after.size);
+        assert_ne!(before.density, after.density);
     }
 
     #[test]
-    fn one_frame_mouse_drag_keeps_the_press_point_and_schedules_gpu_dabs() {
-        short_drag_input(true);
-    }
-
-    fn short_drag_input(one_frame: bool) {
+    fn canvas_tool_pointer_events_record_and_preview_a_short_drag() {
         let ctx = egui::Context::default();
-        PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
         let mut app = app_with_layer();
-        open(&mut app, &ctx).unwrap();
+        crate::tool_memory::select(&mut app, crate::state::Tool::Liquify);
+        assert!(app.distort.liquify.is_none());
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            assert!(crate::distort_ui::options_bar(&mut app, ui));
+        });
+        output.textures_delta.clear();
+        assert!(app.distort.liquify.is_some(), "selecting the tool must open its options and displacement session");
         control(&mut app, &json!({"tool":"forwardWarp","size":40,"pressure":100})).unwrap();
         app.distort.liquify.as_mut().unwrap().field.gpu_only = true;
-        let screen = ERect::from_min_size(Pos2::ZERO, vec2(800., 600.));
-        let frame = |app: &mut PhotocraftApp, events| {
-            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| show(app, ui.ctx()));
-            output.textures_delta.clear();
-        };
-        // Let egui register the dialog and its input rectangle before the press.
-        frame(&mut app, vec![]);
-        frame(&mut app, vec![]);
-        let area = ERect::from_min_max(pos2(LEFT_W, 30.), pos2(screen.right() - RIGHT_W, screen.bottom()));
-        let a = area.center();
-        let b = a + vec2(24., 0.);
-        let (start, end) = {
-            let d = app.distort.liquify.as_ref().unwrap();
-            (to_doc(d, area, a), to_doc(d, area, b))
-        };
-        let down = egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE };
-        let up = egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE };
-        if one_frame {
-            frame(&mut app, vec![egui::Event::PointerMoved(a), down, egui::Event::PointerMoved(b), up.clone()]);
-        } else {
-            frame(&mut app, vec![egui::Event::PointerMoved(a), down]);
-            frame(&mut app, vec![egui::Event::PointerMoved(b)]);
-        }
+        let start = [40.0, 40.0];
+        let end = [64.0, 40.0];
+        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: start[0], y: start[1], pressure: 1.0 }, egui::Modifiers::NONE);
+        crate::canvas::tool_event(&mut app, ToolEvent::Move { x: end[0], y: end[1], pressure: 1.0 }, egui::Modifiers::NONE);
         let d = app.distort.liquify.as_ref().unwrap();
-        assert!(!d.field.gpu_ops.is_empty(), "the sole movement must deform the resident field");
-        assert!(d.field.gpu_ops.iter().any(|op| op.delta[0] > 0.), "the movement must survive crossing egui's drag threshold");
-        if !one_frame {
-            frame(&mut app, vec![up]);
-        }
+        assert!(!d.field.gpu_ops.is_empty(), "a canvas drag must schedule its Liquify displacement");
+        assert!(d.field.gpu_ops.iter().any(|op| op.delta[0] > 0.0));
+        crate::canvas::tool_event(&mut app, ToolEvent::Up { x: end[0], y: end[1] }, egui::Modifiers::NONE);
         let d = app.distort.liquify.as_ref().unwrap();
         assert_eq!(d.strokes.len(), 1);
-        let points = &d.strokes[0].points;
-        assert_eq!(&points.first().unwrap()[..2], &start);
-        assert_eq!(&points.last().unwrap()[..2], &end);
-        assert!(
-            LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes).max_displacement() > 0.,
-            "the recorded short drag must also replay to an actual deformation"
-        );
+        assert_eq!(&d.strokes[0].points.first().unwrap()[..2], &start);
+        assert_eq!(&d.strokes[0].points.last().unwrap()[..2], &end);
+        assert!(LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes).max_displacement() > 0.0);
     }
 
     #[test]
@@ -1555,6 +1626,11 @@ mod tests {
         app.session.prefs.edit(|p| p.dialogs.insert(REMEMBERED.into(), json!("not an object")));
         cancel(&mut app);
         assert!(open(&mut app, &ctx).is_ok());
+    }
+
+    #[test]
+    fn new_liquify_session_defaults_to_all_layers() {
+        assert_eq!(LiquifyOpts::default().scope, "all");
     }
 
     /// Follow-up to #1494 / #1484: Alt is captured at stroke-down and stays recorded
@@ -1831,11 +1907,12 @@ mod tests {
     }
 
     #[test]
-    fn menu_opens_the_dialog_and_routes_pointer_events() {
+    fn liquify_action_activates_the_canvas_tool_and_routes_pointer_events() {
         let ctx = egui::Context::default();
         let mut app = app_with_layer();
         let r = crate::distort_ui::menu(&mut app, &ctx, "filter.liquify", &json!({})).unwrap().unwrap();
         assert!(r["liquify"]["proxy"].is_array());
+        assert_eq!(app.ui.tool, crate::state::Tool::Liquify);
         assert!(crate::distort_ui::pointer(&mut app, ToolEvent::Down { x: 50.0, y: 40.0, pressure: 1.0 }, egui::Modifiers::NONE));
         crate::distort_ui::pointer(&mut app, ToolEvent::Up { x: 60.0, y: 40.0 }, egui::Modifiers::NONE);
         assert_eq!(app.distort.liquify.as_ref().unwrap().strokes.len(), 1);
