@@ -82,7 +82,7 @@ fn edit_section(i: usize, b: &mut BrushSettings) {
             b.mix_settings.color_output = true;
         }
         7 => b.pigment = Some(paint::pigment_material::PigmentSettings { enabled: true, thickness: 65.0, visual_thickness: 35.0, ..Default::default() }),
-        _ => unreachable!(),
+        _ => panic!("unknown brush section"),
     }
 }
 

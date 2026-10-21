@@ -101,6 +101,18 @@ fn srgb_to_cmyk_transform() -> Option<&'static Transform> {
     T.get_or_init(|| Transform::new(Builtin::Srgb.profile(), Builtin::CoatedCmyk.profile(), Intent::RelativeColorimetric, true).ok()).as_ref()
 }
 
+/// Borrows the same profile transforms used by the current thread's CMYK conversions.
+/// GPU consumers upload their existing fast tables instead of baking a second approximation.
+pub fn with_cmyk_transforms<R>(f: impl FnOnce(Option<(&Transform, &Transform)>) -> R) -> R {
+    ACTIVE_CMYK.with(|active| {
+        let active = active.borrow();
+        match active.as_ref() {
+            Some(space) => f(Some((&space.to_srgb, &space.from_srgb))),
+            None => f(cmyk_to_srgb_transform().zip(srgb_to_cmyk_transform())),
+        }
+    })
+}
+
 /// Colour-managed CMYK → sRGB (the active document CMYK profile, else the built-in coated
 /// CMYK; relative colorimetric + BPC).
 #[inline]

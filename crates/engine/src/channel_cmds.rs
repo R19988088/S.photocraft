@@ -280,11 +280,10 @@ pub fn next_alpha_name(doc: &Document, base: &str) -> String {
 // ---------------------------------------------------------------------------------------------
 // Planes: one grayscale value per canvas pixel
 
-fn read_plane(s: &Surface, r: Rect) -> Vec<f32> {
-    let mut v = Vec::new();
-    s.read_region_into(r, &mut v);
+fn read_plane(s: &Surface, r: Rect) -> Result<Vec<f32>> {
+    let v = s.try_read_region(r)?;
     let ch = s.channels();
-    if ch > 1 { v.chunks_exact(ch).map(|p| p[0]).collect() } else { v }
+    Ok(if ch > 1 { v.chunks_exact(ch).map(|p| p[0]).collect() } else { v })
 }
 
 fn plane_surface(vals: &[f32], r: Rect, fmt: PixelFormat) -> Surface {
@@ -297,9 +296,10 @@ fn plane_surface(vals: &[f32], r: Rect, fmt: PixelFormat) -> Surface {
 
 /// Make every canvas pixel of `s` explicit so filters and adjustments that work on the content
 /// bounds also see the untouched (default-valued) parts of a channel.
-fn materialize(s: &mut Surface, r: Rect) {
-    let v = s.read_region(r);
-    s.write_region(r, &v);
+fn materialize(s: &mut Surface, r: Rect) -> Result<()> {
+    let v = s.try_read_region(r)?;
+    s.try_write_region(r, &v)?;
+    Ok(())
 }
 
 fn luminosity(rgba: [f32; 4]) -> f32 {
@@ -392,13 +392,14 @@ fn native_pixels(doc: &Document, layer: Option<LayerId>) -> Result<(Vec<f32>, us
             let l = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
             let s = l.surface().ok_or_else(|| EngineError::Other(format!("layer \"{}\" has no pixels", l.name)))?;
             if s.format() == fmt {
-                return Ok((s.read_region(r), n));
+                return Ok((s.try_read_region(r)?, n));
             }
-            let raw = s.read_region(r);
+            let raw = s.try_read_region(r)?;
             let sf = s.format();
             Ok((raw.chunks_exact(sf.channels()).flat_map(|p| from_rgba(&fmt, to_rgba(&sf, p))).collect(), n))
         }
         None => {
+            crate::sample_cmds::materialize_render_sources(doc)?;
             let buf = photocraft_compose::render(doc, r);
             Ok((buf.px.iter().flat_map(|p| from_rgba(&fmt, *p)).collect(), n))
         }
@@ -435,15 +436,21 @@ fn ref_planes(doc: &Document, layer: Option<LayerId>, active: Option<LayerId>, r
                 _ => planes,
             }
         }
-        ChanRef::Alpha(i) => vec![read_plane(&doc.channels.get(i).ok_or_else(|| EngineError::Other(format!("no alpha channel {i}")))?.surface, area)],
-        ChanRef::QuickMask => vec![read_plane(&doc.quick_mask.as_ref().ok_or_else(|| EngineError::Other("not in Quick Mask mode".into()))?.surface, area)],
-        ChanRef::Selection => vec![sel::mask_from_surface(doc.selection.as_ref(), area)],
+        ChanRef::Alpha(i) => vec![read_plane(&doc.channels.get(i).ok_or_else(|| EngineError::Other(format!("no alpha channel {i}")))?.surface, area)?],
+        ChanRef::QuickMask => vec![read_plane(&doc.quick_mask.as_ref().ok_or_else(|| EngineError::Other("not in Quick Mask mode".into()))?.surface, area)?],
+        ChanRef::Selection => {
+            if let Some(selection) = &doc.selection {
+                selection.try_materialize_region(area)?;
+            }
+            vec![sel::mask_from_surface(doc.selection.as_ref(), area)]
+        }
         ChanRef::Transparency => {
             let id = layer.or(active).ok_or_else(|| EngineError::Other("transparency needs a layer".into()))?;
             let l = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
             match l.surface() {
                 Some(s) => {
                     let mut px = vec![[0.0f32; 4]; area.width() as usize * area.height() as usize];
+                    s.try_materialize_region(area)?;
                     s.read_rgba_into(area, &mut px);
                     vec![px.iter().map(|p| p[3]).collect()]
                 }
@@ -466,7 +473,7 @@ fn ref_planes(doc: &Document, layer: Option<LayerId>, active: Option<LayerId>, r
             let id = layer.or(active).ok_or_else(|| EngineError::Other("layer mask needs a layer".into()))?;
             let l = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
             let m = l.mask.as_ref().ok_or_else(|| EngineError::Other(format!("layer \"{}\" has no mask", l.name)))?;
-            vec![read_plane(&m.surface, area)]
+            vec![read_plane(&m.surface, area)?]
         }
         ChanRef::VectorMask => {
             let id = layer.or(active).ok_or_else(|| EngineError::Other("vector mask needs a layer".into()))?;
@@ -666,7 +673,7 @@ pub(crate) fn channel_surface_for_filter<'a>(doc: &'a mut Document, layer: Optio
     }
     let b = doc.bounds();
     let (surf, _) = target_surface(doc, layer, p)?;
-    materialize(surf, b);
+    materialize(surf, b)?;
     Ok(Some(surf))
 }
 
@@ -772,19 +779,41 @@ pub(crate) fn color_restriction(s: &Session, id: &str, params: &Value) -> Option
 
 /// After a pixel edit with colour channel `k` targeted, put the other channels (and the layer's
 /// transparency) of layer `id` back as they were. Only changed tiles are touched.
-pub(crate) fn restrict_to_color(before: &Document, after: &mut Document, id: LayerId, k: usize) {
-    let Some(old) = before.layer(id).and_then(Layer::surface) else { return };
-    let Some(new) = after.layer_mut(id).and_then(Layer::surface_mut) else { return };
+pub(crate) fn restrict_to_color(before: &Document, after: &mut Document, id: LayerId, k: usize) -> Result<()> {
+    let Some(old) = before.layer(id).and_then(Layer::surface) else { return Ok(()) };
+    let Some(new) = after.layer_mut(id).and_then(Layer::surface_mut) else { return Ok(()) };
+    restrict_surface_to_color(old, new, k)
+}
+
+/// Apply the same native channel restriction to live previews and committed edits.
+pub(crate) fn restrict_surface_to_color(old: &Surface, new: &mut Surface, k: usize) -> Result<()> {
     if old.format() != new.format() {
-        return;
+        return Ok(());
+    }
+    let format = new.format();
+    if k >= format.mode.color_channels() {
+        return Err(EngineError::Other(format!("no colour channel {k} in this layer")));
     }
     let mut coords: Vec<TileCoord> = new.tiles().filter(|(c, t)| old.tile(**c).is_none_or(|o| !std::sync::Arc::ptr_eq(o, t))).map(|(c, _)| *c).collect();
     coords.extend(old.tiles().filter(|(c, _)| new.tile(**c).is_none()).map(|(c, _)| *c));
     let n = new.channels();
+    let old_default = old.default_pixel();
+    let new_default = new.default_pixel();
     for c in coords {
+        let old_tile = old.tile(c).map(AsRef::as_ref);
+        let new_tile = new.tile(c).map(AsRef::as_ref);
+        let backend = new_tile.and_then(|tile| tile.backend()).or_else(|| old_tile.and_then(|tile| tile.backend()));
+        if let Some(backend) = backend {
+            let restricted = backend
+                .restrict_color_channel(format, old_tile, new_tile, &old_default, &new_default, k)
+                .ok_or_else(|| EngineError::Other("GPU tile backend cannot preserve the untargeted colour channels".into()))?
+                .map_err(|error| EngineError::Other(format!("could not restrict painting to colour channel {k}: {error}")))?;
+            new.set_tile(c, restricted);
+            continue;
+        }
         let r = c.rect();
-        let o = old.read_region(r);
-        let mut v = new.read_region(r);
+        let o = old.try_read_region(r)?;
+        let mut v = new.try_read_region(r)?;
         for (pn, po) in v.chunks_exact_mut(n).zip(o.chunks_exact(n)) {
             for ch in 0..n {
                 if ch != k {
@@ -792,9 +821,10 @@ pub(crate) fn restrict_to_color(before: &Document, after: &mut Document, id: Lay
                 }
             }
         }
-        new.write_region(r, &v);
+        new.try_write_region(r, &v)?;
     }
     new.prune();
+    Ok(())
 }
 
 /// The colour channel Clear is limited to: the Channels panel targets a single one.
@@ -915,6 +945,9 @@ fn save_selection(s: &mut Session, p: &Value) -> Result<Value> {
     let di = doc_index(s, p, "document")?;
     let src = s.active().ok_or(EngineError::NoDocument)?;
     let area = src.doc.bounds();
+    if let Some(selection) = &src.doc.selection {
+        selection.try_materialize_region(area)?;
+    }
     let selection = sel::mask_from_surface(src.doc.selection.as_ref(), area);
     if s.documents()[di].doc.size != src.doc.size {
         return Err(bad(cmd, "the destination document must have the same size"));
@@ -940,7 +973,7 @@ fn save_selection(s: &mut Session, p: &Value) -> Result<Value> {
                 Ok(doc.channels.len() - 1)
             }
             (Some(i), op) => {
-                let old = read_plane(&doc.channels[i].surface, area);
+                let old = read_plane(&doc.channels[i].surface, area)?;
                 let vals: Vec<f32> = match op {
                     "add" => old.iter().zip(&selection).map(|(a, b)| a.max(*b)).collect(),
                     "subtract" => old.iter().zip(&selection).map(|(a, b)| (a - b).max(0.0)).collect(),
@@ -998,6 +1031,9 @@ fn load_selection(s: &mut Session, p: &Value) -> Result<Value> {
         _ => "Load Selection",
     };
     let selected = s.edit(label, |doc, _| {
+        if let Some(selection) = &doc.selection {
+            selection.try_materialize_region(doc.bounds())?;
+        }
         doc.selection = sel::combine(doc.selection.as_ref(), &plane, doc.bounds(), mode);
         Ok(doc.selection.is_some())
     })?;
@@ -1011,14 +1047,17 @@ fn load_selection(s: &mut Session, p: &Value) -> Result<Value> {
 /// mask that shows no colour: white (nothing masked, as in Photoshop) when the colour indicates
 /// masked areas, black (nothing selected) when it indicates selected areas. White and "no
 /// selection" are told apart by [`Document::quick_mask_unselected`].
-fn quick_mask_from(doc: &Document, o: &QuickMaskOptions) -> AlphaChannel {
+fn quick_mask_from(doc: &Document, o: &QuickMaskOptions) -> Result<AlphaChannel> {
     let area = doc.bounds();
     let fmt = channel_format(doc);
     let surface = match &doc.selection {
-        Some(s) => plane_surface(&sel::mask_from_surface(Some(s), area), area, fmt),
+        Some(s) => {
+            s.try_materialize_region(area)?;
+            plane_surface(&sel::mask_from_surface(Some(s), area), area, fmt)
+        }
         None => unselected_surface(area, fmt, o.indicates),
     };
-    AlphaChannel { color: o.color, opacity: o.opacity, indicates: o.indicates, ..AlphaChannel::new("Quick Mask", surface) }
+    Ok(AlphaChannel { color: o.color, opacity: o.opacity, indicates: o.indicates, ..AlphaChannel::new("Quick Mask", surface) })
 }
 
 /// The colourless, nothing-selected Quick Mask for `indicates`.
@@ -1037,13 +1076,13 @@ fn uniform(vals: &[f32], target: f32) -> bool {
 
 /// The selection a Quick Mask channel turns back into. All white is Select All, unless Quick
 /// Mask was entered with no selection and the white is its untouched masked-areas start.
-fn selection_from(doc: &Document, ch: &AlphaChannel) -> Option<Surface> {
+fn selection_from(doc: &Document, ch: &AlphaChannel) -> Result<Option<Surface>> {
     let area = doc.bounds();
-    let vals = read_plane(&ch.surface, area);
+    let vals = read_plane(&ch.surface, area)?;
     if doc.quick_mask_unselected && ch.indicates != ColorIndicates::SelectedAreas && uniform(&vals, 1.0) {
-        return None;
+        return Ok(None);
     }
-    sel::combine(None, &vals, area, SelectionMode::Replace)
+    Ok(sel::combine(None, &vals, area, SelectionMode::Replace))
 }
 
 fn quick_mask(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1055,7 +1094,7 @@ fn quick_mask(s: &mut Session, p: &Value) -> Result<Value> {
     let opts = s.quick_mask_options;
     if want {
         s.edit("Edit in Quick Mask", |doc, _| {
-            doc.quick_mask = Some(quick_mask_from(doc, &opts));
+            doc.quick_mask = Some(quick_mask_from(doc, &opts)?);
             doc.quick_mask_unselected = doc.selection.is_none();
             doc.selection = None;
             Ok(())
@@ -1067,7 +1106,7 @@ fn quick_mask(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         s.edit("Exit Quick Mask", |doc, _| {
             if let Some(q) = doc.quick_mask.take() {
-                doc.selection = selection_from(doc, &q);
+                doc.selection = selection_from(doc, &q)?;
             }
             Ok(())
         })?;
@@ -1105,7 +1144,12 @@ fn new_channel(s: &mut Session, p: &Value) -> Result<Value> {
         let fmt = channel_format(doc);
         let surface = match fill.as_str() {
             "white" => plane_surface(&vec![1.0; area.width() as usize * area.height() as usize], area, fmt),
-            "selection" => plane_surface(&sel::mask_from_surface(doc.selection.as_ref(), area), area, fmt),
+            "selection" => {
+                if let Some(selection) = &doc.selection {
+                    selection.try_materialize_region(area)?;
+                }
+                plane_surface(&sel::mask_from_surface(doc.selection.as_ref(), area), area, fmt)
+            }
             _ => Surface::new(fmt),
         };
         let mut ch = AlphaChannel::new(name.clone().unwrap_or_else(|| next_alpha_name(doc, "Alpha")), surface);
@@ -1135,6 +1179,9 @@ fn new_spot(s: &mut Session, p: &Value) -> Result<Value> {
         let area = doc.bounds();
         let fmt = channel_format(doc);
         let surface = if from_sel && doc.selection.is_some() {
+            if let Some(selection) = &doc.selection {
+                selection.try_materialize_region(area)?;
+            }
             plane_surface(&sel::mask_from_surface(doc.selection.as_ref(), area), area, fmt)
         } else {
             Surface::new(fmt)
@@ -1170,13 +1217,13 @@ fn duplicate_channel(s: &mut Session, p: &Value) -> Result<Value> {
     };
     ch.name = p.get("name").and_then(Value::as_str).map_or_else(|| format!("{base} copy"), str::to_string);
     if p.get("invert").and_then(Value::as_bool).unwrap_or(false) {
-        let v: Vec<f32> = read_plane(&ch.surface, area).into_iter().map(|v| 1.0 - v).collect();
+        let v: Vec<f32> = read_plane(&ch.surface, area)?.into_iter().map(|v| 1.0 - v).collect();
         ch.surface = plane_surface(&v, area, ch.surface.format());
     }
     match p.get("document") {
         Some(Value::String(x)) if x == "new" => {
             // Photoshop makes a multichannel document; ours is grayscale with the channel as pixels.
-            let doc = gray_document(&ch.name, &src.doc, &read_plane(&ch.surface, area));
+            let doc = gray_document(&ch.name, &src.doc, &read_plane(&ch.surface, area)?);
             let i = s.add_document(doc, None);
             Ok(json!({ "document": i }))
         }
@@ -1190,7 +1237,7 @@ fn duplicate_channel(s: &mut Session, p: &Value) -> Result<Value> {
             let r = s.edit("Duplicate Channel", |doc, _| {
                 let fmt = channel_format(doc);
                 if ch.surface.format() != fmt {
-                    ch.surface = ch.surface.convert(fmt);
+                    ch.surface = ch.surface.try_convert(fmt)?;
                 }
                 doc.channels.push(ch);
                 Ok(doc.channels.len() - 1)
@@ -1471,9 +1518,8 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
             if probe.spot.is_some() {
                 return Err(bad(cmd, "Quick Mask can't be a spot channel"));
             }
-            s.quick_mask_options = QuickMaskOptions { color: probe.color, opacity: probe.opacity, indicates: probe.indicates };
+            let o = QuickMaskOptions { color: probe.color, opacity: probe.opacity, indicates: probe.indicates };
             if s.active().is_some_and(|d| d.doc.quick_mask.is_some()) {
-                let o = s.quick_mask_options;
                 s.edit("Quick Mask Options", |doc, _| {
                     let area = doc.bounds();
                     let fmt = channel_format(doc);
@@ -1483,7 +1529,7 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
                         // when the colour switches between masked and selected areas.
                         if unselected && q.indicates != o.indicates {
                             let empty = if q.indicates == ColorIndicates::SelectedAreas { 0.0 } else { 1.0 };
-                            if uniform(&read_plane(&q.surface, area), empty) {
+                            if uniform(&read_plane(&q.surface, area)?, empty) {
                                 q.surface = unselected_surface(area, fmt, o.indicates);
                             }
                         }
@@ -1494,6 +1540,7 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
                     Ok(())
                 })?;
             }
+            s.quick_mask_options = o;
         }
         _ => return Err(bad(cmd, "`channel` must be an alpha/spot channel or \"quickMask\"")),
     }
@@ -1515,8 +1562,9 @@ fn merge_spot(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit("Merge Spot Channel", |doc, active| {
         let area = doc.bounds();
         let fmt = doc.pixel_format();
+        crate::sample_cmds::materialize_render_sources(doc)?;
         let comp = photocraft_compose::render(doc, area);
-        let k = read_plane(&doc.channels[i].surface, area);
+        let k = read_plane(&doc.channels[i].surface, area)?;
         let ink = ink.to_rgb();
         // Ink over the image: opaque at 100% solidity, multiplied (transparent ink) at 0%.
         let data: Vec<f32> = comp
@@ -1566,7 +1614,7 @@ fn split(s: &mut Session, p: &Value) -> Result<Value> {
         docs.push(gray_document(&format!("{}_{}", doc.name, short(name)), &doc, &plane));
     }
     for ch in &doc.channels {
-        docs.push(gray_document(&format!("{}_{}", doc.name, ch.name), &doc, &read_plane(&ch.surface, area)));
+        docs.push(gray_document(&format!("{}_{}", doc.name, ch.name), &doc, &read_plane(&ch.surface, area)?));
     }
     if p.get("closeOriginal").and_then(Value::as_bool).unwrap_or(true) {
         s.close(idx);
@@ -1669,6 +1717,9 @@ fn apply_image(s: &mut Session, p: &Value) -> Result<Value> {
     let layer = s.active().and_then(|d| d.active_layer);
     s.edit("Apply Image", |doc, _| {
         let area = doc.bounds();
+        if let Some(selection) = &doc.selection {
+            selection.try_materialize_region(area)?;
+        }
         let selection = doc.selection.as_ref().map(|m| sel::mask_from_surface(Some(m), area));
         let weight = |i: usize| opacity * mask.as_ref().map_or(1.0, |m| m[i]) * selection.as_ref().map_or(1.0, |m| m[i]);
         if is_channel_target(p) {
@@ -1676,7 +1727,7 @@ fn apply_image(s: &mut Session, p: &Value) -> Result<Value> {
             let srcp =
                 if src.len() == 1 { src[0].clone() } else { (0..src[0].len()).map(|i| src.iter().map(|pl| pl[i]).sum::<f32>() / src.len() as f32).collect() };
             let (surf, _) = target_surface(doc, None, p)?;
-            let base = read_plane(surf, area);
+            let base = read_plane(surf, area)?;
             let out: Vec<f32> = base.iter().enumerate().map(|(i, &b)| b + (blending.apply(b, srcp[i]) - b) * weight(i)).collect();
             *surf = plane_surface(&out, area, surf.format());
             return Ok(());
@@ -1690,7 +1741,7 @@ fn apply_image(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let n = sf.channels();
         let colors = sf.mode.color_channels();
-        let mut v = surf.read_region(area);
+        let mut v = surf.try_read_region(area)?;
         for (i, px) in v.chunks_exact_mut(n).enumerate() {
             let base_a = if sf.alpha { px[colors].clamp(0.0, 1.0) } else { 1.0 };
             let mut w = weight(i);
@@ -1713,7 +1764,7 @@ fn apply_image(s: &mut Session, p: &Value) -> Result<Value> {
                 px[colors] = out_a;
             }
         }
-        surf.write_region(area, &v);
+        surf.try_write_region(area, &v)?;
         surf.prune();
         Ok(())
     })?;
@@ -1962,5 +2013,63 @@ fn has_apply_target(s: &Session) -> std::result::Result<(), String> {
         Ok(())
     } else {
         Err(format!("Apply Image needs a pixel layer (active layer is {} {} layer)", l.content.article(), l.content.kind_name()))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod gpu_readback_tests {
+    use super::*;
+    use photocraft_raster::{Tile, TileBackend, TileReadError};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct FailedReadback;
+
+    impl TileBackend for FailedReadback {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn read_bytes(&self) -> std::result::Result<Box<[u8]>, TileReadError> {
+            Err(TileReadError("test readback failure".into()))
+        }
+    }
+
+    fn failing_surface(format: PixelFormat) -> Surface {
+        let mut surface = Surface::new(format);
+        surface.set_tile(TileCoord { tx: 0, ty: 0 }, Arc::new(Tile::from_backend(format, Arc::new(FailedReadback))));
+        surface
+    }
+
+    #[test]
+    fn channel_sources_report_gpu_readback_failure() {
+        let mut doc = Document::new("GPU", photocraft_geom::Size::new(2, 2), ColorMode::Rgb, photocraft_color::SampleType::U8);
+        let mut layer = Layer::raster("Pixels", doc.pixel_format());
+        let id = layer.id;
+        *layer.surface_mut().unwrap() = failing_surface(doc.pixel_format());
+        doc.layers.push(layer);
+        assert!(native_pixels(&doc, Some(id)).is_err());
+        assert!(native_pixels(&doc, None).is_err());
+    }
+
+    #[test]
+    fn quick_mask_options_keep_preferences_and_document_on_readback_failure() {
+        let mut session = Session::new();
+        session.execute("file.new", json!({"width": 2, "height": 2})).unwrap();
+        session
+            .edit("Quick Mask", |doc, _| {
+                doc.quick_mask = Some(AlphaChannel::new("Quick Mask", failing_surface(channel_format(doc))));
+                doc.quick_mask_unselected = true;
+                Ok(())
+            })
+            .unwrap();
+        let before = session.active().unwrap().doc.clone();
+        let options_before = session.quick_mask_options;
+        let indicates = if options_before.indicates == ColorIndicates::SelectedAreas { "maskedAreas" } else { "selectedAreas" };
+        assert!(options(&mut session, &json!({"channel": "quickMask", "indicates": indicates, "opacity": 23})).is_err());
+        assert!(Arc::ptr_eq(&before, &session.active().unwrap().doc));
+        assert_eq!(session.quick_mask_options.opacity, options_before.opacity);
+        assert_eq!(session.quick_mask_options.indicates, options_before.indicates);
     }
 }

@@ -298,7 +298,7 @@ fn tile_bytes(doc: &Document, seen: &mut HashSet<usize>) -> usize {
     tiles::surfaces(doc, |surface| {
         for (_, tile) in surface.tiles() {
             if seen.insert(Arc::as_ptr(tile) as usize) {
-                n = n.saturating_add(tile.bytes().len());
+                n = n.saturating_add(tile.storage_byte_len());
             }
         }
     });
@@ -634,7 +634,7 @@ mod tests {
     fn video_memory_counts_originals_and_deduplicates_displayed_frames() {
         for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
             let mut doc = video_document(depth, 3);
-            let tile = doc.layers[0].surface().unwrap().tiles().next().unwrap().1.bytes().len();
+            let tile = doc.layers[0].surface().unwrap().tiles().next().unwrap().1.storage_byte_len();
             let video = doc.layers[0].video.as_mut().unwrap();
             video.original_frames = Some(video.frames.clone());
             // Original footage and the displayed frame alias the stack, except this painted frame.
@@ -669,7 +669,7 @@ mod tests {
     fn video_memory_budget_evicts_deleted_off_playhead_frames() {
         for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
             let mut cur = Arc::new(video_document(depth, 6));
-            let tile = cur.layers[0].surface().unwrap().tiles().next().unwrap().1.bytes().len();
+            let tile = cur.layers[0].surface().unwrap().tiles().next().unwrap().1.storage_byte_len();
             let mut h = History::default();
             for _ in 0..4 {
                 edit(&mut h, &mut cur, "Delete Frame", |doc| {

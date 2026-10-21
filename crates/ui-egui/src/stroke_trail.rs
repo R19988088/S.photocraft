@@ -85,9 +85,9 @@ impl Trail {
     /// it (`photocraft_paint::retouch::stroke_coverage`): soft edges for a soft brush, the size and
     /// shape each dab takes from pen pressure and dynamics. `brush` is asked for once, on the first
     /// call. What finishing the stroke now would add (the press's lone first dab) shows too.
-    pub fn feed_dabs(&mut self, points: &[[f64; 3]], brush: impl FnOnce() -> BrushSettings) {
+    pub fn feed_dabs(&mut self, points: &[[f64; 3]], brush: impl FnOnce() -> BrushSettings) -> Result<(), String> {
         if self.dabs.is_some() && self.fed >= points.len() {
-            return;
+            return Ok(());
         }
         let mut dabs = self.dabs.take().unwrap_or_else(|| Dabs { renderer: StrokeRenderer::new(&brush(), None, 1.0), tail: photocraft_geom::Rect::EMPTY });
         let new: Vec<StrokePoint> = points
@@ -105,15 +105,16 @@ impl Trail {
         changed = changed.union(&dabs.tail);
         let tail = tail.map(|(_, t)| t);
         let renderer = &dabs.renderer;
-        self.restamp(changed, |x, y| renderer.coverage_at(x, y).max(tail.as_ref().map_or(0.0, |t| t.coverage_at(x, y))));
+        let result = self.restamp(changed, |x, y| Ok(renderer.coverage_at(x, y)?.max(tail.as_ref().map(|t| t.coverage_at(x, y)).transpose()?.unwrap_or(0.0))));
         self.dabs = Some(dabs);
+        result
     }
 
     /// Recompute the mask pixels over the document rectangle `r` from `cov` (document pixel →
     /// coverage 0..=1), sampled at each mask pixel's centre.
-    fn restamp(&mut self, r: photocraft_geom::Rect, cov: impl Fn(i32, i32) -> f32) {
+    fn restamp(&mut self, r: photocraft_geom::Rect, cov: impl Fn(i32, i32) -> Result<f32, String>) -> Result<(), String> {
         if r.is_empty() {
-            return;
+            return Ok(());
         }
         let k = f64::from(self.k);
         let x0 = (f64::from(r.x0) / k).floor().max(0.0) as usize;
@@ -121,13 +122,13 @@ impl Trail {
         let x1 = (f64::from(r.x1) / k).ceil().clamp(0.0, self.w as f64) as usize;
         let y1 = (f64::from(r.y1) / k).ceil().clamp(0.0, self.h as f64) as usize;
         if x1 <= x0 || y1 <= y0 {
-            return;
+            return Ok(());
         }
         for y in y0..y1 {
             let dy = ((y as f64 + 0.5) * k).floor() as i32;
             for x in x0..x1 {
                 let dx = ((x as f64 + 0.5) * k).floor() as i32;
-                let c = cov(dx, dy);
+                let c = cov(dx, dy)?;
                 let c = if c.is_finite() { (c.clamp(0.0, 1.0) * 255.0).round() as u8 } else { 0 };
                 if let Some(v) = self.cov.get_mut(y * self.w + x) {
                     *v = c;
@@ -136,6 +137,7 @@ impl Trail {
         }
         let d = self.dirty.get_or_insert([x0, y0, x1, y1]);
         *d = [d[0].min(x0), d[1].min(y0), d[2].max(x1), d[3].max(y1)];
+        Ok(())
     }
 
     fn capsule(&mut self, a: [f64; 2], b: [f64; 2], r: f64) {

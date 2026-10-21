@@ -106,7 +106,7 @@ impl PhotocraftApp {
     /// Whether closing now would lose work: a document has unsaved changes and closing wasn't
     /// confirmed. The web build has the browser ask before leaving the page while this holds (#1380).
     pub fn has_unsaved_work(&self) -> bool {
-        !self.allow_close && self.session.documents().iter().any(|d| d.is_dirty())
+        !self.allow_close && (self.session.documents().iter().any(|d| d.is_dirty()) || crate::transform_tool::is_cached_raster(self) || crate::liquify_ui::has_pending_edits(self))
     }
 }
 
@@ -115,6 +115,13 @@ impl PhotocraftApp {
 /// here as a close request.
 pub fn guard_window_close(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if !ctx.input(|i| i.viewport().close_requested()) {
+        return;
+    }
+    if !app.allow_close && (crate::transform_tool::is_cached_raster(app) || crate::liquify_ui::has_pending_edits(app)) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        app.ui.status = "Press Enter to apply the cached edit or Escape to cancel before closing.".into();
+        app.ui.status_error = true;
         return;
     }
     if !app.allow_close && intercept(app, EXIT, &Value::Null) {
@@ -976,6 +983,28 @@ mod tests {
         let cancelled = commands.iter().any(|c| matches!(c, egui::ViewportCommand::CancelClose));
         assert_eq!(commands.iter().any(|c| matches!(c, egui::ViewportCommand::Focus)), cancelled);
         cancelled
+    }
+
+    #[test]
+    fn window_close_preserves_a_cached_move_on_a_saved_document() {
+        let mut app = app_with_docs(1);
+        app.run("layer.new.layer", json!({})).unwrap();
+        app.run("edit.fill", json!({"color":"#aa4400"})).unwrap();
+        let st = app.session.active_mut().unwrap();
+        st.saved_revision = st.revision;
+        let revision = st.revision;
+        let history = st.history.past_len();
+        app.ui.tool = crate::state::Tool::Move;
+        crate::transform_tool::begin_cached_move(&mut app, &egui::Context::default()).unwrap();
+        crate::transform_tool::nudge(&mut app, 3., 2.);
+        assert!(app.has_unsaved_work());
+        assert!(press_window_close(&mut app));
+        assert!(app.ui.transform.is_some());
+        assert!(app.discard.is_none());
+        assert_eq!(app.session.active().unwrap().revision, revision);
+        assert_eq!(app.session.active().unwrap().history.past_len(), history);
+        crate::transform_tool::cancel(&mut app);
+        assert!(!app.has_unsaved_work());
     }
 
     #[test]

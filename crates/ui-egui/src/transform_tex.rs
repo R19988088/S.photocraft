@@ -11,7 +11,8 @@
 //!   enlarged by the transform: the full-resolution level with nearest filtering, so pixels stay
 //!   crisp like the canvas around them.
 //!
-//! Levels and filter variants are uploaded on first use and cached for the session.
+//! Source levels and filter variants are prepared once when the session opens. Pointer gestures
+//! only choose resident textures and update mesh geometry; they never resample or upload pixels.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -43,7 +44,24 @@ impl PreviewTextures {
         let image = Arc::new(image);
         let tex = ctx.load_texture(format!("{name}-0-linear"), Arc::clone(&image), TextureOptions::LINEAR);
         let base_uv = [base_uv[0].clamp(0.0, 1.0), base_uv[1].clamp(0.0, 1.0)];
-        Self { name, images: Mutex::new(vec![image]), base_uv, uploaded: Mutex::new(vec![Level { level: 0, nearest: false, tex, uv: base_uv }]) }
+        let prepared = Self { name, images: Mutex::new(vec![image]), base_uv, uploaded: Mutex::new(vec![Level { level: 0, nearest: false, tex, uv: base_uv }]) };
+        // All sampling choices are resident before the first pointer update. In particular,
+        // shrinking a large source must not build CPU mip levels in the interaction loop.
+        let [w, h] = prepared.size();
+        let last = w.max(h).max(1).next_power_of_two().trailing_zeros().min(12);
+        for level in 0..=last {
+            let Some((image, uv)) = prepared.level_image(level) else { continue };
+            let mut uploaded = prepared.uploaded.lock().unwrap_or_else(PoisonError::into_inner);
+            if level > 0 {
+                let tex = ctx.load_texture(format!("{}-{level}-linear", prepared.name), image.clone(), TextureOptions::LINEAR);
+                uploaded.push(Level { level, nearest: false, tex, uv });
+            }
+            if level == 0 {
+                let tex = ctx.load_texture(format!("{}-0-nearest", prepared.name), image, TextureOptions::NEAREST);
+                uploaded.push(Level { level: 0, nearest: true, tex, uv });
+            }
+        }
+        prepared
     }
 
     /// Size of the full-resolution level in texels.
@@ -74,6 +92,8 @@ impl PreviewTextures {
     /// Texture and uv extent to draw with (uploading a level / filter on first use).
     pub fn pick(&self, ctx: &egui::Context, zoom: f32, scale: f32, nearest_interpolation: bool) -> (TextureId, [f32; 2]) {
         let (level, nearest) = Self::choose(zoom, scale, nearest_interpolation);
+        let [w, h] = self.size();
+        let level = level.min(w.max(h).max(1).next_power_of_two().trailing_zeros().min(12));
         let mut up = self.uploaded.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(l) = up.iter().find(|l| l.level == level && l.nearest == nearest) {
             return (l.tex.id(), l.uv);

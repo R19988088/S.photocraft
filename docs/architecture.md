@@ -346,6 +346,25 @@ Both backends consume the same plan. This is the only place that encodes Photosh
   - one global `Budget` for GPU memory.
 - **Parity tests.** For every blend mode, adjustment and effect, the CPU and GPU results must match within a tolerance of ≤1/255 for 8-bit output. This runs in CI on a software adapter (wgpu with lavapipe or WARP).
 
+Native pointer painting installs `paint::gpu_backend::StrokeBackendFactory` from the canvas's
+wgpu device. Rust generates dabs; independent compute pipelines rasterize tips, accumulate
+coverage, run V1/V2/V3 transport, resolve wet edges and shade pigment. Stroke state uses sparse
+immutable tile pages. Smoothing tails fork those pages; preview restoration, commit and undo
+share tile snapshots, and the compositor copies their device textures directly. CPU pixel
+materialization is deferred to explicit CPU consumers such as file encoding. The CPU paint
+implementation remains the numerical oracle and the renderer for device-free callers.
+
+Move, Transform and Liquify prepare immutable native-channel GPU sources for their Layer,
+All Layers or Layer Group scope. Pointer updates change geometry or the displacement field;
+paged GPU outputs replace those layers in the normal compositor, including their masks,
+clipping, blend modes and effects. Pointer release retains the session. Enter or a tool
+change reads back its final native planes once and applies one engine history transaction;
+Escape discards the preview. Move can continue directly into Free Transform with the same
+sources. Pending edits block save and unrelated pixel mutations until applied or cancelled.
+Liquify keeps stroke history and freeze masks on the device, and changing its scope replays
+the pending strokes against the new immutable targets. Device-free engine operations retain
+the CPU implementation; the desktop cached tools require the GPU renderer.
+
 ### 7.3 Color
 
 - Blending happens in document space by default, which is Photoshop-compatible. A per-document "linear light blending" option is also available.
@@ -428,7 +447,7 @@ psd/src/
 | Selection | marquee/lasso geometry → mask, magic wand (flood fill tolerance), color range, quick select (graph cut / superpixels), feather, grow/shrink, refine edge | some |
 | Inpaint/heal | spot heal, healing brush (Poisson), content-aware fill (PatchMatch + multiscale EM) | later |
 | Warp | free transform (affine/perspective/warp mesh), liquify, puppet (ARAP), lens correction, resampling (Lanczos/bicubic) | yes |
-| Paint (`paint`) | dab generation (hardness, roundness, angle, spacing, scatter), dynamics from pressure/tilt/velocity, smoothing (pulled string / lazy mouse), wet edges, airbrush, eraser, clone/heal sources, blend modes per stroke, `.abr` import | CPU first, GPU later |
+| Paint (`paint`) | dab generation (hardness, roundness, angle, spacing, scatter), dynamics from pressure/tilt/velocity, smoothing (pulled string / lazy mouse), wet edges, airbrush, eraser, clone/heal sources, blend modes per stroke, `.abr` import | Native brush GPU; CPU oracle and retouch |
 | Text (`text`) | font DB trait (system fonts native, bundled fonts on web), parley layout, per-run styles, paragraph options, warp; renders to a raster cache | — |
 | Vector (`vector`) | shapes, bezier paths, pen tool geometry, strokes (dash, align, caps), boolean ops → coverage via vello_cpu | — |
 | ML (`ml`) | `InferenceBackend` trait; tasks: `segment_point/box` (SAM2), `matte_subject` (background removal), `depth`, `sky`; model registry with SHA-256 verification and on-demand download | backend-dependent |

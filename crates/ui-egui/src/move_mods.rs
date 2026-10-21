@@ -70,10 +70,12 @@ pub struct MoveDrag {
     start: Option<[f64; 2]>,
     /// ⌥ was held when the drag started.
     alt: bool,
+    /// A raster selection is carried by the immutable source instead of the whole layer.
+    pixels: bool,
     /// The last offset after ⇧ locking (keeps the locked axis stable).
     last: Option<[f64; 2]>,
     /// History length before the ⌥-drag duplicated (set once it has).
-    dup_from: Option<usize>,
+    pub(crate) dup_from: Option<usize>,
 }
 
 fn past_len(app: &PhotocraftApp) -> Option<usize> {
@@ -87,12 +89,32 @@ fn moving(app: &PhotocraftApp) -> bool {
 /// Duplicates the selected layers (the copies become the selection), remembering the history
 /// length before so [`fold_history`] can merge the copy and the move into one step.
 fn duplicate(app: &mut PhotocraftApp) -> Option<usize> {
+    if crate::transform_tool::is_cached_move(app) {
+        app.ui.status = "Press Enter to apply the pending move before duplicating.".into();
+        app.ui.status_error = true;
+        return None;
+    }
     let before = past_len(app)?;
+    let previous = app.session.active().map(|st| (st.selected_layers(), st.active_layer, st.layer_anchor));
+    if app.ui.tool_options.move_target != "layer" {
+        let st = app.session.active()?;
+        let roots = photocraft_engine::edit_scope::roots(&st.doc, &st.selected_layers(), st.active_layer, &app.ui.tool_options.move_target);
+        let active = roots.first().copied();
+        if let Err(error) = photocraft_engine::layer_multi_cmds::set_selection(&mut app.session, roots, active, active) {
+            app.ui.status = error.to_string();
+            app.ui.status_error = true;
+            return None;
+        }
+    }
     // In place: the copy follows the pointer from the original, artboards too (#1531).
     match app.run("layer.duplicate", json!({"inPlace": true})) {
         Ok(_) => Some(before),
         Err(e) => {
+            if let Some((selected, active, anchor)) = previous {
+                let _ = photocraft_engine::layer_multi_cmds::set_selection(&mut app.session, selected, active, anchor);
+            }
             app.ui.status = e;
+            app.ui.status_error = true;
             None
         }
     }
@@ -114,13 +136,14 @@ fn fold_history(app: &mut PhotocraftApp, from: usize) {
 /// Rewrites a Move-tool pointer event for the held modifiers: ⇧ locks it to an axis, and the
 /// first real movement of an ⌥-drag duplicates the layers being moved. Other tools pass through.
 pub fn filter_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) -> ToolEvent {
-    if app.active_tool() != Tool::Move || app.ui.transform.is_some() {
+    if app.active_tool() != Tool::Move || (app.ui.transform.is_some() && !crate::transform_tool::is_cached_move(app)) {
         app.move_mods = MoveDrag::default();
         return ev;
     }
     match ev {
         ToolEvent::Down { x, y, .. } => {
-            app.move_mods = MoveDrag { start: Some([x, y]), alt: mods.alt, last: None, dup_from: None };
+            let pixels = crate::move_ui::moves_selected_pixels_with(app, Tool::Move);
+            app.move_mods = MoveDrag { start: Some([x, y]), alt: mods.alt, pixels, last: None, dup_from: None };
             ev
         }
         ToolEvent::Move { x, y, pressure } => {
@@ -137,7 +160,7 @@ pub fn filter_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifier
 fn drag_to(app: &mut PhotocraftApp, p: [f64; 2], mods: egui::Modifiers) -> [f64; 2] {
     let Some(start) = app.move_mods.start.filter(|_| moving(app)) else { return p };
     // Selected pixels (`move_ui`): ⌥ copied them at the press.
-    let pixels = app.drag.as_ref().is_some_and(|d| d.sel_move.is_some());
+    let pixels = app.move_mods.pixels || app.drag.as_ref().is_some_and(|d| d.sel_move.is_some());
     let mut d = [p[0] - start[0], p[1] - start[1]];
     if mods.shift {
         d = constrain(d, app.move_mods.last, if pixels { TRANSFORM_DIRECTIONS } else { MOVE_DIRECTIONS });
@@ -146,6 +169,9 @@ fn drag_to(app: &mut PhotocraftApp, p: [f64; 2], mods: egui::Modifiers) -> [f64;
     let zoom = f64::from(app.point_zoom().max(0.01));
     if app.move_mods.alt && !pixels && app.move_mods.dup_from.is_none() && d[0].hypot(d[1]) * zoom >= DUPLICATE_THRESHOLD {
         app.move_mods.dup_from = duplicate(app);
+        if app.move_mods.dup_from.is_none() {
+            return start;
+        }
         // Only once per drag, even if duplicating failed.
         app.move_mods.alt = false;
     }
@@ -156,7 +182,13 @@ fn drag_to(app: &mut PhotocraftApp, p: [f64; 2], mods: egui::Modifiers) -> [f64;
 pub fn finish(app: &mut PhotocraftApp) {
     let st = std::mem::take(&mut app.move_mods);
     if let Some(from) = st.dup_from {
-        fold_history(app, from);
+        if crate::transform_tool::is_cached_move(app) {
+            if let Some(t) = app.ui.transform.as_mut() {
+                t.made = Some(crate::state::MadeLayer::Copy);
+            }
+        } else {
+            fold_history(app, from);
+        }
     }
 }
 
@@ -225,29 +257,42 @@ fn brush_arrow_keys(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
 /// pixels float until dropped, which is one state already.
 pub fn nudge(app: &mut PhotocraftApp, dx: f64, dy: f64, duplicate_first: bool) {
     if app.ui.transform.is_some() {
-        crate::transform_tool::nudge(app, dx, dy);
-        return;
+        if duplicate_first && crate::transform_tool::is_cached_move(app) {
+            app.ui.status = "Press Enter to apply the pending move before duplicating.".into();
+            app.ui.status_error = true;
+            return;
+        } else {
+            crate::transform_tool::nudge(app, dx, dy);
+            return;
+        }
     }
     if app.drag.is_some() {
         return;
     }
-    if crate::move_ui::moves_selected_pixels_with(app, Tool::Move) {
-        crate::move_ui::float_selected(app, duplicate_first, dx, dy);
+    let copy_pixels = duplicate_first && crate::move_ui::moves_selected_pixels_with(app, Tool::Move);
+    if duplicate_first && !copy_pixels && duplicate(app).is_none() {
         return;
     }
-    let from = if duplicate_first { duplicate(app) } else { None };
-    let moved = if duplicate_first {
-        // A copy is a state of its own, folded with its move below.
-        app.nudge_bundle.reset();
-        app.run("layer.translate", json!({"dx": dx, "dy": dy}))
+    let ctx = app.bounds_context.clone().unwrap_or_default();
+    let begin = if duplicate_first && !copy_pixels {
+        crate::transform_tool::begin_cached_move_layers_copy(app, &ctx)
     } else {
-        crate::nudge_bundle::run(app, "layers", "layer.translate", json!({"dx": dx, "dy": dy}))
+        crate::transform_tool::begin_cached_move_copy(app, &ctx, copy_pixels)
     };
-    if let Err(e) = moved {
-        app.ui.status = e;
-    }
-    if let Some(from) = from {
-        fold_history(app, from);
+    match begin {
+        Ok(()) => {
+            crate::transform_tool::nudge(app, dx, dy);
+            if duplicate_first
+                && !copy_pixels
+                && let Some(t) = app.ui.transform.as_mut()
+            {
+                t.made = Some(crate::state::MadeLayer::Copy);
+            }
+        }
+        Err(error) => {
+            app.ui.status = error;
+            app.ui.status_error = true;
+        }
     }
 }
 
@@ -346,7 +391,12 @@ mod tests {
     }
 
     fn bounds(app: &PhotocraftApp, id: photocraft_doc::LayerId) -> photocraft_geom::Rect {
-        app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds()
+        let st = app.session.active().unwrap();
+        let b = st.doc.layer(id).unwrap().surface().unwrap().content_bounds();
+        match crate::move_ui::shown_offset(app, st.doc.id, st.revision, id) {
+            Some((dx, dy)) => b.translate(dx, dy),
+            None => b,
+        }
     }
 
     fn drag(app: &mut PhotocraftApp, pts: &[[f64; 2]], mods: egui::Modifiers) {
@@ -356,6 +406,9 @@ mod tests {
         }
         let e = pts[pts.len() - 1];
         crate::canvas::tool_event(app, ToolEvent::Up { x: e[0], y: e[1] }, mods);
+        if crate::transform_tool::is_cached_move(app) {
+            crate::transform_tool::commit(app);
+        }
     }
 
     #[test]
@@ -423,10 +476,12 @@ mod tests {
         nudge(&mut app, 0.0, -1.0, false);
         assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(18, 7, 34, 23));
         let n0 = app.session.active().unwrap().doc.layers.len();
+        crate::transform_tool::commit(&mut app);
         nudge(&mut app, 1.0, 0.0, true);
         assert_eq!(app.session.active().unwrap().doc.layers.len(), n0 + 1);
         assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(18, 7, 34, 23));
         let ctx = egui::Context::default();
+        crate::transform_tool::commit(&mut app);
         crate::transform_tool::begin(&mut app, &ctx).unwrap();
         let q0 = app.ui.transform.as_ref().unwrap().quad;
         nudge(&mut app, 0.0, 10.0, false);
@@ -481,6 +536,7 @@ mod tests {
         assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(9, 8, 25, 24));
         assert!(press(&mut app, egui::Key::ArrowDown, egui::Modifiers::SHIFT));
         assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(9, 18, 25, 34));
+        crate::transform_tool::commit(&mut app);
         assert!(press(&mut app, egui::Key::ArrowLeft, egui::Modifiers::ALT));
         let st = app.session.active().unwrap();
         assert_eq!(st.doc.layers.len(), n0 + 1, "⌥ duplicated first");
@@ -510,6 +566,7 @@ mod tests {
         assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(10, 8, 26, 24), "1 px per press");
         assert!(press(&mut app, egui::Key::ArrowDown, CTRL | egui::Modifiers::SHIFT));
         assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(10, 18, 26, 34), "⌘⇧: 10 px");
+        crate::transform_tool::commit(&mut app);
         assert!(press(&mut app, egui::Key::ArrowLeft, CTRL | egui::Modifiers::ALT));
         let st = app.session.active().unwrap();
         assert_eq!(st.doc.layers.len(), n0 + 1, "⌘⌥ duplicated first");
@@ -547,15 +604,17 @@ mod tests {
     #[test]
     fn cmd_arrows_move_the_selected_pixels_with_a_selection_tool() {
         let mut app = app_with_layer();
+        app.ui.tool_options.move_target = "layer".into();
         app.ui.tool = Tool::RectMarquee;
         app.session.execute("select.rect", json!({"x": 8, "y": 8, "width": 8, "height": 8})).unwrap();
         assert!(press(&mut app, egui::Key::ArrowRight, CTRL));
-        let offset = |app: &PhotocraftApp| photocraft_engine::float_cmds::floating(app.session.active().unwrap()).map(|f| f.offset);
-        assert_eq!(offset(&app), Some((1, 0)), "the selected pixels float, 1 px to the right");
+        let offset = |app: &PhotocraftApp| app.ui.transform.as_ref().map(|t| ((t.quad[0][0] - t.rect[0]) as i32, (t.quad[0][1] - t.rect[1]) as i32));
+        assert_eq!(offset(&app), Some((1, 0)), "the cached selected pixels move 1 px to the right");
         assert!(press(&mut app, egui::Key::ArrowDown, CTRL | egui::Modifiers::SHIFT));
         assert_eq!(offset(&app), Some((1, 10)), "⌘⇧: 10 px");
         assert_eq!(app.ui.tool, Tool::RectMarquee);
         // Not while a polygon is being drawn.
+        crate::transform_tool::commit(&mut app);
         app.ui.tool = Tool::PolygonLasso;
         app.ui.polygon = vec![[1.0, 1.0]];
         assert!(!press(&mut app, egui::Key::ArrowRight, CTRL));
@@ -588,131 +647,22 @@ mod tests {
         app.session.active().unwrap().history.past_len()
     }
 
-    fn left_edge(app: &PhotocraftApp, id: photocraft_doc::LayerId) -> i32 {
-        bounds(app, id).x0
-    }
-
-    /// #2259: tapping or holding an arrow key is one History state, so one Undo takes the whole
-    /// run back (Photoshop folds a run of nudges into one "Move").
     #[test]
-    fn a_run_of_arrow_nudges_is_one_history_step() {
+    fn a_run_of_move_nudges_keeps_document_immutable_until_committed() {
         let mut app = app_with_layer();
         let id = app.session.active().unwrap().active_layer.unwrap();
+        let revision = app.session.active().unwrap().revision;
         let h0 = history(&app);
-        // Twelve taps, 0.2 s apart, then ⇧ for ten more px: still the same run.
-        for i in 0..12 {
-            assert!(press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 5.0 + 0.2 * f64::from(i)));
-        }
-        assert!(press_at(&mut app, egui::Key::ArrowDown, egui::Modifiers::SHIFT, 7.6));
-        assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(20, 18, 36, 34));
-        assert_eq!(history(&app), h0 + 1, "thirteen presses, one state");
-        assert_eq!(app.session.active().unwrap().history.undo_label(), Some("Move"));
-        assert!(app.session.undo());
-        assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(8, 8, 24, 24), "one Undo takes back the run");
-        assert!(app.session.redo());
-        assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(20, 18, 36, 34), "and one Redo does it again");
-    }
-
-    /// A pause longer than Nudge Bundle Pause starts a new run; a longer pause setting keeps it.
-    #[test]
-    fn a_pause_ends_the_run() {
-        let mut app = app_with_layer();
-        let id = app.session.active().unwrap().active_layer.unwrap();
-        let h0 = history(&app);
-        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 1.0);
-        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 1.9);
-        assert_eq!(history(&app), h0 + 1, "0.9 s: the same run");
-        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 3.0);
-        assert_eq!(history(&app), h0 + 2, "1.1 s of quiet: a new run");
-        app.session.edit_prefs(|p| p.tools.nudge_bundle_pause_ms = 5000);
-        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 7.0);
-        assert_eq!(history(&app), h0 + 2, "4 s with a 5 s pause: the same run");
-        assert_eq!(left_edge(&app, id), 12);
-        assert!(app.session.undo());
-        assert_eq!(left_edge(&app, id), 10, "Undo takes back the second run only");
-    }
-
-    /// With Bundle Arrow-Key Nudges off every press is a state, as before (#2259).
-    #[test]
-    fn every_press_is_a_step_with_bundling_off() {
-        let mut app = app_with_layer();
-        let id = app.session.active().unwrap().active_layer.unwrap();
-        app.session.edit_prefs(|p| p.tools.bundle_nudges = false);
-        let h0 = history(&app);
-        for _ in 0..5 {
+        for _ in 0..12 {
             assert!(press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE));
         }
-        assert_eq!(history(&app), h0 + 5);
-        assert!(app.session.undo());
-        assert_eq!(left_edge(&app, id), 12, "one pixel back");
-        // Turning it back on bundles the next run, which doesn't swallow the earlier steps.
-        app.session.edit_prefs(|p| p.tools.bundle_nudges = true);
-        for _ in 0..3 {
-            press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
-        }
-        assert_eq!(history(&app), h0 + 5);
-        assert_eq!(left_edge(&app, id), 15);
-    }
-
-    /// Any other change to the document ends the run: another edit, Undo, a different layer
-    /// selected, a save.
-    #[test]
-    fn other_changes_end_the_run() {
-        let mut app = app_with_layer();
-        let a = app.session.active().unwrap().active_layer.unwrap();
-        let tap = |app: &mut PhotocraftApp| assert!(press(app, egui::Key::ArrowRight, egui::Modifiers::NONE));
-        let h0 = history(&app);
-        tap(&mut app);
-        tap(&mut app);
+        assert_eq!(app.session.active().unwrap().revision, revision);
+        assert_eq!(history(&app), h0);
+        assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(20, 8, 36, 24));
+        crate::transform_tool::commit(&mut app);
         assert_eq!(history(&app), h0 + 1);
-        // An edit of another kind between two nudges.
-        app.session.execute("layer.setProps", json!({"opacity": 0.5})).unwrap();
-        tap(&mut app);
-        tap(&mut app);
-        assert_eq!(history(&app), h0 + 3, "nudges, the edit, nudges");
-        // Undo ends it too: the next nudge is a state of its own, not folded into the one before.
         assert!(app.session.undo());
-        tap(&mut app);
-        assert_eq!(history(&app), h0 + 3);
-        assert!(app.session.undo());
-        assert_eq!(left_edge(&app, a), 10, "the new run was undone alone");
-        // Saving keeps the saved state a step of its own.
-        tap(&mut app);
-        tap(&mut app);
-        let before = history(&app);
-        let st = app.session.active_mut().unwrap();
-        st.saved_revision = st.revision;
-        tap(&mut app);
-        assert_eq!(history(&app), before + 1, "a save between two nudges ends the run");
-        // Selecting another layer: the same keys now move that one, in a run of its own.
-        let b = {
-            app.session.execute("layer.new.layer", json!({})).unwrap();
-            app.session.active().unwrap().active_layer.unwrap()
-        };
-        assert_ne!(a, b);
-        let before = history(&app);
-        app.session
-            .edit("paint", |doc, active| {
-                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photocraft_geom::Rect::new(0, 0, 4, 4), &[0.0, 1.0, 0.0, 1.0]);
-                Ok(())
-            })
-            .unwrap();
-        tap(&mut app);
-        app.session.select_layer(a).unwrap();
-        tap(&mut app);
-        assert_eq!(history(&app), before + 3, "paint, a nudge of the new layer, a nudge of the first");
-    }
-
-    /// ⌥ copies, so ⌥-nudges are never folded into a run (the copy is part of each step).
-    #[test]
-    fn alt_nudges_do_not_join_a_run() {
-        let mut app = app_with_layer();
-        let h0 = history(&app);
-        press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
-        press(&mut app, egui::Key::ArrowRight, egui::Modifiers::ALT);
-        press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
-        assert_eq!(history(&app), h0 + 3);
-        assert_eq!(app.session.active().unwrap().history.undo_label(), Some("Move"), "the run after the copy is a state of its own");
+        assert_eq!(bounds(&app, id), photocraft_geom::Rect::new(8, 8, 24, 24));
     }
 
     /// #2259: nudges of the selection outline bundle the same way.
@@ -736,6 +686,8 @@ mod tests {
         app.ui.tool = Tool::Move;
         let h1 = history(&app);
         press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 3.0);
+        assert_eq!(history(&app), h1, "the next move stays pending until Enter");
+        crate::transform_tool::commit(&mut app);
         assert_eq!(history(&app), h1 + 1);
     }
 

@@ -268,38 +268,101 @@ fn run_on_layer(s: &mut Session, cmd: &str, label: &str, p: &Value, moves: bool,
     Ok(json!({"layer": id.0, "changed": true}))
 }
 
+/// Resolve the frozen raster/smart targets shared by the resident preview and atomic commit.
+pub fn liquify_targets(s: &Session, p: &Value) -> Result<Vec<LayerId>> {
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    let scope = p.get("scope").and_then(Value::as_str).unwrap_or("layer");
+    if !matches!(scope, "layer" | "all" | "group") {
+        return Err(bad(LIQUIFY, "scope must be layer, all or group"));
+    }
+    let roots = if let Some(ids) = crate::edit_scope::explicit(&st.doc, p)? {
+        ids
+    } else if let Some(id) = p.get("layer").and_then(Value::as_u64) {
+        vec![LayerId(id)]
+    } else {
+        crate::edit_scope::roots(&st.doc, &st.selected_layers(), st.active_layer, scope)
+    };
+    let mut out = Vec::new();
+    fn append(doc: &Document, id: LayerId, out: &mut Vec<LayerId>) -> Result<()> {
+        let layer = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+        if let Some(children) = layer.children() {
+            for child in children {
+                append(doc, child.id, out)?;
+            }
+        } else if matches!(layer.content, LayerContent::Raster(_) | LayerContent::Smart(_)) && !out.contains(&id) {
+            check_locks(layer, crate::transform_cmds::group_locks(doc, id), false)?;
+            out.push(id);
+        }
+        Ok(())
+    }
+    for root in roots {
+        append(&st.doc, root, &mut out)?;
+    }
+    if out.is_empty() {
+        return Err(bad(LIQUIFY, "the target has no pixel layers or smart objects"));
+    }
+    Ok(out)
+}
+
 fn liquify(s: &mut Session, p: &Value) -> Result<Value> {
+    let cached = s.take_cached_transform();
     let canvas = s.active().ok_or(EngineError::NoDocument)?.doc.bounds();
     let (strokes, cell) = liquify_params(LIQUIFY, p, canvas)?;
-    let id = target(s, p)?;
+    let ids = liquify_targets(s, p)?;
+    let id = ids.first().copied().ok_or_else(|| bad(LIQUIFY, "no target layers"))?;
     if strokes.is_empty() {
-        return Ok(json!({"layer": id.0, "changed": false}));
+        return Ok(json!({"layer":id.0,"changed":false}));
     }
     let t0 = Stopwatch::start();
     let field = LiquifyField::from_strokes(canvas, cell, &strokes);
-    let smart = matches!(s.active().and_then(|d| d.doc.layer(id)).map(|l| &l.content), Some(LayerContent::Smart(_)));
+    let smart = ids.iter().any(|id| matches!(s.active().and_then(|d| d.doc.layer(*id)).map(|l| &l.content), Some(LayerContent::Smart(_))));
     if field.is_identity() && !smart {
-        return Ok(json!({"layer": id.0, "changed": false}));
+        return Ok(json!({"layer":id.0,"changed":false}));
     }
-    let r = run_on_layer(
-        s,
-        LIQUIFY,
-        "Liquify",
-        p,
-        false,
-        &|surf, sel, _| {
-            let out = apply_liquify(surf, &field);
-            Ok(match sel {
-                Some(sel) => mix_by_selection(surf, &out, sel),
-                None => out,
-            })
-        },
-        None,
-    )?;
-    let mut r = r;
-    r["ms"] = json!(t0.ms());
-    r["maxDisplacement"] = json!(field.max_displacement());
-    Ok(r)
+    let mut params = p.clone();
+    if let Some(p) = params.as_object_mut() {
+        p.remove("layer");
+        p.remove("layers");
+        p.remove("scope");
+    }
+    s.edit("Liquify", |doc, _| {
+        let selection = doc.selection.clone();
+        for id in &ids {
+            if matches!(doc.layer(*id).map(|l| &l.content), Some(LayerContent::Smart(_))) {
+                let sf =
+                    SmartFilter { command: LIQUIFY.into(), params: params.clone(), blend: photocraft_color::BlendMode::Normal, opacity: 1.0, visible: true };
+                crate::smart_cmds::add_smart_filter(doc, *id, sf, selection.as_ref())?;
+                continue;
+            }
+            let layer = doc.layer_mut(*id).ok_or(EngineError::NoLayer(*id))?;
+            if let LayerContent::Raster(surface) = &mut layer.content {
+                if let Some(cached) = &cached {
+                    *surface = cached.pixels.get(id).cloned().ok_or_else(|| bad(LIQUIFY, "missing resident layer output"))?;
+                } else {
+                    let warped = apply_liquify(surface, &field);
+                    *surface = match &selection {
+                        Some(selection) => mix_by_selection(surface, &warped, selection),
+                        None => warped,
+                    };
+                }
+            }
+            if let Some(mask) = &mut layer.mask
+                && mask.linked
+            {
+                if let Some(cached) = &cached {
+                    mask.surface = cached.masks.get(id).cloned().ok_or_else(|| bad(LIQUIFY, "missing resident linked mask output"))?;
+                } else {
+                    let warped = apply_liquify(&mask.surface, &field);
+                    mask.surface = match &selection {
+                        Some(selection) => mix_by_selection(&mask.surface, &warped, selection),
+                        None => warped,
+                    };
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"layer":id.0,"layers":ids.iter().map(|id|id.0).collect::<Vec<_>>(),"changed":true,"ms":t0.ms(),"maxDisplacement":field.max_displacement()}))
 }
 
 /// Lifts the selected pixels (when there is a selection), deforms them with `f` and puts them
@@ -381,7 +444,7 @@ fn perspective(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
 }
 
 pub fn specs() -> Vec<CommandSpec> {
-    const L: &str = r##"{"strokes":[{"tool":"forwardWarp|reconstruct|smooth|twirlCw|twirlCcw|pucker|bloat|pushLeft|freeze|thaw|lassoMask|reconstructAll","size":px=100,"density":0-100=50,"pressure":0-100=100,"rate":0-100=80,"points":[[x,y,pressure?]…],"amount":%? (reconstructAll; lassoMask: 1 freezes the polygon in points, 0 thaws it)}…],"meshSize":px? (field resolution, px per node; default 2, or 4 above 4 MP),"layer":id?} — strokes replay in order on a fresh field; a selection limits the effect; on a smart object it becomes a smart filter"##;
+    const L: &str = r##"{"strokes":[{"tool":"forwardWarp|reconstruct|smooth|twirlCw|twirlCcw|pucker|bloat|pushLeft|freeze|thaw|lassoMask|reconstructAll","size":px=100,"density":0-100=50,"pressure":0-100=100,"rate":0-100=80,"points":[[x,y,pressure?]…],"amount":%? (reconstructAll; lassoMask: 1 freezes the polygon in points, 0 thaws it)}…],"meshSize":px? (field resolution, px per node; default 2, or 4 above 4 MP),"layer":id?,"layers":[id]?,"scope":"layer|all|group"="layer"} — strokes replay in order on a fresh field; a selection limits the effect; on a smart object it becomes a smart filter"##;
     const P: &str = r##"{"pins":[{"src":[x,y],"dst":[x,y],"rotate":deg?,"depth":n?}…],"mode":"rigid|normal|distort"="normal","density":"fewer|normal|more"="normal","expansion":px=2,"interpolation":"bicubic|bilinear|nearest","layer":id?} — mesh over the opaque region, as-rigid-as-possible; on a smart object it becomes a smart filter"##;
     const Q: &str = r##"{"planes":[{"src":[[x,y]×4],"dst":[[x,y]×4]}…] (corners clockwise from top-left; corners that coincide in src are linked),"straighten":"horizontal|vertical|auto"?,"interpolation":"bicubic|bilinear|nearest","layer":id?}"##;
     vec![
@@ -391,7 +454,7 @@ pub fn specs() -> Vec<CommandSpec> {
             menu: &["Filter"],
             shortcut: Some("Cmd+Shift+X"),
             params: L,
-            enabled: crate::filters::has_filterable_layer,
+            enabled: |s| liquify_targets(s, &json!({})).map(|_| ()).map_err(|e| e.to_string()),
             journal: true,
             run: liquify,
         },

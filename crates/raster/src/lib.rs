@@ -10,9 +10,11 @@
 mod interrupt;
 pub use interrupt::{Cancelled, Interrupt};
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, OnceLock};
 
 use photocraft_color::{ColorMode, PixelFormat, SampleType, read_sample, write_sample};
 use photocraft_geom::{Rect, TILE_SIZE, TileCoord};
@@ -21,12 +23,14 @@ use photocraft_geom::{Rect, TILE_SIZE, TileCoord};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocationError {
     SizeOverflow,
+    TileRead,
     NotEnoughMemory { bytes: usize },
 }
 
 impl fmt::Display for AllocationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TileRead => f.write_str("could not read tile pixels from the GPU"),
             Self::SizeOverflow => f.write_str("requested surface allocation is too large"),
             Self::NotEnoughMemory { bytes } => write!(f, "not enough memory to allocate {} bytes", bytes),
         }
@@ -35,13 +39,135 @@ impl fmt::Display for AllocationError {
 
 impl std::error::Error for AllocationError {}
 
+/// Immutable external pixel storage. Implementations materialize encoded, tile-sized bytes only
+/// when a CPU reader needs them; their resources must never be mutated after publication.
+pub trait TileBackend: Any + fmt::Debug + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn read_bytes(&self) -> Result<Box<[u8]>, TileReadError>;
+    /// Device allocations retained by this immutable snapshot, excluding its CPU cache.
+    fn storage_byte_len(&self) -> usize {
+        0
+    }
+    /// Keep one edited native colour channel and restore every other channel, including alpha,
+    /// from the previous tile. Missing tiles use their surface's native default pixel.
+    /// `None` means this backend cannot perform the operation without CPU materialization.
+    #[allow(clippy::too_many_arguments)]
+    fn restrict_color_channel(
+        &self,
+        _format: PixelFormat,
+        _before: Option<&Tile>,
+        _after: Option<&Tile>,
+        _before_default: &[f32],
+        _after_default: &[f32],
+        _channel: usize,
+    ) -> Option<Result<Arc<Tile>, TileReadError>> {
+        None
+    }
+    /// Exact bounds against one encoded default pixel, without materializing the tile.
+    /// `None` leaves the query to the CPU storage path.
+    #[allow(clippy::type_complexity)]
+    fn read_content_bounds(&self, _dp: &[u8]) -> Option<Result<Option<(u16, u16, u16, u16)>, TileReadError>> {
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TileReadError(pub String);
+
+impl fmt::Display for TileReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for TileReadError {}
+
+#[derive(Debug)]
+struct TileData {
+    cpu: OnceLock<Box<[u8]>>,
+    backend: Option<Arc<dyn TileBackend>>,
+    len: usize,
+}
+
+impl From<Box<[u8]>> for TileData {
+    fn from(bytes: Box<[u8]>) -> Self {
+        Self { len: bytes.len(), cpu: OnceLock::from(bytes), backend: None }
+    }
+}
+
+impl TileData {
+    fn try_bytes(&self) -> Result<&[u8], TileReadError> {
+        if self.cpu.get().is_none() {
+            let backend = self.backend.as_ref().ok_or_else(|| TileReadError("tile has no pixel storage".into()))?;
+            let bytes = backend.read_bytes()?;
+            if bytes.len() != self.len {
+                return Err(TileReadError("tile backend returned an invalid byte count".into()));
+            }
+            let _ = self.cpu.set(bytes);
+        }
+        self.cpu.get().map(|v| v.as_ref()).ok_or_else(|| TileReadError("tile materialization failed".into()))
+    }
+}
+
+impl Deref for TileData {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // Existing CPU pixel APIs are infallible. Propagate a failed backend read instead of
+        // silently replacing document pixels; callers that handle errors use Tile::try_bytes.
+        self.try_bytes().unwrap_or_else(|e| std::panic::resume_unwind(Box::new(e)))
+    }
+}
+impl DerefMut for TileData {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        let _ = self.try_bytes().unwrap_or_else(|e| std::panic::resume_unwind(Box::new(e)));
+        self.backend = None;
+        match self.cpu.get_mut() {
+            Some(bytes) => bytes,
+            None => std::panic::resume_unwind(Box::new(TileReadError("tile materialization failed".into()))),
+        }
+    }
+}
+impl Clone for TileData {
+    fn clone(&self) -> Self {
+        match &self.backend {
+            Some(backend) => Self { cpu: self.cpu.get().cloned().map_or_else(OnceLock::new, OnceLock::from), backend: Some(backend.clone()), len: self.len },
+            None => Box::<[u8]>::from(self.deref()).into(),
+        }
+    }
+}
+impl PartialEq for TileData {
+    fn eq(&self, other: &Self) -> bool {
+        if let (Some(a), Some(b)) = (&self.backend, &other.backend)
+            && Arc::ptr_eq(a, b)
+        {
+            return true;
+        }
+        self.deref() == other.deref()
+    }
+}
+impl Eq for TileData {}
+
 /// Pixel storage for one tile: `TILE_SIZE² × bytes_per_pixel`, row-major, interleaved channels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tile {
-    data: Box<[u8]>,
+    data: TileData,
 }
 
 impl Tile {
+    /// Publish an immutable backend snapshot in this tile's encoded format.
+    pub fn from_backend(format: PixelFormat, backend: Arc<dyn TileBackend>) -> Self {
+        Self { data: TileData { cpu: OnceLock::new(), backend: Some(backend), len: (TILE_SIZE * TILE_SIZE) as usize * format.bytes_per_pixel() } }
+    }
+
+    pub fn backend(&self) -> Option<&Arc<dyn TileBackend>> {
+        self.data.backend.as_ref()
+    }
+    pub fn try_bytes(&self) -> Result<&[u8], TileReadError> {
+        self.data.try_bytes()
+    }
+    pub fn is_cpu_materialized(&self) -> bool {
+        self.data.cpu.get().is_some()
+    }
+
     fn try_filled(format: &PixelFormat, pixel: &[u8]) -> Result<Self, AllocationError> {
         let n = (TILE_SIZE * TILE_SIZE) as usize;
         let bytes = n.checked_mul(format.bytes_per_pixel()).ok_or(AllocationError::SizeOverflow)?;
@@ -53,16 +179,17 @@ impl Tile {
                 px.copy_from_slice(pixel);
             }
         }
-        Ok(Tile { data: data.into_boxed_slice() })
+        Ok(Tile { data: data.into_boxed_slice().into() })
     }
 
     /// Clone this tile's pixel buffer with a fallible reservation.
     pub fn try_clone(&self) -> Result<Self, AllocationError> {
-        let bytes = self.data.len();
+        let source = self.try_bytes().map_err(|_| AllocationError::TileRead)?;
+        let bytes = source.len();
         let mut data = Vec::new();
         data.try_reserve_exact(bytes).map_err(|_| AllocationError::NotEnoughMemory { bytes })?;
-        data.extend_from_slice(&self.data);
-        Ok(Tile { data: data.into_boxed_slice() })
+        data.extend_from_slice(source);
+        Ok(Tile { data: data.into_boxed_slice().into() })
     }
 
     fn filled(format: &PixelFormat, pixel: &[u8]) -> Self {
@@ -79,26 +206,46 @@ impl Tile {
                 out.copy_from_slice(&row);
             }
         }
-        Tile { data: data.into_boxed_slice() }
+        Tile { data: data.into_boxed_slice().into() }
     }
     pub fn bytes(&self) -> &[u8] {
         &self.data
     }
+    /// Encoded storage size without materializing device-owned pixels.
+    pub fn byte_len(&self) -> usize {
+        self.data.len
+    }
+    /// Retained allocation budget, including space for a CPU readback cache.
+    pub fn storage_byte_len(&self) -> usize {
+        self.data.len.saturating_add(self.data.backend.as_ref().map_or(0, |backend| backend.storage_byte_len()))
+    }
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         &mut self.data
+    }
+    pub fn try_bytes_mut(&mut self) -> Result<&mut [u8], TileReadError> {
+        self.data.try_bytes()?;
+        self.data.backend = None;
+        self.data.cpu.get_mut().map(|v| v.as_mut()).ok_or_else(|| TileReadError("tile materialization failed".into()))
     }
 
     /// Tile-local half-open bounds `(x0, y0, x1, y1)` of the pixels that differ from the encoded
     /// pixel `dp` (one pixel of the tile's format), or `None` when every pixel equals it (or `dp`
     /// is empty).
     pub fn content_bounds(&self, dp: &[u8]) -> Option<(u16, u16, u16, u16)> {
+        self.try_content_bounds(dp).unwrap_or(Some((0, 0, TILE_SIZE as u16, TILE_SIZE as u16)))
+    }
+    #[allow(clippy::type_complexity)]
+    pub fn try_content_bounds(&self, dp: &[u8]) -> Result<Option<(u16, u16, u16, u16)>, TileReadError> {
         let bpp = dp.len();
         if bpp == 0 {
-            return None;
+            return Ok(None);
+        }
+        if let Some(result) = self.data.backend.as_ref().and_then(|backend| backend.read_content_bounds(dp)) {
+            return result;
         }
         let ts = TILE_SIZE as usize;
         let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
-        for (y, row) in self.data.chunks_exact(ts * bpp).enumerate() {
+        for (y, row) in self.try_bytes()?.chunks_exact(ts * bpp).enumerate() {
             let Some(first) = row.chunks_exact(bpp).position(|px| px != dp) else { continue };
             let last = ts - 1 - row.chunks_exact(bpp).rev().position(|px| px != dp).unwrap_or(0);
             x0 = x0.min(first);
@@ -106,7 +253,7 @@ impl Tile {
             y0 = y0.min(y);
             y1 = y + 1;
         }
-        (x0 != usize::MAX).then_some((x0 as u16, y0 as u16, x1 as u16, y1 as u16))
+        Ok((x0 != usize::MAX).then_some((x0 as u16, y0 as u16, x1 as u16, y1 as u16)))
     }
 }
 
@@ -175,6 +322,7 @@ impl Surface {
         let mut out = Vec::new();
         out.try_reserve_exact(len).map_err(|_| AllocationError::NotEnoughMemory { bytes })?;
         out.resize(len, 0.0);
+        self.try_materialize_region(r)?;
         self.read_region_into(r, &mut out);
         Ok(out)
     }
@@ -195,7 +343,7 @@ impl Surface {
                 match self.tiles.get(&tc) {
                     Some(t) => {
                         let src = (((y - tc.ty * TILE_SIZE) as usize) * TILE_SIZE as usize + (tr.x0 - tc.tx * TILE_SIZE) as usize) * bpp;
-                        out[dst..dst + span].copy_from_slice(&t.data[src..src + span]);
+                        out[dst..dst + span].copy_from_slice(&t.try_bytes().map_err(|_| AllocationError::TileRead)?[src..src + span]);
                     }
                     None => {
                         for px in out[dst..dst + span].chunks_exact_mut(bpp) {
@@ -235,6 +383,29 @@ impl Surface {
     pub fn tile(&self, c: TileCoord) -> Option<&Arc<Tile>> {
         self.tiles.get(&c)
     }
+    /// Replace a tile without reading its pixels, preserving shared undo snapshots.
+    /// The caller must use a tile encoded in this surface's format.
+    pub fn set_tile(&mut self, c: TileCoord, tile: Arc<Tile>) {
+        self.tiles.insert(c, tile);
+    }
+
+    /// Restore complete shared tiles without materializing external pixel storage.
+    pub fn restore_tiles_from(&mut self, pre: &Surface, rect: Rect) -> Rect {
+        let mut restored = Rect::EMPTY;
+        for coord in rect.tiles() {
+            match pre.tile(coord) {
+                Some(tile) => {
+                    self.tiles.insert(coord, tile.clone());
+                }
+                None => {
+                    self.tiles.remove(&coord);
+                }
+            }
+            restored = restored.union(&coord.rect());
+        }
+        restored
+    }
+
     pub fn default_pixel(&self) -> Vec<f32> {
         decode_pixel(&self.format, &self.default_pixel)
     }
@@ -253,12 +424,14 @@ impl Surface {
         if !self.tiles.contains_key(&c) {
             let tile = Arc::new(Tile::try_filled(&self.format, &self.default_pixel)?);
             self.tiles.insert(c, tile);
-        } else if self.tiles.get(&c).is_some_and(|t| Arc::strong_count(t) > 1) {
+        } else if self.tiles.get(&c).is_some_and(|t| Arc::strong_count(t) > 1 || Arc::weak_count(t) > 0) {
             let original = self.tiles.get(&c).ok_or(AllocationError::SizeOverflow)?;
             let tile = Arc::new(original.try_clone()?);
             self.tiles.insert(c, tile);
         }
-        self.tiles.get_mut(&c).and_then(Arc::get_mut).ok_or(AllocationError::SizeOverflow)
+        let tile = self.tiles.get_mut(&c).and_then(Arc::get_mut).ok_or(AllocationError::SizeOverflow)?;
+        tile.try_bytes_mut().map_err(|_| AllocationError::TileRead)?;
+        Ok(tile)
     }
 
     /// Writes a region using fallible pixel-tile allocations. Callers that need transactional
@@ -270,6 +443,7 @@ impl Surface {
         if data.len() != expected {
             return Err(AllocationError::SizeOverflow);
         }
+        self.try_materialize_region(r)?;
         for tc in r.tiles() {
             let tr = tc.rect().intersect(&r);
             let t = self.try_tile_mut(tc)?;
@@ -285,6 +459,22 @@ impl Surface {
         Ok(())
     }
 
+    /// Resolve fallible backend storage before entering legacy CPU pixel operations.
+    pub fn try_materialize_region(&self, r: Rect) -> Result<(), AllocationError> {
+        for coord in r.tiles() {
+            if let Some(tile) = self.tiles.get(&coord) {
+                tile.try_bytes().map_err(|_| AllocationError::TileRead)?;
+            }
+        }
+        Ok(())
+    }
+    pub fn try_materialize(&self) -> Result<(), TileReadError> {
+        for tile in self.tiles.values() {
+            tile.try_bytes()?;
+        }
+        Ok(())
+    }
+
     /// Coarse bounds: union of allocated tile rects.
     pub fn tile_bounds(&self) -> Rect {
         self.tiles.keys().fold(Rect::EMPTY, |r, c| r.union(&c.rect()))
@@ -292,8 +482,14 @@ impl Surface {
 
     /// Exact bounds of pixels that differ from the default pixel.
     pub fn content_bounds(&self) -> Rect {
+        self.content_bounds_impl(false).unwrap_or_else(|_| self.tile_bounds())
+    }
+    pub fn try_content_bounds(&self) -> Result<Rect, TileReadError> {
+        self.content_bounds_impl(true)
+    }
+    fn content_bounds_impl(&self, strict: bool) -> Result<Rect, TileReadError> {
         if self.tiles.is_empty() {
-            return Rect::EMPTY;
+            return Ok(Rect::EMPTY);
         }
         // Scan tiles from the outside of the tile grid inwards; a tile lying entirely inside the
         // bounds found so far cannot extend them and is skipped (so a full-canvas selection scans
@@ -310,18 +506,18 @@ impl Surface {
             if !out.is_empty() && out.contains_rect(&origin) {
                 continue;
             }
-            if let Some((x0, y0, x1, y1)) = t.content_bounds(&self.default_pixel) {
+            let bounds = if strict { t.try_content_bounds(&self.default_pixel)? } else { t.content_bounds(&self.default_pixel) };
+            if let Some((x0, y0, x1, y1)) = bounds {
                 out = out.union(&Rect::new(x0.into(), y0.into(), x1.into(), y1.into()).translate(origin.x0, origin.y0));
             }
         }
-        out
+        Ok(out)
     }
 
     /// Drop tiles that are entirely the default pixel.
     pub fn prune(&mut self) {
         let dp = self.default_pixel.clone();
-        let bpp = dp.len();
-        self.tiles.retain(|_, t| t.data.chunks_exact(bpp).any(|px| px != &*dp));
+        self.tiles.retain(|_, t| t.content_bounds(&dp).is_some());
     }
 
     #[inline]
@@ -803,7 +999,7 @@ impl Surface {
                 continue;
             }
 
-            let mut tile = Tile { data: vec![0u8; (TILE_SIZE * TILE_SIZE) as usize * bpp].into_boxed_slice() };
+            let mut tile = Tile { data: vec![0u8; (TILE_SIZE * TILE_SIZE) as usize * bpp].into_boxed_slice().into() };
             let (tx0, ty0) = (i64::from(dc.tx) * i64::from(TILE_SIZE), i64::from(dc.ty) * i64::from(TILE_SIZE));
             let row_len = TILE_SIZE as usize * bpp;
             // Per stored row: copy the source span that falls inside the content in as few
@@ -969,11 +1165,12 @@ impl Surface {
                 out.tiles.insert(*c, converted.clone());
                 continue;
             }
+            let bytes = t.try_bytes().map_err(|_| AllocationError::TileRead)?;
             let dst = out.try_tile_mut(*c)?;
             let px_count = (TILE_SIZE * TILE_SIZE) as usize;
             for i in 0..px_count {
                 for (k, v) in src.iter_mut().enumerate() {
-                    *v = read_sample(&t.data, self.format.sample, i * from_n + k);
+                    *v = read_sample(bytes, self.format.sample, i * from_n + k);
                 }
                 let px = convert_pixel(&self.format, &to, &src);
                 for (k, v) in px.iter().enumerate() {
@@ -1102,6 +1299,95 @@ pub fn is_hdr(sample: SampleType) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backend_read_failures_reach_fallible_cpu_boundaries_without_dropping_tiles() {
+        #[derive(Debug)]
+        struct Unreadable;
+        impl TileBackend for Unreadable {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn read_bytes(&self) -> Result<Box<[u8]>, TileReadError> {
+                Err(TileReadError("device lost".into()))
+            }
+            #[allow(clippy::type_complexity)]
+            fn read_content_bounds(&self, _: &[u8]) -> Option<Result<Option<(u16, u16, u16, u16)>, TileReadError>> {
+                Some(Err(TileReadError("device lost".into())))
+            }
+        }
+        let tile = Arc::new(Tile::from_backend(PixelFormat::RGBA8, Arc::new(Unreadable)));
+        assert!(matches!(tile.try_clone(), Err(AllocationError::TileRead)));
+        assert!(tile.try_content_bounds(&[0; 4]).is_err());
+        assert_eq!(tile.content_bounds(&[0; 4]), Some((0, 0, TILE_SIZE as u16, TILE_SIZE as u16)));
+        let mut surface = Surface::new(PixelFormat::RGBA8);
+        let coord = TileCoord::new(0, 0);
+        surface.set_tile(coord, tile.clone());
+        let area = Rect::new(0, 0, 1, 1);
+        assert_eq!(surface.try_read_region(area), Err(AllocationError::TileRead));
+        assert_eq!(surface.try_to_interleaved(area), Err(AllocationError::TileRead));
+        assert!(matches!(surface.try_tile_mut(coord), Err(AllocationError::TileRead)));
+        assert_eq!(surface.try_write_region(area, &[1.0; 4]), Err(AllocationError::TileRead));
+        assert!(surface.try_content_bounds().is_err());
+        assert!(matches!(surface.try_convert(PixelFormat::RGBA16), Err(AllocationError::TileRead)));
+        assert_eq!(surface.content_bounds(), coord.rect());
+        surface.prune();
+        assert!(surface.tile(coord).is_some_and(|held| Arc::ptr_eq(held, &tile)));
+        assert!(!tile.is_cpu_materialized());
+    }
+
+    #[test]
+    fn fallible_writes_copy_tiles_pinned_by_weak_caches() {
+        let mut surface = Surface::new(PixelFormat::RGBA8);
+        let coord = TileCoord::new(1, 0);
+        let tile = surface.solid_tile(&[0.25, 0.5, 0.75, 1.0]);
+        let cached = Arc::downgrade(&tile);
+        surface.set_tile(coord, tile);
+
+        let area = Rect::new(255, 0, 257, 1);
+        assert_eq!(surface.try_write_region(area, &[1.0; 8]), Ok(()));
+        assert_eq!(surface.pixel(255, 0), vec![1.0; 4]);
+        assert_eq!(surface.pixel(256, 0), vec![1.0; 4]);
+        assert_eq!(surface.pixel(257, 0), vec![64.0 / 255.0, 128.0 / 255.0, 191.0 / 255.0, 1.0]);
+        assert!(cached.upgrade().is_none());
+    }
+
+    #[test]
+    fn backend_tiles_stay_lazy_across_snapshots_and_restore() {
+        #[derive(Debug)]
+        struct Backend(Arc<std::sync::atomic::AtomicUsize>);
+        impl TileBackend for Backend {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn storage_byte_len(&self) -> usize {
+                4096
+            }
+            fn read_bytes(&self) -> Result<Box<[u8]>, TileReadError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(vec![128u8; (TILE_SIZE * TILE_SIZE) as usize * 4].into_boxed_slice())
+            }
+        }
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let coord = TileCoord::new(0, 0);
+        let mut surface = Surface::new(PixelFormat::RGBA8);
+        surface.set_tile(coord, Arc::new(Tile::from_backend(PixelFormat::RGBA8, Arc::new(Backend(reads.clone())))));
+        let snapshot = surface.clone();
+        let tile = snapshot.tile(coord).unwrap();
+        assert_eq!(tile.storage_byte_len(), tile.byte_len() + 4096);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        surface.tile_mut(coord).bytes_mut()[0] = 255;
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(surface.tile(coord).map(|t| t.bytes()[0]), Some(255));
+        assert!(snapshot.tile(coord).is_some_and(|t| !t.is_cpu_materialized()));
+        surface.restore_tiles_from(&snapshot, coord.rect());
+        assert!(surface.tile(coord).is_some_and(|t| t.backend().is_some()));
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(surface.tile(coord).map(|t| t.bytes()[0]), Some(128));
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(surface.tile(coord).map(|t| t.bytes()[0]), Some(128));
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
     /// Distinct tile allocations in `s`.
     fn distinct_tiles(s: &Surface) -> usize {
         let mut seen: Vec<*const Tile> = s.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();

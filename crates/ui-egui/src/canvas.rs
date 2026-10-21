@@ -683,33 +683,54 @@ fn eyedropper_ring(app: &mut PhotocraftApp, painter: &egui::Painter, xf: &ViewXf
     Some(egui::CursorIcon::None)
 }
 
-fn begin_live_stroke(app: &PhotocraftApp) -> Option<LiveStroke> {
+fn begin_live_stroke(app: &PhotocraftApp) -> photocraft_engine::Result<Option<LiveStroke>> {
     static STROKES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let st = app.session.active()?;
-    let d = app.drag.as_ref()?;
+    let (Some(st), Some(d)) = (app.session.active(), app.drag.as_ref()) else {
+        return Ok(None);
+    };
     let stroke = if d.tool == Tool::ColorReplacement {
         // The params `retouch_ui::finish_stroke` commits.
         let mut p = crate::retouch_ui::color_replacement_params(app);
         p["points"] = json!(d.points);
-        EngineStroke::Dab(photocraft_engine::brush_cmds::live_color_replacement(&app.session, &p).ok()?)
+        EngineStroke::Dab(photocraft_engine::brush_cmds::live_color_replacement(&app.session, &p)?)
     } else if let Some((cmd, mut p)) = crate::retouch_ui::dab_params(app, d.tool) {
         // The params `retouch_ui::finish_stroke` commits; Sample All Layers isn't previewed.
         p["points"] = json!(d.points);
         p["target"] = paint_target(app);
-        EngineStroke::Dab(photocraft_engine::retouch_cmds::LiveDab::begin(&app.session, cmd, &p).ok()?)
+        if p.get("sampleAllLayers").and_then(serde_json::Value::as_bool) == Some(true) && p.get("target").and_then(serde_json::Value::as_str) == Some("pixels")
+        {
+            return Ok(None);
+        }
+        EngineStroke::Dab(photocraft_engine::retouch_cmds::LiveDab::begin(&app.session, cmd, &p)?)
     } else if let Some(cmd) = live_retouch_command(d.tool) {
         // The params `retouch_ui::finish_stroke` commits.
-        let mut p = if d.tool == Tool::HistoryBrush { json!({}) } else { crate::retouch_ui::clone_params(app)? };
+        let mut p = if d.tool == Tool::HistoryBrush {
+            json!({})
+        } else {
+            let Some(params) = crate::retouch_ui::clone_params(app) else {
+                return Ok(None);
+            };
+            params
+        };
         p["points"] = json!(d.points);
         p["target"] = paint_target(app);
-        EngineStroke::Retouch(photocraft_engine::retouch_cmds::LiveRetouch::begin(&app.session, cmd, &p).ok()?)
+        EngineStroke::Retouch(photocraft_engine::retouch_cmds::LiveRetouch::begin(&app.session, cmd, &p)?)
     } else {
         let p = stroke_params(app, d, &app.stylus.stroke_points(&d.points));
-        EngineStroke::Brush(Box::new(photocraft_engine::brush_cmds::LiveStroke::begin_with(&app.session, stroke_command(app, d.tool), &p).ok()?))
+        EngineStroke::Brush(Box::new(photocraft_engine::brush_cmds::LiveStroke::begin_with(&app.session, stroke_command(app, d.tool), &p)?))
     };
     let n = STROKES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0xff_ffff;
     let damage = vec![stroke.bounds()];
-    Some(LiveStroke { stroke, doc: st.doc.id, revision: st.revision, key: (1 << 44) | (n << 20), damage, fed: d.points.len() })
+    Ok(Some(LiveStroke { stroke, doc: st.doc.id, revision: st.revision, key: (1 << 44) | (n << 20), damage, fed: d.points.len() }))
+}
+
+fn abort_live_stroke(app: &mut PhotocraftApp, error: String) {
+    app.ui.status = error;
+    app.ui.status_error = true;
+    app.live_stroke = None;
+    app.drag = None;
+    app.trail = None;
+    app.session.clear_live_stroke();
 }
 
 /// Render the drag points the live stroke hasn't seen yet, with the pen pressure, tilt and
@@ -741,7 +762,7 @@ fn feed_live_stroke(app: &mut PhotocraftApp) {
     let started = crate::gpu_canvas::now_ms();
     match l.stroke.push(&pts) {
         Ok(r) => l.damage.push(r),
-        Err(_) => app.live_stroke = None,
+        Err(error) => abort_live_stroke(app, error.to_string()),
     }
     app.stroke_trace.stroke(crate::gpu_canvas::now_ms() - started);
 }
@@ -757,15 +778,18 @@ pub(crate) fn live_retouch_points(app: &PhotocraftApp) -> Option<Vec<photocraft_
 
 /// Offer the Clone Stamp's or History Brush's live stroke, with the drag points it hasn't rendered
 /// yet, to the command `retouch_ui::finish_stroke` commits, which then takes its pixels.
-fn offer_live_retouch(app: &mut PhotocraftApp, d: &Drag) {
+fn offer_live_retouch(app: &mut PhotocraftApp, d: &Drag) -> photocraft_engine::Result<()> {
     if !matches!(d.tool, Tool::CloneStamp | Tool::HistoryBrush) {
-        return;
+        return Ok(());
     }
-    let Some(LiveStroke { stroke: EngineStroke::Retouch(mut live), fed, .. }) = app.live_stroke.take() else { return };
+    let Some(LiveStroke { stroke: EngineStroke::Retouch(mut live), fed, .. }) = app.live_stroke.take() else {
+        return Ok(());
+    };
     let rest: Vec<_> = d.points.get(fed..).unwrap_or_default().iter().map(|q| photocraft_engine::paint::StrokePoint::new(q[0], q[1], q[2] as f32)).collect();
-    if rest.is_empty() || live.push(&rest).is_ok() {
-        let _ = app.session.offer_live_retouch(live);
+    if !rest.is_empty() {
+        live.push(&rest)?;
     }
+    app.session.offer_live_retouch(live)
 }
 
 /// A pen tap (a drag still at its one press point when released) paints its dab at the highest
@@ -1169,9 +1193,17 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> (std::sync::Ar
         return shown;
     }
     crate::transform_tool::follow_edits(app);
-    let st = &app.session.documents()[idx];
     if let Some(l) = live_stroke(app, idx) {
         return (l.stroke.doc().clone(), l.display_key());
+    }
+    if let Some(shown) = crate::transform_tool::gpu_display_doc(app, idx) {
+        return shown;
+    }
+    let st = &app.session.documents()[idx];
+    if app.ui.transform.is_none()
+        && let Some(gpu) = &app.gpu
+    {
+        gpu.clear_source_overrides(st.doc.id.0);
     }
     if let (Some(t), Some(pv)) = (&app.ui.transform, &app.transform_preview)
         && app.session.active_index() == Some(idx)
@@ -1580,6 +1612,7 @@ pub(crate) fn effect_reach(layers: &[photocraft_doc::Layer]) -> i32 {
 /// unchanged lower-stack composites can be reused by the compositor inside that region.
 /// Returns false if there is no GPU canvas.
 fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible: DRect) -> bool {
+    crate::transform_tool::set_preview_region(app, idx, visible);
     let Some(gpu) = app.gpu.clone() else { return false };
     let Some((revision, last_damage, id)) = app
         .session
@@ -2083,6 +2116,7 @@ pub(crate) fn retain_gpu_documents(app: &mut PhotocraftApp) {
         // retaining only document ids freed the previews every frame (blank canvas while previewing).
         let mut live: Vec<u64> = app.session.documents().iter().flat_map(|st| [st.doc.id.0, st.doc.id.0 ^ (1u64 << 61), st.doc.id.0 ^ (1u64 << 62)]).collect();
         live.extend(crate::adjust_preview::gpu_keys(app));
+        live.extend(crate::liquify_ui::gpu_key(app));
         gpu.retain(&live);
     }
     crate::background_redraw::retain(app);
@@ -3070,7 +3104,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // Painting must consume this frame's input before uploading its image: painting first
     // displayed the previous stroke step, including a blank frame at pointer-down.
     let crop_camera = primary && crate::crop_mode::moves_image(app);
-    let paint_after_input = crop_camera || (primary && strokes_live(app.ui.tool));
+    let paint_after_input = crop_camera || (primary && (strokes_live(app.ui.tool) || app.active_tool() == Tool::Move || app.ui.transform.is_some()));
     let paint_canvas = |app: &mut PhotocraftApp, ui: &egui::Ui, view: &View, xf: ViewXform| {
         let point_zoom = view.zoom / ppp;
         let drop_shadow = border == photocraft_engine::prefs::CanvasBorder::DropShadow;
@@ -5033,7 +5067,9 @@ fn draw_drag_preview(app: &mut PhotocraftApp, painter: &egui::Painter, xf: &View
             let trail = app.trail.get_or_insert_with(|| crate::stroke_trail::Trail::new(size));
             if t == Tool::SpotHealing {
                 // What the heal covers, dab by dab: soft edges, pressure and shape dynamics (#2364).
-                trail.feed_dabs(&d.points, || photocraft_engine::retouch_cmds::stroke_brush(&app.session.tools.brush, &json!({})));
+                if let Err(error) = trail.feed_dabs(&d.points, || photocraft_engine::retouch_cmds::stroke_brush(&app.session.tools.brush, &json!({}))) {
+                    app.ui.status = error;
+                }
             } else {
                 trail.feed(&d.points, app.session.tools.brush.size);
             }
@@ -5374,6 +5410,11 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     // Free Transform picks the handle under the press where the user clicked: the snapped press
     // can land outside the corner's grab area and turn a corner drag into a move of the whole box.
     let transform_ev = if matches!(raw, ToolEvent::Down { .. }) { raw } else { ev };
+    // Move sessions share Free Transform's immutable GPU source, but a press anywhere
+    // translates it rather than grabbing transform handles.
+    if crate::move_ui::cached_pointer(app, ev, mods) {
+        return;
+    }
     if crate::transform_tool::pointer(app, transform_ev, mods) {
         return;
     }
@@ -5495,7 +5536,10 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             }
             // Auto-Select (or ⌘-click while it is off) picks the layer under the pointer first
             // (not when the selected pixels move: those are the active layer's).
-            if !crate::move_ui::moves_selected_pixels_with(app, tool) && app.ui.tool_options.move_auto_select != mods.command {
+            if app.ui.tool_options.move_target != "all"
+                && !crate::move_ui::moves_selected_pixels_with(app, tool)
+                && app.ui.tool_options.move_auto_select != mods.command
+            {
                 let target = app.ui.tool_options.move_target.clone();
                 let mode = if mods.shift { "add" } else { "replace" };
                 let before = app.session.active().map(|st| st.selected_layers());
@@ -5536,16 +5580,17 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                 app.move_blocked = true;
                 return;
             }
-            // With a selection: cut the selected pixels (⌥ copies them) and drag them as a floating
-            // piece, from anywhere, as a marquee ⌘-drag does.
-            if crate::move_ui::moves_selected_pixels_with(app, tool) {
-                if crate::move_ui::float_selected(app, mods.alt, 0.0, 0.0) {
-                    let mut d = Drag::new(tool, [x, y], vec![[x, y, pressure as f64]], mods, false);
-                    d.sel_move = Some(true);
-                    app.drag = Some(d);
-                }
+            if app.ui.tool_options.move_target == "layer"
+                && let Some(why) = hidden_target(app, tool)
+            {
+                app.ui.status = why.into();
+                app.ui.status_error = true;
                 return;
             }
+            // Raster selections are lifted once by the cached session on first movement.
+            // The committed document stays unchanged until Enter or a tool switch.
+            app.drag = Some(Drag::new(tool, [x, y], vec![[x, y, pressure as f64]], mods, false));
+            return;
         }
         ToolEvent::Move { x, y, .. } => {
             if let Some(d) = app.guide_drag.as_mut().filter(|d| d.index.is_some()) {
@@ -5706,7 +5751,14 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             if from.is_some() {
                 app.stylus.record_point();
             }
-            app.live_stroke = if strokes_live(tool) { begin_live_stroke(app) } else { None };
+            if strokes_live(tool) {
+                match begin_live_stroke(app) {
+                    Ok(live) => app.live_stroke = live,
+                    Err(error) => abort_live_stroke(app, error.to_string()),
+                }
+            } else {
+                app.live_stroke = None;
+            }
         }
         ToolEvent::Move { x, y, pressure } => {
             // Polygonal Lasso: ⌥ held while the button is down draws freehand into the polygon;
@@ -5951,18 +6003,18 @@ fn commit_brush_stroke(app: &mut PhotocraftApp, d: &Drag) {
     if !rest.is_empty() {
         match l.stroke.push(&rest) {
             Ok(r) => l.damage.push(r),
-            // The live stroke can't show these points: the commit renders the stroke itself.
-            Err(_) => {
-                let _ = app.run(stroke_command(app, d.tool), p);
+            Err(error) => {
+                abort_live_stroke(app, error.to_string());
                 return;
             }
         }
     }
     let LiveStroke { stroke, doc, key, damage, .. } = l;
     if let EngineStroke::Brush(stroke) = stroke
-        && app.session.offer_live_stroke(*stroke).is_err()
+        && let Err(error) = app.session.offer_live_stroke(*stroke)
     {
-        app.session.clear_live_stroke();
+        abort_live_stroke(app, error.to_string());
+        return;
     }
     let started = crate::gpu_canvas::now_ms();
     let result = app.run(stroke_command(app, d.tool), p);
@@ -6010,7 +6062,10 @@ pub(crate) fn finish_gesture(app: &mut PhotocraftApp, d: Drag) {
     }
     // A live Clone Stamp preview ends here; the commit below replaces it (the Clone Stamp's and
     // History Brush's with the pixels it already drew).
-    offer_live_retouch(app, &d);
+    if let Err(error) = offer_live_retouch(app, &d) {
+        abort_live_stroke(app, error.to_string());
+        return;
+    }
     if live_retouch_command(d.tool).is_some() || crate::retouch_ui::dab_params(app, d.tool).is_some() || d.tool == Tool::ColorReplacement {
         app.live_stroke = None;
     }
@@ -8580,6 +8635,7 @@ mod transform_controls_tests {
         app.run("select.rect", json!({"x": 100, "y": 100, "width": 100, "height": 60})).unwrap();
         app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
         app.ui.tool = Tool::Move;
+        app.ui.tool_options.move_target = "layer".into();
         app.ui.tool_options.move_show_transform = true;
         assert!(crate::move_ui::float_selected(&mut app, false, 100.0, 50.0));
         let xf =
@@ -8602,6 +8658,7 @@ mod transform_controls_tests {
         app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
         app.run("select.rect", json!({"x": 60, "y": 80, "width": 100, "height": 120})).unwrap();
         app.ui.tool = Tool::Move;
+        app.ui.tool_options.move_target = "layer".into();
         app.ui.tool_options.move_show_transform = true;
         let xf =
             ViewXform { rect: Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), zoom: 1.0, center: [200.0, 150.0], flip: false, rotation: 0.0, aspect: 1.0 };

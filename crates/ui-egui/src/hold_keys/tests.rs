@@ -512,9 +512,11 @@ fn cmd_drag_with_the_brush_is_the_move_tool() {
     let steps = h.state().session.active().unwrap().history.past_len();
     drag_with(&mut h, Modifiers::COMMAND, 130.0, 130.0, 170.0, 150.0);
     assert_eq!(held_tool(h.state(), &h.ctx), None);
+    assert_eq!(bounds(&h, id), Rect::new(100, 100, 160, 160), "release retains the cached source");
+    crate::transform_tool::commit(h.state_mut());
     let st = h.state().session.active().unwrap();
     assert_eq!(bounds(&h, id), Rect::new(140, 120, 200, 180), "the layer moved by (40, 20)");
-    assert_eq!(st.history.undo_label(), Some("Move"));
+    assert_eq!(st.history.undo_label(), Some("Free Transform"));
     assert_eq!(st.history.past_len(), steps + 1, "one step: no brush stroke");
     assert_eq!(h.state().ui.tool, Tool::Brush, "the Brush is back");
 }

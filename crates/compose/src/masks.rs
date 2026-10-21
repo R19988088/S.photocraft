@@ -135,7 +135,7 @@ fn cached_mask(c: &Mutex<Cache>, k: u64, build: impl FnOnce() -> (Surface, Optio
 }
 
 fn surface_bytes(surface: &Surface) -> usize {
-    surface.tiles().fold(surface.default_bytes().len(), |bytes, (_, tile)| bytes.saturating_add(tile.bytes().len()))
+    surface.tiles().fold(surface.default_bytes().len(), |bytes, (_, tile)| bytes.saturating_add(tile.storage_byte_len()))
 }
 
 fn entry_bytes(surface: &Surface, pixel_input: Option<&Surface>) -> usize {

@@ -11,9 +11,7 @@ use photocraft_geom::Rect;
 use photocraft_paint::mixer::{MixerSettings, apply_mixer_stroke};
 use photocraft_paint::replace::{Limits, ReplaceMode, ReplaceSettings, Sampling, apply_color_replacement, color_replacement_effect};
 use photocraft_paint::tile::PREVIEW_SIDE;
-use photocraft_paint::{
-    BrushPreset, BrushSettings, GrayTile, Pattern, PresetCaptures, StoredTile, Stroke, StrokePoint, StrokeRenderer, TipShape, render_stroke,
-};
+use photocraft_paint::{BrushPreset, BrushSettings, GrayTile, Pattern, PresetCaptures, StoredTile, Stroke, StrokePoint, StrokeRenderer, TipShape};
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
@@ -410,6 +408,21 @@ pub(crate) fn doc_cmyk_space(s: &Session) -> Option<std::sync::Arc<photocraft_co
     photocraft_color::convert::CmykSpace::for_profile(s.active().and_then(|d| d.doc.icc_profile.as_ref()))
 }
 
+fn render_checked(target: &mut Surface, brush: &BrushSettings, points: &[StrokePoint], selection: Option<&Surface>, lock: bool, zoom: f32) -> Result<Rect> {
+    let pre = target.clone();
+    let mut renderer = StrokeRenderer::on_surface(brush, &pre, zoom);
+    renderer.push(points);
+    renderer.finish();
+    if let Some(error) = renderer.error() {
+        return Err(EngineError::Other(error));
+    }
+    let damage = renderer.composite(&pre, target, selection, lock, true);
+    if let Some(error) = renderer.error() {
+        return Err(EngineError::Other(error));
+    }
+    Ok(damage)
+}
+
 /// Stroke with a resolved brush onto the target layer (pixels or mask).
 fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushSettings, pts: Vec<StrokePoint>, auto_erase: bool) -> Result<Value> {
     let bg = s.tools.background;
@@ -424,6 +437,7 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
     let dmg = photocraft_color::convert::with_cmyk_space(cmyk.as_ref(), || {
         s.edit(label, |doc, _| {
             if let Some(l) = live {
+                l.check_health()?;
                 let (surf, _) = crate::channel_cmds::target_surface(doc, id, p)?;
                 *surf = l.surface;
                 return Ok(l.bounds);
@@ -433,7 +447,7 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
             let mut brush = brush;
             erase_locked(&mut brush, lock, bg);
             if auto_erase {
-                apply_auto_erase(&mut brush, surf, pts.first(), fg, bg);
+                apply_auto_erase(&mut brush, surf, pts.first(), fg, bg)?;
             }
             let damage = if let Some(axis) = &symmetry {
                 let reflected = axis.reflected_passes(&pts);
@@ -448,16 +462,19 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
                     })
                     .collect();
                 if copies.is_empty() {
-                    render_stroke(surf, &brush, &pts, sel.as_ref(), lock, zoom)
+                    render_checked(surf, &brush, &pts, sel.as_ref(), lock, zoom)?
                 } else {
                     let pre = surf.clone();
                     let mut original = StrokeRenderer::on_surface(&brush, surf, zoom);
                     original.push(&pts);
                     original.finish();
-                    original.composite_union_many(&copies, &pre, surf, sel.as_ref(), lock)
+                    if let Some(error) = original.error().or_else(|| copies.iter().find_map(StrokeRenderer::error)) {
+                        return Err(EngineError::Other(error));
+                    }
+                    original.composite_union_many(&copies, &pre, surf, sel.as_ref(), lock).map_err(EngineError::Other)?
                 }
             } else {
-                render_stroke(surf, &brush, &pts, sel.as_ref(), lock, zoom)
+                render_checked(surf, &brush, &pts, sel.as_ref(), lock, zoom)?
             };
             Ok(damage)
         })
@@ -471,12 +488,15 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
 
 /// Pencil Auto Erase: a stroke that starts on a pixel of the foreground colour paints the
 /// background colour instead (Photoshop).
-fn apply_auto_erase(brush: &mut BrushSettings, surf: &Surface, start: Option<&StrokePoint>, fg: [f32; 4], bg: [f32; 4]) {
-    let Some(p0) = start else { return };
-    let c = surf.rgba(p0.x.floor() as i32, p0.y.floor() as i32);
+fn apply_auto_erase(brush: &mut BrushSettings, surf: &Surface, start: Option<&StrokePoint>, fg: [f32; 4], bg: [f32; 4]) -> Result<()> {
+    let Some(p0) = start else {
+        return Ok(());
+    };
+    let c = photocraft_paint::gpu_backend::sample_rgba(surf, p0.x.floor() as i32, p0.y.floor() as i32).map_err(EngineError::Other)?;
     if c[3] > 0.0 && (0..3).all(|i| (c[i] - fg[i]).abs() < 1.5 / 255.0) {
         brush.color = bg;
     }
+    Ok(())
 }
 
 /// The Pencil's brush: the session brush made aliased (every pixel fully painted or untouched,
@@ -577,6 +597,7 @@ pub struct LiveStroke {
     /// What the symmetric preview drew last, once a mirror differs from the stroke, and how many
     /// passes it merged (a mirror joining redraws every tile).
     union_live: Option<(photocraft_paint::UnionLive, usize)>,
+    color_restriction: Option<usize>,
     pre: Surface,
     sel: Option<Surface>,
     lock: bool,
@@ -606,9 +627,18 @@ pub struct LiveCommit {
     pub(crate) points: Vec<StrokePoint>,
     pub(crate) surface: Surface,
     pub(crate) bounds: Rect,
+    // Keep the device health shared by all brush passes until the command takes the pixels.
+    pub(crate) brush_renderers: Vec<StrokeRenderer>,
 }
 
 impl LiveCommit {
+    pub(crate) fn check_health(&self) -> Result<()> {
+        if let Some(error) = self.brush_renderers.iter().find_map(StrokeRenderer::error) {
+            return Err(EngineError::Other(error));
+        }
+        Ok(())
+    }
+
     /// The params that decide the pixels, without the points and seed (compared separately).
     fn settings(p: &Value) -> Value {
         let mut p = p.clone();
@@ -655,13 +685,14 @@ impl LiveStroke {
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, layer, p)?;
         erase_locked(&mut brush, lock, s.tools.background);
         if pencil && flag(p, "autoErase", false) {
-            apply_auto_erase(&mut brush, surf, pts.first(), fg, s.tools.background);
+            apply_auto_erase(&mut brush, surf, pts.first(), fg, s.tools.background)?;
         }
         let renderer = StrokeRenderer::on_surface(&brush, surf, zoom);
         let symmetry = s.active().and_then(|st| st.symmetry.clone());
         let mirrors: Vec<_> = (0..symmetry.as_ref().map_or(0, |s| s.mirror_count())).map(|_| StrokeRenderer::on_surface(&brush, surf, zoom)).collect();
         let mirror_distinct = vec![false; mirrors.len()];
         let pre = surf.clone();
+        let color_restriction = crate::channel_cmds::color_restriction(s, cmd, p);
         let mut live = Self {
             doc: std::sync::Arc::new(doc),
             seed,
@@ -671,6 +702,7 @@ impl LiveStroke {
             mirrors,
             mirror_distinct,
             union_live: None,
+            color_restriction,
             pre,
             sel,
             lock,
@@ -687,9 +719,18 @@ impl LiveStroke {
 
     /// The stroke as its commit would take it over (see [`LiveCommit`]).
     pub fn into_commit(mut self) -> Result<LiveCommit> {
+        if let Some(error) = self.renderer.error().or_else(|| self.mirrors.iter().find_map(StrokeRenderer::error)) {
+            return Err(EngineError::Other(error));
+        }
         let bounds = self.bounds();
         let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.layer, &self.params)?;
-        Ok(LiveCommit { cmd: self.cmd, base: self.base, params: self.params, seed: Some(self.seed), points: self.points, surface: surf.clone(), bounds })
+        let surface = surf.clone();
+        let mut brush_renderers = self.mirrors;
+        brush_renderers.push(self.renderer);
+        let commit =
+            LiveCommit { cmd: self.cmd, base: self.base, params: self.params, seed: Some(self.seed), points: self.points, surface, bounds, brush_renderers };
+        commit.check_health()?;
+        Ok(commit)
     }
 
     /// Everything the stroke has touched so far.
@@ -721,10 +762,16 @@ impl LiveStroke {
         let cmyk = self.cmyk.clone();
         photocraft_color::convert::with_cmyk_space(cmyk.as_ref(), || {
             self.renderer.push(pts);
+            if let Some(error) = self.renderer.error() {
+                return Err(EngineError::Other(error));
+            }
             if let Some(symmetry) = &self.symmetry {
                 for ((mirror, distinct), reflected) in self.mirrors.iter_mut().zip(&mut self.mirror_distinct).zip(symmetry.reflected_passes(pts)) {
                     *distinct |= crate::symmetry_cmds::SymmetryAxis::has_distinct_mirror(pts, &reflected);
                     mirror.push(&reflected);
+                    if let Some(error) = mirror.error() {
+                        return Err(EngineError::Other(error));
+                    }
                 }
             }
             let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.layer, &self.params)?;
@@ -738,7 +785,7 @@ impl LiveStroke {
                     None => {
                         // Leaving the single-pass preview: take its smoothing tail back first.
                         if !old.is_empty() {
-                            surf.write_region(old, &self.pre.read_region(old));
+                            self.renderer.restore_preview(&self.pre, surf, old);
                         }
                         (photocraft_paint::UnionLive::default(), true, old)
                     }
@@ -747,22 +794,37 @@ impl LiveStroke {
                     .chain(self.mirrors.iter_mut().zip(&self.mirror_distinct).filter(|(_, d)| **d).map(|(r, _)| r))
                     .collect();
                 dmg = dmg.union(&StrokeRenderer::composite_union_live(&mut renderers, &mut live, full, &self.pre, surf, self.sel.as_ref(), self.lock));
+                if let Some(error) = renderers.iter().find_map(|r| r.error()) {
+                    return Err(EngineError::Other(error));
+                }
                 self.tail = old.union(&live.bounds());
                 self.union_live = Some((live, passes));
+                if let Some(channel) = self.color_restriction {
+                    crate::channel_cmds::restrict_surface_to_color(&self.pre, surf, channel)?;
+                }
                 return Ok(dmg);
             }
             let mut dmg = Rect::EMPTY;
             let old = std::mem::replace(&mut self.tail, Rect::EMPTY);
             if !old.is_empty() {
                 // Back to the stroke without the previous tail.
-                surf.write_region(old, &self.pre.read_region(old));
-                self.renderer.mark_dirty(old);
-                dmg = old;
+                let restored = self.renderer.restore_preview(&self.pre, surf, old);
+                self.renderer.mark_dirty(restored);
+                dmg = restored;
             }
             dmg = dmg.union(&self.renderer.composite(&self.pre, surf, self.sel.as_ref(), self.lock, false));
             if let Some(mut tail) = self.renderer.tail_preview() {
                 self.tail = tail.composite(&self.pre, surf, self.sel.as_ref(), self.lock, false);
+                if let Some(error) = tail.error() {
+                    return Err(EngineError::Other(error));
+                }
                 dmg = dmg.union(&self.tail);
+            }
+            if let Some(error) = self.renderer.error() {
+                return Err(EngineError::Other(error));
+            }
+            if let Some(channel) = self.color_restriction {
+                crate::channel_cmds::restrict_surface_to_color(&self.pre, surf, channel)?;
             }
             Ok(dmg)
         })
@@ -803,10 +865,14 @@ fn mixer_brush(s: &mut Session, p: &Value) -> Result<Value> {
     let stroke = Stroke { brush, points: pts };
     let dmg = s.edit("Mixer Brush", |doc, _| {
         let sel = doc.selection.clone();
+        if let Some(selection) = &sel {
+            selection.try_materialize().map_err(|error| EngineError::Other(format!("could not read mixer selection: {error}")))?;
+        }
         let sample = if sample_all {
             let ds = photocraft_paint::dabs(&stroke);
             let ctx = photocraft_paint::BrushContext::new(&stroke.brush);
             let area = ds.iter().fold(Rect::EMPTY, |r, d| r.union(&ctx.dab_rect(d, false)));
+            crate::sample_cmds::materialize_render_sources(doc)?;
             let buf = photocraft_compose::render(doc, area);
             let mut surf = Surface::new(photocraft_color::PixelFormat::RGBA32F);
             let flat: Vec<f32> = buf.px.iter().flatten().copied().collect();
@@ -818,6 +884,7 @@ fn mixer_brush(s: &mut Session, p: &Value) -> Result<Value> {
             None
         };
         let (surf, lock) = crate::channel_cmds::target_surface(doc, id, p)?;
+        surf.try_materialize().map_err(|error| EngineError::Other(format!("could not read mixer pixels: {error}")))?;
         Ok(apply_mixer_stroke(surf, sample.as_ref(), &stroke, &m, &mut state, sel.as_ref(), lock))
     })?;
     if clean {
@@ -857,8 +924,12 @@ fn color_replacement(s: &mut Session, p: &Value) -> Result<Value> {
     let (stroke, rs, id) = color_replacement_setup(s, p)?;
     let dmg = s.edit("Color Replacement", |doc, _| {
         let sel = doc.selection.clone();
+        if let Some(selection) = &sel {
+            selection.try_materialize().map_err(|error| EngineError::Other(format!("could not read color replacement selection: {error}")))?;
+        }
         let lock = doc.effective_locks(id).transparency;
         let surf = paint_surface(doc, id, &json!({}))?;
+        surf.try_materialize().map_err(|error| EngineError::Other(format!("could not read color replacement pixels: {error}")))?;
         Ok(apply_color_replacement(surf, &stroke, &rs, sel.as_ref(), lock))
     })?;
     Ok(damage_json(s, dmg))
@@ -1013,7 +1084,8 @@ fn define_from_selection(s: &mut Session, p: &Value) -> Result<Value> {
     let sel = d.doc.selection.as_ref().ok_or_else(|| bad(cmd, "no selection"))?;
     let id = d.active_layer.ok_or(EngineError::Other("no active layer".into()))?;
     let surf = d.doc.layer(id).and_then(|l| l.surface()).ok_or_else(|| bad(cmd, "not a pixel layer"))?;
-    let area = sel.content_bounds().intersect(&d.doc.bounds());
+    let area =
+        sel.try_content_bounds().map_err(|error| EngineError::Other(format!("could not read brush selection bounds: {error}")))?.intersect(&d.doc.bounds());
     if area.is_empty() {
         return Err(bad(cmd, "the selection is empty"));
     }
@@ -1029,6 +1101,7 @@ fn define_from_selection(s: &mut Session, p: &Value) -> Result<Value> {
     // The selection mask is a second buffer of the same size; it must fail gracefully too
     // (review of #5469), so read it through the fallible allocator.
     let sv = crate::allocation::read_region(sel, area, "defining a brush from the selection")?;
+    surf.try_materialize_region(area).map_err(|error| EngineError::Other(format!("could not read brush source: {error}")))?;
     for y in 0..h {
         for x in 0..w {
             let c = surf.rgba(area.x0 + x as i32, area.y0 + y as i32);

@@ -112,7 +112,17 @@ pub fn warp_from_params(cmd: &str, p: &Value, rect: [f64; 4]) -> Result<Warp> {
 
 /// A Background is turned into a normal layer by the caller first
 /// ([`crate::extra_cmds::background_to_layer`]).
-fn warp_layer(doc_sel: Option<&Surface>, group: Locks, l: &mut Layer, w: &Warp, rect: Rect, interp: Interp, frames: Option<&Frames>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn warp_layer(
+    doc_sel: Option<&Surface>,
+    group: Locks,
+    l: &mut Layer,
+    w: &Warp,
+    rect: Rect,
+    interp: Interp,
+    frames: Option<&Frames>,
+    cached: Option<&crate::cached_transform::CachedCommit>,
+) -> Result<()> {
     let locks = l.locks.union(group);
     if locks.position || locks.all {
         return Err(EngineError::Other(format!("layer \"{}\" is locked", l.name)));
@@ -127,7 +137,7 @@ fn warp_layer(doc_sel: Option<&Surface>, group: Locks, l: &mut Layer, w: &Warp, 
     match &mut l.content {
         LayerContent::Group(g) => {
             for c in g.children.iter_mut() {
-                warp_layer(None, locks, c, w, rect, interp, frames)?;
+                warp_layer(None, locks, c, w, rect, interp, frames, cached)?;
             }
         }
         LayerContent::Text(_) => return Err(EngineError::Other("Warp needs rasterized type (or use Type › Warp Text)".into())),
@@ -161,26 +171,31 @@ fn warp_layer(doc_sel: Option<&Surface>, group: Locks, l: &mut Layer, w: &Warp, 
             }
         }
         _ => {
+            let saved = cached.and_then(|c| c.pixels.get(&l.id));
             if let Some(surf) = l.surface_mut() {
-                *surf = match doc_sel {
-                    Some(sel) => {
-                        let (lifted, mut rest) = crate::transform_cmds::split_selected(surf, sel)?;
-                        let moved = warp_mesh_surface(&lifted, rect, &map, interp);
-                        crate::transform_cmds::composite_over(&mut rest, &moved);
-                        rest.prune();
-                        rest
-                    }
-                    None => {
-                        // Content outside the warp box stays where it is.
-                        let fmt = surf.format();
-                        let warped = warp_mesh_surface(surf, rect, &map, interp);
-                        let mut rest = surf.convert(photocraft_color::PixelFormat::new(fmt.mode, fmt.sample, true));
-                        crate::pixels::try_clear_surface(&mut rest, rect, None)?;
-                        crate::transform_cmds::composite_over(&mut rest, &warped);
-                        rest.prune();
-                        rest
-                    }
-                };
+                if let Some(saved) = saved {
+                    *surf = saved.clone();
+                } else {
+                    *surf = match doc_sel {
+                        Some(sel) => {
+                            let (lifted, mut rest) = crate::transform_cmds::split_selected(surf, sel)?;
+                            let moved = warp_mesh_surface(&lifted, rect, &map, interp);
+                            crate::transform_cmds::composite_over(&mut rest, &moved);
+                            rest.prune();
+                            rest
+                        }
+                        None => {
+                            // Content outside the warp box stays where it is.
+                            let fmt = surf.format();
+                            let warped = warp_mesh_surface(surf, rect, &map, interp);
+                            let mut rest = surf.convert(photocraft_color::PixelFormat::new(fmt.mode, fmt.sample, true));
+                            crate::pixels::try_clear_surface(&mut rest, rect, None)?;
+                            crate::transform_cmds::composite_over(&mut rest, &warped);
+                            rest.prune();
+                            rest
+                        }
+                    };
+                }
             }
         }
     }
@@ -188,9 +203,15 @@ fn warp_layer(doc_sel: Option<&Surface>, group: Locks, l: &mut Layer, w: &Warp, 
         && m.linked
     {
         let whole = |m: &Surface| Ok(warp_mesh_gray(m, &map, interp));
-        m.surface = match mask_sel {
-            Some(sel) => crate::transform_cmds::move_gray_selected(&m.surface, sel, &|lifted, src| Ok(warp_mesh_surface(lifted, src, &map, interp)), &whole)?,
-            None => whole(&m.surface)?,
+        m.surface = if let Some(saved) = cached.and_then(|c| c.masks.get(&l.id)) {
+            saved.clone()
+        } else {
+            match mask_sel {
+                Some(sel) => {
+                    crate::transform_cmds::move_gray_selected(&m.surface, sel, &|lifted, src| Ok(warp_mesh_surface(lifted, src, &map, interp)), &whole)?
+                }
+                None => whole(&m.surface)?,
+            }
         };
     }
     if let Some(vm) = l.vector_mask.as_mut()
@@ -275,7 +296,8 @@ const MAX_WARP_SIDE: u32 = 100_000;
 
 fn target(s: &Session, cmd: &str, p: &Value) -> Result<(LayerId, Rect)> {
     let st = s.active().ok_or(EngineError::NoDocument)?;
-    let id = match p.get("layer").and_then(Value::as_u64) {
+    let roots = crate::edit_scope::explicit(&st.doc, p)?;
+    let id = match roots.as_ref().and_then(|ids| ids.first()).map(|id| id.0).or_else(|| p.get("layer").and_then(Value::as_u64)) {
         Some(v) => LayerId(v),
         None => st.active_layer.ok_or(EngineError::Other("no active layer".into()))?,
     };
@@ -285,7 +307,20 @@ fn target(s: &Session, cmd: &str, p: &Value) -> Result<(LayerId, Rect)> {
             let v: Vec<i32> = r.iter().map(|x| x.as_f64().unwrap_or(0.0).round() as i32).collect();
             Rect::new(v[0], v[1], v[2], v[3])
         }
-        _ => warp_bounds(&st.doc, layer),
+        _ => match &roots {
+            Some(ids) => ids
+                .iter()
+                .filter_map(|id| st.doc.layer(*id))
+                .map(|l| {
+                    if ids.len() > 1 || p.get("wholeLayers").and_then(Value::as_bool).unwrap_or(false) {
+                        crate::transform_cmds::whole_layer_bounds(l)
+                    } else {
+                        warp_bounds(&st.doc, l)
+                    }
+                })
+                .fold(Rect::EMPTY, |a, b| a.union(&b)),
+            None => warp_bounds(&st.doc, layer),
+        },
     };
     if rect.is_empty() {
         return Err(bad(cmd, "nothing to warp"));
@@ -341,32 +376,47 @@ fn warp_type_layer(s: &mut Session, cmd: &str, id: LayerId, w: &Warp) -> Result<
 fn apply(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
     let (id, rect) = target(s, cmd, p)?;
     let w = warp_from_params(cmd, p, rect_f(rect))?;
-    if matches!(s.active().and_then(|d| d.doc.layer(id)).map(|l| &l.content), Some(LayerContent::Text(_))) {
+    let ids = crate::edit_scope::explicit(&s.active().ok_or(EngineError::NoDocument)?.doc, p)?.unwrap_or_else(|| vec![id]);
+    if ids.len() == 1 && matches!(s.active().and_then(|d| d.doc.layer(id)).map(|l| &l.content), Some(LayerContent::Text(_))) {
         return warp_type_layer(s, cmd, id, &w);
     }
-    let is_smart = matches!(s.active().and_then(|d| d.doc.layer(id)).map(|l| &l.content), Some(LayerContent::Smart(_)));
+    let is_smart = ids.iter().any(|id| matches!(s.active().and_then(|d| d.doc.layer(*id)).map(|l| &l.content), Some(LayerContent::Smart(_))));
     if w.is_identity() && !is_smart {
         return Ok(json!({"layer": id.0, "changed": false}));
     }
     let interp = Interp::parse(p.get("interpolation").and_then(Value::as_str).unwrap_or("bicubic"));
-    let content_knots = p.get("mesh").is_some() && p.get("warp").is_none();
+    let whole_layers = ids.len() > 1 || p.get("wholeLayers").and_then(Value::as_bool).unwrap_or(false);
+    let content_knots = !whole_layers && p.get("mesh").is_some() && p.get("warp").is_none();
+    let cached = s.take_cached_transform();
     s.edit("Warp", |doc, _| {
-        let sel = doc.selection.clone();
-        let frames = content_knots.then(|| {
-            let mut f = Frames::new();
-            if let Some(l) = doc.layer(id) {
-                source_frames(doc, l, &mut f);
+        let sel = doc.selection.clone().filter(|_| !whole_layers);
+        for id in &ids {
+            if crate::transform_cmds::locked_for_transform(doc, *id) {
+                return Err(EngineError::Other(format!("layer {} is locked", id.0)));
             }
-            f
-        });
-        let is_group = doc.layer(id).is_some_and(Layer::is_group);
-        let group = crate::transform_cmds::group_locks(doc, id);
-        crate::extra_cmds::background_to_layer(doc, id);
-        let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
-        warp_layer(if is_group { None } else { sel.as_ref() }, group, l, &w, rect, interp, frames.as_ref())?;
-        let snapshot = doc.clone();
-        if let Some(l) = doc.layer_mut(id) {
-            crate::transform_cmds::refresh_text(&snapshot, l);
+        }
+        for id in &ids {
+            let id = *id;
+            let frames = content_knots.then(|| {
+                let mut f = Frames::new();
+                if let Some(l) = doc.layer(id) {
+                    source_frames(doc, l, &mut f);
+                }
+                f
+            });
+            let is_group = doc.layer(id).is_some_and(Layer::is_group);
+            let group = crate::transform_cmds::group_locks(doc, id);
+            crate::extra_cmds::background_to_layer(doc, id);
+            let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
+            if let LayerContent::Text(t) = &mut l.content {
+                t.warp = type_warp(cmd, &w)?;
+            } else {
+                warp_layer(if is_group { None } else { sel.as_ref() }, group, l, &w, rect, interp, frames.as_ref(), cached.as_ref())?;
+            }
+            let snapshot = doc.clone();
+            if let Some(l) = doc.layer_mut(id) {
+                crate::transform_cmds::refresh_text(&snapshot, l);
+            }
         }
         if let Some(sel) = &doc.selection {
             doc.selection = Some(warp_mesh_gray(sel, &|x, y| w.map(x, y), Interp::Bilinear)).filter(|s| !s.content_bounds().is_empty());

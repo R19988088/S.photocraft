@@ -306,6 +306,7 @@ pub struct SaveStats {
 
 #[derive(Default)]
 struct Collect<'c> {
+    read_error: Option<photocraft_raster::TileReadError>,
     tiles: BTreeMap<Hash, (Arc<Tile>, SampleType)>,
     blobs: BTreeMap<Hash, Arc<Vec<u8>>>,
     hash_cache: Option<&'c mut HashMap<usize, (Weak<Tile>, Hash)>>,
@@ -313,6 +314,10 @@ struct Collect<'c> {
 
 impl Sink for Collect<'_> {
     fn tile(&mut self, format: PixelFormat, tile: &Arc<Tile>) -> Hash {
+        if let Err(error) = tile.try_bytes() {
+            self.read_error.get_or_insert(error);
+            return String::new();
+        }
         let key = Arc::as_ptr(tile) as usize;
         if let Some(cache) = self.hash_cache.as_deref_mut()
             && let Some((w, h)) = cache.get(&key)
@@ -734,6 +739,9 @@ impl PcraftWriter {
         convert::check_nesting(&doc.layers)?;
         let mut c = Collect { hash_cache: Some(&mut self.hash_cache), ..Default::default() };
         let document = convert::doc_m(doc, &mut c);
+        if let Some(error) = c.read_error.take() {
+            return Err(FormatError::Unsupported(format!("could not read document pixels: {error}")));
+        }
         let mut previews = Vec::new();
         if let Some(t) = &opts.thumbnail {
             previews.push((THUMB, png(t)?));

@@ -188,6 +188,10 @@ pub fn apply_filter_to_surface(
     // Replays bypass command dispatch; nested paths must still obey the requesting session's
     // authority, including adjustment LUTs and plug-ins, before any resolver can read them.
     crate::jobs::authorize_render_command(id, params)?;
+    surf.try_materialize().map_err(|error| EngineError::Other(format!("could not read filter pixels: {error}")))?;
+    if let Some(selection) = selection {
+        selection.try_materialize().map_err(|error| EngineError::Other(format!("could not read filter selection: {error}")))?;
+    }
     // Liquify / Puppet Warp / Perspective Warp smart filters (distort_cmds).
     if let Some(out) = crate::distort_cmds::apply_to_surface(id, params, surf, canvas) {
         return Ok(Some(out));
@@ -258,6 +262,10 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
         &label,
         move |doc, _, ctx| {
             let filter = |surf: &photocraft_raster::Surface, fp: &FilterParams, area, bounds, sel: Option<&photocraft_raster::Surface>, extent| {
+                surf.try_materialize().map_err(|error| EngineError::Other(format!("could not read filter pixels: {error}")))?;
+                if let Some(selection) = sel {
+                    selection.try_materialize().map_err(|error| EngineError::Other(format!("could not read filter selection: {error}")))?;
+                }
                 ctx.stage(0.0, 1.0, &msg, |ctl| algo::apply_in_with(surf, fp, area, bounds, sel, extent, ctl)).ok_or(EngineError::Cancelled)
             };
             let selection = doc.selection.clone();

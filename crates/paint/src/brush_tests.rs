@@ -1172,7 +1172,7 @@ fn live_union_of_passes_matches_merging_the_finished_passes_after_every_chunk() 
                         })
                         .collect();
                     let mut expected = pre.clone();
-                    finished[0].composite_union_many(&finished[1..], &pre, &mut expected, selection, false);
+                    finished[0].composite_union_many(&finished[1..], &pre, &mut expected, selection, false).unwrap();
                     assert!(
                         target.read_region(area) == expected.read_region(area),
                         "{sample:?}, brush {bi}, four {four}, selection {}, points ..{end}",
@@ -1933,7 +1933,7 @@ fn symmetry_transport_keeps_each_pass_and_its_smoothing_tail() {
             r.finish();
         }
         let mut merged = pre.clone();
-        passes[0].composite_union(&passes[1], &pre, &mut merged, None, false);
+        passes[0].composite_union(&passes[1], &pre, &mut merged, None, false).unwrap();
         for (index, r) in passes.iter_mut().enumerate() {
             let mut single = pre.clone();
             r.composite(&pre, &mut single, None, false, true);

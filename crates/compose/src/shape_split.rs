@@ -31,7 +31,7 @@ const BUDGET: usize = 8 << 20;
 
 /// Pixel bytes of one entry's (fill, stroke) parts (the pinned shape pixels are the document's).
 fn entry_bytes(parts: &(Surface, Surface)) -> usize {
-    [&parts.0, &parts.1].iter().map(|s| s.tiles().map(|(_, t)| t.bytes().len()).sum::<usize>()).sum()
+    [&parts.0, &parts.1].iter().map(|s| s.tiles().map(|(_, t)| t.storage_byte_len()).sum::<usize>()).sum()
 }
 
 /// Drop every cached split (Edit › Purge › All), returning the parts' pixel bytes. Callers may

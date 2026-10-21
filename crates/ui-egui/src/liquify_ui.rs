@@ -1,12 +1,12 @@
 //! Filter › Liquify…: a full-window dialog like Photoshop's (tool strip on the left, properties on
 //! the right, preview in the middle, OK / Cancel).
 //!
-//! The preview is a CPU proxy: the layer box-downsampled once to at most 1600 px
-//! (`ProxyImage`), re-rendered through the displacement field only where a dab changed it
-//! (bilinear field and source), and uploaded with a partial texture update. A dab plus its
-//! update costs well under a millisecond on a 24 MP layer (see `bench_liquify`). Strokes are
-//! recorded exactly as the engine replays them (`stroke_begin` + `stroke_segment` per point), so
-//! OK runs `filter.liquify` with the same strokes and gets the same field.
+//! Native previews keep the original full-resolution pixels resident on the GPU. Pointer events
+//! edit the inverse field; the shader samples the original without resampling document pixels.
+//! Only confirmation commits the recorded strokes, as one document history entry.
+
+#[path = "liquify_gpu.rs"]
+mod gpu;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
 use photocraft_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, auto_cell};
@@ -31,6 +31,7 @@ const REDO_STACK_LIMIT: usize = 100;
 #[derive(Clone, Debug)]
 pub struct LiquifyOpts {
     pub tool: LiquifyTool,
+    pub scope: String,
     pub size: f32,
     pub density: f32,
     pub pressure: f32,
@@ -48,6 +49,7 @@ impl Default for LiquifyOpts {
     fn default() -> Self {
         LiquifyOpts {
             tool: LiquifyTool::ForwardWarp,
+            scope: "layer".into(),
             size: 100.0,
             density: 50.0,
             pressure: 100.0,
@@ -71,6 +73,12 @@ impl LiquifyOpts {
     /// clamped to their ranges; the others are left as they are. A bad `tool` is an error, after
     /// everything else has been applied.
     pub fn apply(&mut self, v: &Value) -> Result<(), String> {
+        if let Some(scope) = v.get("scope").and_then(Value::as_str) {
+            if !matches!(scope, "layer" | "all" | "group") {
+                return Err("scope must be layer, all or group".into());
+            }
+            self.scope = scope.into();
+        }
         let num = |k: &str| v.get(k).and_then(Value::as_f64).filter(|n| n.is_finite()).map(|n| n as f32);
         let flag = |k: &str| v.get(k).and_then(Value::as_bool);
         if let Some(n) = num("size") {
@@ -106,6 +114,7 @@ impl LiquifyOpts {
         let mesh = ["small", "medium", "large"].get(self.mesh_size).copied().unwrap_or("medium");
         json!({
             "tool": self.tool,
+            "scope": self.scope,
             "size": self.size,
             "density": self.density,
             "pressure": self.pressure,
@@ -121,6 +130,14 @@ impl LiquifyOpts {
 
 pub struct LiquifyDialog {
     pub layer: LayerId,
+    targets: Vec<LayerId>,
+    cached_scope: String,
+    scope_dirty: bool,
+    gpu: Option<std::sync::Arc<gpu::Preview>>,
+    gpu_dirty: bool,
+    gpu_doc: Option<std::sync::Arc<photocraft_doc::Document>>,
+    gpu_error: Option<String>,
+    gpu_damage: Option<Rect>,
     layer_name: String,
     canvas: Rect,
     cell: f64,
@@ -184,6 +201,9 @@ impl LiquifyDialog {
     pub fn describe(&self) -> Value {
         json!({
             "layer": self.layer.0,
+            "scope": self.opts.scope,
+            "layers": self.targets.iter().map(|id| id.0).collect::<Vec<_>>(),
+            "gpuCached": self.gpu.is_some(),
             "tool": self.opts.tool,
             "size": self.opts.size,
             "strokes": self.strokes.len() + usize::from(self.cur.is_some()),
@@ -192,7 +212,7 @@ impl LiquifyDialog {
             "maxDisplacement": self.field.max_displacement(),
             "proxy": [self.proxy.w, self.proxy.h],
             "dabMs": self.dab_ms,
-            "fullResolutionPreview": self.view_bounds.is_some(),
+            "fullResolutionPreview": self.gpu.is_some() || self.view_bounds.is_some(),
             "previewMs": self.preview_ms,
         })
     }
@@ -214,6 +234,7 @@ impl LiquifyDialog {
         if doc_rect.is_empty() {
             return;
         }
+        self.gpu_damage = union_rect(self.gpu_damage, doc_rect.inflate((self.cell * 2.).ceil() as i32).intersect(&self.canvas));
         self.dirty = union(self.dirty, self.proxy.proxy_rect(doc_rect));
         self.view_dirty = union_rect(self.view_dirty, doc_rect);
         self.mask_dirty |= mask;
@@ -286,7 +307,13 @@ impl LiquifyDialog {
     }
 
     fn rebuild(&mut self) {
-        self.field = LiquifyField::from_strokes(self.canvas, self.cell, &self.strokes);
+        self.gpu_dirty = true;
+        let gpu_only = self.field.gpu_only;
+        self.field = LiquifyField::new(self.canvas, self.cell);
+        self.field.gpu_only = gpu_only;
+        for stroke in &self.strokes {
+            self.field.apply_stroke(stroke);
+        }
         self.dirty = Some([0, 0, self.proxy.w, self.proxy.h]);
         // Undo rebuilds the whole field. The zoomed viewport is a separate buffer; leaving it
         // clean kept the pre-undo pixels on screen until the next zoom (#4100).
@@ -326,6 +353,9 @@ impl LiquifyDialog {
 
     /// Re-renders the dirty proxy pixels into `out` (the texture upload happens in `show`).
     fn render_dirty(&mut self) {
+        if self.gpu.is_some() {
+            return;
+        }
         if let Some(r) = self.dirty {
             self.proxy.render(&self.field, r, &mut self.out);
         }
@@ -334,7 +364,7 @@ impl LiquifyDialog {
     /// Builds or updates the visible source-resolution viewport. At ordinary zoom the whole-layer
     /// proxy remains cheaper; above 100%, a full-resolution crop is enough to fill the preview.
     fn update_view_preview(&mut self, ctx: &egui::Context, area: ERect) {
-        if self.zoom <= 1.0 {
+        if self.gpu.is_some() || self.zoom <= 1.0 {
             return;
         }
         let half_w = f64::from(area.width() / self.zoom) * 0.5;
@@ -414,25 +444,27 @@ impl LiquifyDialog {
 
     fn upload(&mut self, ctx: &egui::Context) {
         let (w, h) = (self.proxy.w, self.proxy.h);
-        match (&mut self.tex, self.dirty.take()) {
-            (None, _) => {
-                self.proxy.render(&self.field, [0, 0, w, h], &mut self.out);
-                let img = egui::ColorImage::new([w, h], self.out.iter().map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3])).collect());
-                self.tex = Some(ctx.load_texture("liquify-proxy", img, egui::TextureOptions::LINEAR));
-            }
-            (Some(tex), Some(r)) => {
-                let (x0, y0, x1, y1) = (r[0].min(w), r[1].min(h), r[2].min(w), r[3].min(h));
-                if x1 > x0 && y1 > y0 {
-                    let mut px = Vec::with_capacity((x1 - x0) * (y1 - y0));
-                    for y in y0..y1 {
-                        px.extend(self.out[y * w + x0..y * w + x1].iter().map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3])));
-                    }
-                    tex.set_partial([x0, y0], egui::ColorImage::new([x1 - x0, y1 - y0], px), egui::TextureOptions::LINEAR);
+        if self.gpu.is_none() {
+            match (&mut self.tex, self.dirty.take()) {
+                (None, _) => {
+                    self.proxy.render(&self.field, [0, 0, w, h], &mut self.out);
+                    let img = egui::ColorImage::new([w, h], self.out.iter().map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3])).collect());
+                    self.tex = Some(ctx.load_texture("liquify-proxy", img, egui::TextureOptions::LINEAR));
                 }
+                (Some(tex), Some(r)) => {
+                    let (x0, y0, x1, y1) = (r[0].min(w), r[1].min(h), r[2].min(w), r[3].min(h));
+                    if x1 > x0 && y1 > y0 {
+                        let mut px = Vec::with_capacity((x1 - x0) * (y1 - y0));
+                        for y in y0..y1 {
+                            px.extend(self.out[y * w + x0..y * w + x1].iter().map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3])));
+                        }
+                        tex.set_partial([x0, y0], egui::ColorImage::new([x1 - x0, y1 - y0], px), egui::TextureOptions::LINEAR);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
-        if self.mask_dirty || self.mask_tex.is_none() {
+        if self.gpu.is_none() && (self.mask_dirty || self.mask_tex.is_none()) {
             self.mask_dirty = false;
             let f = &self.field;
             let img = egui::ColorImage::new(
@@ -447,18 +479,41 @@ impl LiquifyDialog {
     }
 }
 
+pub(crate) fn has_pending_edits(app: &PhotocraftApp) -> bool {
+    app.distort.liquify.as_ref().is_some_and(|dialog| !dialog.strokes.is_empty() || dialog.cur.is_some())
+}
+
 /// Opens the dialog on the active layer.
 pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
-    let (layer, surf, _) = crate::distort_ui::active_pixels(app)?;
+    #[cfg(not(test))]
+    if app.gpu.as_ref().is_none_or(|gpu| !gpu.health().is_ok()) {
+        return Err("Liquify requires an available GPU canvas.".into());
+    }
+    let st = app.session.active().ok_or("no document")?;
+    let layer = st.active_layer.ok_or("no active layer")?;
+    let ids = photocraft_engine::distort_cmds::liquify_targets(&app.session, &json!({})).map_err(|e| e.to_string())?;
+    let surf = ids.first().and_then(|id| st.doc.layer(*id)).and_then(|l| l.surface()).cloned().ok_or("target has no pixel cache")?;
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
     let name = st.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
     let cell = auto_cell(canvas);
-    let proxy = ProxyImage::new(&surf, canvas, PROXY_SIDE);
+    let proxy = if app.gpu.is_some() {
+        ProxyImage::new(&Surface::new(photocraft_color::PixelFormat::RGBA32F), Rect::new(0, 0, 1, 1), 1)
+    } else {
+        ProxyImage::new(&surf, canvas, PROXY_SIDE)
+    };
     let out = vec![[0u8; 4]; proxy.w * proxy.h];
     let center = [f64::from(canvas.x0 + canvas.x1) / 2.0, f64::from(canvas.y0 + canvas.y1) / 2.0];
     let mut d = LiquifyDialog {
         layer,
+        targets: vec![layer],
+        cached_scope: "layer".into(),
+        scope_dirty: true,
+        gpu: None,
+        gpu_dirty: true,
+        gpu_doc: None,
+        gpu_error: None,
+        gpu_damage: None,
         layer_name: name,
         canvas,
         cell,
@@ -495,8 +550,131 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
     if let Some(saved) = app.session.prefs().dialogs.get(REMEMBERED) {
         let _ = d.opts.apply(saved);
     }
-    d.upload(ctx);
     app.distort.liquify = Some(d);
+    if let Err(error) = refresh_scope(app, Some(ctx)) {
+        app.distort.liquify = None;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn scope_label(scope: &str) -> &'static str {
+    match scope {
+        "all" => "全部图层",
+        "group" => "图层组",
+        _ => "图层",
+    }
+}
+
+fn cached_mask(layer: &photocraft_doc::Layer, canvas: Rect) -> Option<Surface> {
+    if let Some(mask) = photocraft_compose::masks::combined_mask(layer, canvas) {
+        return Some(mask);
+    }
+    let mask = layer.mask.as_ref().filter(|m| m.enabled)?;
+    let mut surface = Surface::new(photocraft_color::PixelFormat::new(photocraft_color::ColorMode::Grayscale, photocraft_color::SampleType::F32, false));
+    let channels = mask.surface.channels().max(1);
+    let values =
+        mask.surface.read_region(canvas).chunks_exact(channels).map(|p| 1. - mask.density * (1. - p.first().copied().unwrap_or(1.))).collect::<Vec<_>>();
+    surface.write_region(canvas, &values);
+    Some(surface)
+}
+
+fn refresh_scope(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result<(), String> {
+    #[cfg(not(test))]
+    if app.gpu.as_ref().is_none_or(|gpu| !gpu.health().is_ok()) {
+        return Err("Liquify requires an available GPU canvas.".into());
+    }
+    let scope = app.distort.liquify.as_ref().ok_or("Liquify is not open")?.opts.scope.clone();
+    let st = app.session.active().ok_or("no document")?;
+    let canvas = st.doc.bounds();
+    let targets = photocraft_engine::distort_cmds::liquify_targets(&app.session, &json!({"scope":scope})).map_err(|e| e.to_string())?;
+    let mut doc = (*st.doc).clone();
+    // The dialog owns its display texture. The document canvas and Navigator can refresh
+    // independently while the cached Liquify edit remains unchanged.
+    doc.id = app.distort.liquify.as_ref().and_then(|d| d.gpu_doc.as_ref().map(|doc| doc.id)).unwrap_or_else(photocraft_doc::DocId::fresh);
+    fn retain(layers: &mut [photocraft_doc::Layer], targets: &[LayerId]) -> bool {
+        let mut any = false;
+        for layer in layers {
+            let keep = if let Some(children) = layer.children_mut() { retain(children, targets) } else { targets.contains(&layer.id) };
+            layer.visible &= keep;
+            any |= keep;
+        }
+        any
+    }
+    retain(&mut doc.layers, &targets);
+    let d = app.distort.liquify.as_mut().ok_or("Liquify is not open")?;
+    let preview = if let Some(renderer) = &app.gpu {
+        let mut sources = Vec::new();
+        for id in &targets {
+            let layer = doc.layer_mut(*id).ok_or("missing target layer")?;
+            let surface = layer.surface().cloned().ok_or("target has no pixel cache")?;
+            let linked = layer.mask.as_ref().is_some_and(|m| m.linked);
+            let mut moving_mask = layer.clone();
+            moving_mask.vector_mask = None;
+            if !linked {
+                moving_mask.mask = None;
+            }
+            let mut fixed_mask = layer.clone();
+            if linked {
+                fixed_mask.mask = None;
+            }
+            sources.push(gpu::Source {
+                id: *id,
+                surface: surface.clone(),
+                mask: moving_mask.mask.as_ref().map(|m| m.surface.clone()),
+                linked,
+                stationary: cached_mask(&fixed_mask, canvas),
+                feather: moving_mask.mask.as_ref().map_or(0., |m| if m.enabled { m.feather } else { 0. }),
+                density: moving_mask.mask.as_ref().map_or(1., |m| if m.enabled { m.density } else { 0. }),
+            });
+            // The compositor reads a resident replacement through its regular raster planner.
+            layer.content = photocraft_doc::LayerContent::Raster(surface);
+        }
+        Some(photocraft_color::convert::with_cmyk_space(photocraft_compose::cmyk_space(&doc).as_ref(), || {
+            gpu::Preview::new(renderer.render_state(), sources, doc.selection.as_ref(), canvas, &d.field)
+        })?)
+    } else {
+        None
+    };
+    let source = if preview.is_none() {
+        let buffer = photocraft_compose::render(&doc, canvas);
+        let mut source = Surface::new(photocraft_color::PixelFormat::new(photocraft_color::ColorMode::Rgb, photocraft_color::SampleType::F32, true));
+        source.write_region(canvas, &buffer.px.iter().flat_map(|p| *p).collect::<Vec<_>>());
+        source
+    } else {
+        d.source.clone()
+    };
+    d.gpu_doc = preview.as_ref().map(|_| std::sync::Arc::new(doc));
+    d.gpu_error = None;
+    d.targets = targets;
+    d.cached_scope = scope;
+    d.scope_dirty = false;
+    d.source = source;
+    d.gpu = preview;
+    if d.gpu.is_some() {
+        d.field = LiquifyField::new(d.canvas, d.cell);
+        d.field.gpu_only = true;
+        for stroke in &d.strokes {
+            d.field.apply_stroke(stroke);
+        }
+        if let Some((stroke, _)) = &d.cur {
+            d.field.apply_stroke(stroke);
+        }
+    }
+    d.gpu_dirty = true;
+    d.proxy = if d.gpu.is_some() {
+        ProxyImage::new(&Surface::new(photocraft_color::PixelFormat::RGBA32F), Rect::new(0, 0, 1, 1), 1)
+    } else {
+        ProxyImage::new(&d.source, canvas, PROXY_SIDE)
+    };
+    d.out = vec![[0; 4]; d.proxy.w * d.proxy.h];
+    d.tex = None;
+    d.view_tex = None;
+    d.view_bounds = None;
+    d.dirty = Some([0, 0, d.proxy.w, d.proxy.h]);
+    if let Some(ctx) = ctx {
+        d.upload(ctx);
+    }
     Ok(())
 }
 
@@ -506,38 +684,111 @@ fn remember(app: &mut PhotocraftApp, opts: &LiquifyOpts) {
     app.session.prefs.edit(|p| p.dialogs.insert(REMEMBERED.into(), v));
 }
 
+pub(crate) fn gpu_key(app: &PhotocraftApp) -> Option<u64> {
+    app.distort.liquify.as_ref()?.gpu_doc.as_ref().map(|doc| doc.id.0)
+}
+
+fn restore_canvas(app: &PhotocraftApp, dialog: &LiquifyDialog) {
+    if let (Some(renderer), Some(st)) = (&app.gpu, app.session.active()) {
+        if let Some(doc) = &dialog.gpu_doc {
+            renderer.clear_source_overrides(doc.id.0);
+        }
+        renderer.clear_source_overrides(st.doc.id.0);
+        renderer.refresh(st.doc.id.0, &st.doc, None, None);
+    }
+}
+
 /// Cancel (button, Esc or the control channel): the document is untouched; the brush settings
 /// are kept.
 pub fn cancel(app: &mut PhotocraftApp) {
     if let Some(d) = app.distort.liquify.take() {
+        restore_canvas(app, &d);
         remember(app, &d.opts);
     }
 }
 
 /// OK: runs `filter.liquify` with the recorded strokes (one history step).
 pub fn commit(app: &mut PhotocraftApp) {
-    let Some(mut d) = app.distort.liquify.take() else { return };
-    remember(app, &d.opts);
-    d.end();
-    if d.strokes.is_empty() {
+    if let Some(d) = app.distort.liquify.as_mut() {
+        d.end();
+    }
+    if app.distort.liquify.as_ref().is_some_and(|d| d.scope_dirty)
+        && app.gpu.is_some()
+        && let Err(error) = refresh_scope(app, None)
+    {
+        crate::notices::error(app, error);
         return;
     }
-    let p = json!({"strokes": d.strokes, "meshSize": d.cell, "layer": d.layer.0});
-    let _ = app.run("filter.liquify", p);
+    let Some(mut d) = app.distort.liquify.take() else { return };
+    remember(app, &d.opts);
+    if d.strokes.is_empty() {
+        restore_canvas(app, &d);
+        return;
+    }
+    if d.scope_dirty {
+        match photocraft_engine::distort_cmds::liquify_targets(&app.session, &json!({"scope":d.opts.scope})) {
+            Ok(targets) => {
+                d.targets = targets;
+                d.cached_scope = d.opts.scope.clone();
+                d.scope_dirty = false;
+            }
+            Err(error) => {
+                crate::notices::error(app, error.to_string());
+                app.distort.liquify = Some(d);
+                return;
+            }
+        }
+    }
+    #[cfg(not(test))]
+    if d.gpu.is_none() || app.gpu.as_ref().is_none_or(|r| !r.health().is_ok()) {
+        crate::notices::error(app, "Liquify requires an available GPU canvas.".into());
+        app.distort.liquify = Some(d);
+        return;
+    }
+    if let (Some(gpu), Some(renderer)) = (&d.gpu, &app.gpu) {
+        let ops = std::mem::take(&mut d.field.gpu_ops);
+        gpu.apply_ops(renderer.render_state(), &d.field, &ops, d.gpu_dirty);
+        // Refresh tile flags after the final queued dab, then map native planes once.
+        gpu.render_outputs(renderer.render_state(), None);
+        let result = gpu.commit_surfaces(renderer.render_state()).and_then(|(pixels, masks)| {
+            let document = app.session.active().ok_or("no document")?.doc.id;
+            app.session.stage_cached_transform(photocraft_engine::cached_transform::CachedCommit { document, pixels, masks }).map_err(|e| e.to_string())
+        });
+        if let Err(error) = result {
+            crate::notices::error(app, error);
+            d.rebuild();
+            app.distort.liquify = Some(d);
+            return;
+        }
+    }
+    let p = json!({"strokes":d.strokes,"meshSize":d.cell,"layer":d.layer.0,"layers":d.targets.iter().map(|id|id.0).collect::<Vec<_>>(),"scope":d.opts.scope});
+    let result = app.run("filter.liquify", p);
+    app.session.take_cached_transform();
+    if result.is_err() {
+        d.rebuild();
+        app.distort.liquify = Some(d);
+    } else {
+        restore_canvas(app, &d);
+    }
 }
 
 /// Control channel: `filter.liquify {"ui": {...}}` while the dialog is open.
 pub fn control(app: &mut PhotocraftApp, ui: &Value) -> Result<Value, String> {
     if ui.get("commit").and_then(Value::as_bool) == Some(true) {
         commit(app);
-        return Ok(json!({"committed": true}));
+        return if app.distort.liquify.is_none() { Ok(json!({"committed": true})) } else { Err("Liquify commit failed; the cached edit is still open".into()) };
     }
     if ui.get("cancel").and_then(Value::as_bool) == Some(true) {
         cancel(app);
         return Ok(json!({"cancelled": true}));
     }
     let d = app.distort.liquify.as_mut().ok_or(tl!("Liquify is not open"))?;
-    d.opts.apply(ui)?;
+    let mut options = d.opts.clone();
+    options.apply(ui)?;
+    if options.scope != d.opts.scope {
+        d.scope_dirty = true;
+    }
+    d.opts = options;
     let num = |k: &str| ui.get(k).and_then(Value::as_f64).map(|v| v as f32);
     let flag = |k: &str| ui.get(k).and_then(Value::as_bool);
     if flag("undo") == Some(true) {
@@ -638,6 +889,17 @@ pub fn history_keys(app: &mut PhotocraftApp, ctx: &egui::Context) {
 }
 
 pub fn keys(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    if app.distort.liquify.is_none() {
+        return;
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+        commit(app);
+        return;
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        cancel(app);
+        return;
+    }
     history_keys(app, ctx);
     let Some(d) = app.distort.liquify.as_mut() else { return };
     // Ctrl+H (Hide Extras) toggles the red freeze-mask overlay; the mask itself stays active.
@@ -722,6 +984,30 @@ fn load_backdrop(app: &PhotocraftApp, ctx: &egui::Context, layer: LayerId, canva
 
 /// Draws the dialog (a full-window layer over the app).
 pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    if app.distort.liquify.as_ref().is_some_and(|d| d.scope_dirty)
+        && let Err(error) = refresh_scope(app, Some(ctx))
+    {
+        if let Some(d) = app.distort.liquify.as_mut() {
+            d.opts.scope = d.cached_scope.clone();
+            d.scope_dirty = false;
+        }
+        crate::notices::error(app, error);
+    }
+    if let (Some(renderer), Some(d)) = (app.gpu.as_ref(), app.distort.liquify.as_mut())
+        && let Some(gpu) = &d.gpu
+    {
+        let ops = std::mem::take(&mut d.field.gpu_ops);
+        if !ops.is_empty() || d.gpu_dirty {
+            gpu.apply_ops(renderer.render_state(), &d.field, &ops, d.gpu_dirty);
+            if let Some(doc) = &d.gpu_doc {
+                renderer.set_source_overrides(doc.id.0, gpu.render_outputs(renderer.render_state(), if d.gpu_dirty { None } else { d.gpu_damage.take() }));
+                if let Err(error) = renderer.composite(doc, doc.bounds(), false) {
+                    d.gpu_error = Some(error.0);
+                }
+            }
+        }
+        d.gpu_dirty = false;
+    }
     let t = Tokens::get(ctx);
     let screen = ctx.content_rect();
     if app.distort.liquify.as_ref().is_some_and(|d| d.opts.show_backdrop && d.backdrop.is_none()) {
@@ -731,8 +1017,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         }
     }
     let mut action: Option<&str> = None;
-    let mut events: Vec<ToolEvent> = Vec::new();
-    let mut mods = egui::Modifiers::NONE;
+    let mut events: Vec<(ToolEvent, egui::Modifiers)> = Vec::new();
     egui::Area::new(egui::Id::new("liquify-dialog")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
         let Some(d) = app.distort.liquify.as_mut() else { return };
         d.upload(ctx);
@@ -778,6 +1063,19 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let mut props = ui.new_child(egui::UiBuilder::new().max_rect(right.shrink2(vec2(14.0, 12.0))));
         egui::ScrollArea::vertical().id_salt("liquify-props").show(&mut props, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
+            if let Some(error) = &d.gpu_error {
+                ui.colored_label(t.danger, error);
+            }
+            let old_scope = d.opts.scope.clone();
+            egui::ComboBox::from_id_salt("liquify-target-scope").selected_text(scope_label(&d.opts.scope)).show_ui(ui, |ui| {
+                for scope in ["layer", "all", "group"] {
+                    ui.selectable_value(&mut d.opts.scope, scope.into(), scope_label(scope));
+                }
+            });
+            if old_scope != d.opts.scope {
+                d.end();
+                d.scope_dirty = true;
+            }
             widgets::section_label(ui, tl!("Brush Tool Options"));
             widgets::slider_row(ui, tl!("Size"), &mut d.opts.size, 1.0..=3000.0, "", None);
             widgets::slider_row(ui, tl!("Density"), &mut d.opts.density, 0.0..=100.0, "", None);
@@ -880,7 +1178,29 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         {
             clip.image(b.id(), img, uv, Color32::from_white_alpha((d.opts.backdrop_opacity / 100.0 * 255.0) as u8));
         }
-        if d.zoom > 1.0
+        if let Some(gpu) = &d.gpu {
+            if let Some(doc) = &d.gpu_doc {
+                crate::gpu_canvas::GpuCanvas::paint(
+                    &clip,
+                    area,
+                    crate::gpu_canvas::ViewParams {
+                        doc: doc.id.0,
+                        doc_size: [doc.size.width, doc.size.height],
+                        zoom: d.zoom,
+                        center: [d.center[0] as f32, d.center[1] as f32],
+                        rotation: 0.0,
+                        shadow: false,
+                        pixel_grid: false,
+                        view_key: 0x4c495155494659,
+                        display: 0,
+                        output: 0,
+                        hdr: None,
+                        offset: [0.0; 2],
+                    },
+                );
+            }
+            clip.add(gpu.callback(area, img, d.canvas, &d.field, d.opts.show_mask, d.opts.show_mesh, d.opts.mesh_size));
+        } else if d.zoom > 1.0
             && let (Some(bounds), Some(tex)) = (d.view_bounds, &d.view_tex)
         {
             let detail = ERect::from_min_max(
@@ -898,7 +1218,8 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 clip.image(tex.id(), pr, uv, Color32::WHITE);
             }
         }
-        if d.opts.show_mask
+        if d.gpu.is_none()
+            && d.opts.show_mask
             && let Some(m) = &d.mask_tex
         {
             let f = &d.field;
@@ -908,7 +1229,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             );
             clip.image(m.id(), mr, uv, Color32::WHITE);
         }
-        if d.opts.show_mesh {
+        if d.gpu.is_none() && d.opts.show_mesh {
             draw_mesh(d, &clip, area);
         }
         // The lasso polygon being drawn (danger colour freezes, accent thaws; the mask overlay paints the
@@ -952,37 +1273,68 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         } else if pan && resp.dragged() {
             let dl = resp.drag_delta();
             d.center = [d.center[0] - f64::from(dl.x / d.zoom), d.center[1] - f64::from(dl.y / d.zoom)];
-        } else if let Some(pp) = resp.interact_pointer_pos() {
-            let q = to_doc(d, area, pp);
-            let pr = 1.0;
-            mods = ui.input(|i| i.modifiers);
-            if d.lasso.is_some() {
-                // A lasso in progress: collect the polygon, no brush dabs.
-                if resp.dragged() {
-                    events.push(ToolEvent::Move { x: q[0], y: q[1], pressure: pr });
+        } else if !pan {
+            // Replay the original sequence: a whole drag can arrive in one frame,
+            // where Response's aggregate drag flags no longer retain the press.
+            let mut owned = d.cur.is_some() || d.lasso.is_some();
+            let mut last = d.cur.as_ref().map(|(_, p)| [p[0], p[1]]).or_else(|| d.lasso.as_ref().and_then(|(_, p)| p.last().copied()));
+            let mut sampled = false;
+            for event in ui.input(|i| i.events.clone()) {
+                match event {
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers }
+                        if !owned && area.contains(pos) && ctx.layer_id_at(pos) == Some(resp.layer_id) && !egui::Popup::is_any_open(ctx) =>
+                    {
+                        let q = to_doc(d, area, pos);
+                        events.push((ToolEvent::Down { x: q[0], y: q[1], pressure: 1.0 }, modifiers));
+                        owned = true;
+                        last = Some(q);
+                        sampled = true;
+                    }
+                    egui::Event::PointerMoved(pos) if owned => {
+                        let q = to_doc(d, area, pos);
+                        if last != Some(q) {
+                            events.push((ToolEvent::Move { x: q[0], y: q[1], pressure: 1.0 }, mods_now));
+                            last = Some(q);
+                            sampled = true;
+                        }
+                    }
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers } if owned => {
+                        let q = to_doc(d, area, pos);
+                        events.push((ToolEvent::Up { x: q[0], y: q[1] }, modifiers));
+                        owned = false;
+                        sampled = true;
+                    }
+                    _ => {}
+                }
+            }
+            if owned {
+                if !ui.input(|i| i.pointer.primary_down()) {
+                    if let Some(q) = last {
+                        events.push((ToolEvent::Up { x: q[0], y: q[1] }, mods_now));
+                    }
+                } else {
+                    // Stationary tools continue at 30 dabs/s without duplicating
+                    // any movement already replayed from this input frame.
+                    if !sampled
+                        && d.opts.tool.is_stationary()
+                        && crate::gpu_canvas::now_ms() - d.last_dab > 33.0
+                        && let Some(q) = last
+                    {
+                        events.push((ToolEvent::Move { x: q[0], y: q[1], pressure: 1.0 }, mods_now));
+                    }
                     ctx.request_repaint();
                 }
-            } else if resp.drag_started() || (resp.is_pointer_button_down_on() && d.cur.is_none()) {
-                events.push(ToolEvent::Down { x: q[0], y: q[1], pressure: pr });
-            } else if resp.dragged() || resp.is_pointer_button_down_on() {
-                let moved = d.cur.as_ref().is_some_and(|(_, l)| l[0] != q[0] || l[1] != q[1]);
-                // Stationary tools keep working while the brush is held still (30 dabs/s).
-                let held = d.opts.tool.is_stationary() && crate::gpu_canvas::now_ms() - d.last_dab > 33.0;
-                if moved || held {
-                    events.push(ToolEvent::Move { x: q[0], y: q[1], pressure: pr });
-                }
-                ctx.request_repaint();
             }
         }
-        let primary_down = ui.input(|i| i.pointer.primary_down());
-        let lasso_up = d.lasso.is_some() && !primary_down;
-        if resp.drag_stopped() || lasso_up || (d.cur.is_some() && !primary_down) {
-            let q = d.lasso.as_ref().and_then(|(_, pts)| pts.last().copied()).or_else(|| d.cur.as_ref().map(|(_, l)| [l[0], l[1]])).unwrap_or_default();
-            events.push(ToolEvent::Up { x: q[0], y: q[1] });
-        }
     });
-    for ev in events {
+    let changed = !events.is_empty();
+    for (ev, mods) in events {
         pointer(app, ev, mods);
+    }
+    // Pointer events are collected after this frame's GPU sampling. Always present their
+    // result next frame, including a stationary dab and the final movement on release.
+    if changed {
+        ctx.request_repaint();
     }
     match action {
         Some("ok") => commit(app),
@@ -1085,6 +1437,63 @@ mod tests {
             .unwrap();
         app.sync_views();
         app
+    }
+
+    #[test]
+    fn one_move_mouse_drag_keeps_the_press_point_and_schedules_gpu_dabs() {
+        short_drag_input(false);
+    }
+
+    #[test]
+    fn one_frame_mouse_drag_keeps_the_press_point_and_schedules_gpu_dabs() {
+        short_drag_input(true);
+    }
+
+    fn short_drag_input(one_frame: bool) {
+        let ctx = egui::Context::default();
+        PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+        let mut app = app_with_layer();
+        open(&mut app, &ctx).unwrap();
+        control(&mut app, &json!({"tool":"forwardWarp","size":40,"pressure":100})).unwrap();
+        app.distort.liquify.as_mut().unwrap().field.gpu_only = true;
+        let screen = ERect::from_min_size(Pos2::ZERO, vec2(800., 600.));
+        let frame = |app: &mut PhotocraftApp, events| {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| show(app, ui.ctx()));
+            output.textures_delta.clear();
+        };
+        // Let egui register the dialog and its input rectangle before the press.
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        let area = ERect::from_min_max(pos2(LEFT_W, 30.), pos2(screen.right() - RIGHT_W, screen.bottom()));
+        let a = area.center();
+        let b = a + vec2(24., 0.);
+        let (start, end) = {
+            let d = app.distort.liquify.as_ref().unwrap();
+            (to_doc(d, area, a), to_doc(d, area, b))
+        };
+        let down = egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE };
+        let up = egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE };
+        if one_frame {
+            frame(&mut app, vec![egui::Event::PointerMoved(a), down, egui::Event::PointerMoved(b), up.clone()]);
+        } else {
+            frame(&mut app, vec![egui::Event::PointerMoved(a), down]);
+            frame(&mut app, vec![egui::Event::PointerMoved(b)]);
+        }
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert!(!d.field.gpu_ops.is_empty(), "the sole movement must deform the resident field");
+        assert!(d.field.gpu_ops.iter().any(|op| op.delta[0] > 0.), "the movement must survive crossing egui's drag threshold");
+        if !one_frame {
+            frame(&mut app, vec![up]);
+        }
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert_eq!(d.strokes.len(), 1);
+        let points = &d.strokes[0].points;
+        assert_eq!(&points.first().unwrap()[..2], &start);
+        assert_eq!(&points.last().unwrap()[..2], &end);
+        assert!(
+            LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes).max_displacement() > 0.,
+            "the recorded short drag must also replay to an actual deformation"
+        );
     }
 
     #[test]
@@ -1433,5 +1842,45 @@ mod tests {
         control(&mut app, &json!({"cancel": true})).unwrap();
         assert!(app.distort.liquify.is_none());
         assert_eq!(app.session.active().unwrap().history.past_len(), 2, "cancel records nothing");
+    }
+}
+
+#[cfg(test)]
+mod cached_session_tests {
+    use super::*;
+
+    #[test]
+    fn scope_changes_preserve_strokes_and_failed_commit_preserves_session() {
+        let ctx = egui::Context::default();
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.session.execute("file.new", json!({"width":80,"height":60,"depth":8})).unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        app.session
+            .edit("pixels", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(20, 20, 50, 40), &[1., 0., 0., 1.]);
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        open(&mut app, &ctx).unwrap();
+        pointer(&mut app, ToolEvent::Down { x: 30., y: 30., pressure: 1. }, egui::Modifiers::NONE);
+        pointer(&mut app, ToolEvent::Move { x: 42., y: 30., pressure: 1. }, egui::Modifiers::NONE);
+        pointer(&mut app, ToolEvent::Up { x: 42., y: 30. }, egui::Modifiers::NONE);
+        let before = app.session.active().unwrap().history.past_len();
+        control(&mut app, &json!({"scope":"all"})).unwrap();
+        refresh_scope(&mut app, Some(&ctx)).unwrap();
+        assert_eq!(app.distort.liquify.as_ref().unwrap().strokes.len(), 1);
+        assert_eq!(app.session.active().unwrap().history.past_len(), before, "changing scope never commits");
+        app.session
+            .edit("lock", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().locks.pixels = true;
+                Ok(())
+            })
+            .unwrap();
+        commit(&mut app);
+        let d = app.distort.liquify.as_ref().expect("failed commit must retain all pending edits");
+        assert_eq!(d.strokes.len(), 1);
+        assert!(d.gpu_dirty, "failed commit must restore its resident preview on the next frame");
+        cancel(&mut app);
     }
 }

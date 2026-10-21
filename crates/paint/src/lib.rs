@@ -24,6 +24,7 @@ pub mod brush;
 pub mod canvas_material;
 pub mod curve;
 pub mod dynamics;
+pub mod gpu_backend;
 pub mod material;
 pub mod mixer;
 pub mod motion;

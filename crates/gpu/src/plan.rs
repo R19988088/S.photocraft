@@ -164,6 +164,7 @@ pub struct MapRef {
 #[derive(Clone, Debug)]
 pub struct Pass<'a> {
     pub kernel: Kernel,
+    pub transform_owner: Option<LayerId>,
     pub dst: Slot,
     pub a: Option<Slot>,
     pub b: Option<Slot>,
@@ -230,6 +231,7 @@ impl<'a> Pass<'a> {
         Pass {
             kernel,
             dst,
+            transform_owner: None,
             a: None,
             b: None,
             c: None,
@@ -328,10 +330,20 @@ impl<'a> DocCtx<'a> {
 
 /// Build the pass list for `doc`.
 pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
+    plan_live(doc, &std::collections::HashMap::new())
+}
+
+pub(crate) fn plan_live<'a>(doc: &'a Document, sources: &std::collections::HashMap<LayerId, crate::SourceOverride>) -> Result<Plan<'a>, Unsupported> {
     if doc.mode == photocraft_color::ColorMode::Multichannel {
         return Err(Unsupported("Multichannel inks (printed on the CPU)".into()));
     }
     let mut p = Planner::new(DocCtx::of(doc));
+    p.live_sources = sources
+        .iter()
+        .map(|(id, s)| {
+            (*id, (if s.pages.is_empty() { s.rect } else { s.rect.inflate(doc.layer(*id).map_or(0, photocraft_compose::effects::margin)) }, s.bounds))
+        })
+        .collect();
     let root = p.clear();
     // Start at the topmost layer that hides everything beneath it (an opaque fill layer): the
     // layers below can't change the result, so they cost no passes or uploads.
@@ -347,6 +359,7 @@ struct Planner<'a> {
     cx: DocCtx<'a>,
     fx: Vec<FxLayer<'a>>,
     checkpoints: Vec<Checkpoint>,
+    live_sources: std::collections::HashMap<LayerId, (Rect, Rect)>,
 }
 
 /// Coverage source of an effect paint (`kind` in `fs_fxpaint`); flags refine it.
@@ -437,7 +450,15 @@ pub const SHAPE_MAP: usize = usize::MAX;
 
 impl<'a> Planner<'a> {
     fn new(cx: DocCtx<'a>) -> Self {
-        Planner { passes: Vec::new(), free: Vec::new(), refs: Vec::new(), cx, fx: Vec::new(), checkpoints: Vec::new() }
+        Planner {
+            passes: Vec::new(),
+            free: Vec::new(),
+            refs: Vec::new(),
+            cx,
+            fx: Vec::new(),
+            checkpoints: Vec::new(),
+            live_sources: std::collections::HashMap::new(),
+        }
     }
 
     fn finish(self, root: Slot) -> Plan<'a> {
@@ -774,6 +795,7 @@ impl<'a> Planner<'a> {
             for p in &mut self.passes[start..] {
                 if p.clip.is_none() && !matches!(p.kernel, Kernel::Clear | Kernel::CopyFull) {
                     p.clip = Some(clip);
+                    p.transform_owner = Some(layer.id);
                 }
             }
         }
@@ -786,9 +808,16 @@ impl<'a> Planner<'a> {
         p.flags = gamma_flag(layer);
         p.extra[3] = photocraft_compose::text_gamma(layer);
         p.clip = clip;
+        p.transform_owner = Some(layer.id);
         let merged = self.emit(p);
         match clip {
-            Some(clip) => Ok(self.write_back(backdrop, merged, clip)),
+            Some(clip) => {
+                let result = self.write_back(backdrop, merged, clip);
+                if let Some(p) = self.passes.last_mut() {
+                    p.transform_owner = Some(layer.id);
+                }
+                Ok(result)
+            }
             None => Ok(merged),
         }
     }
@@ -796,6 +825,9 @@ impl<'a> Planner<'a> {
     /// The rect a plain layer composites over: its composite bounds when they cover at most half
     /// the canvas (beyond that, compositing everywhere costs less than the copy back).
     fn local_clip(&self, layer: &Layer) -> Option<Rect> {
+        if self.live_sources.contains_key(&layer.id) {
+            return None;
+        }
         let canvas = self.cx.canvas;
         let b = bounds::composite_bounds(layer, canvas)?;
         (b.width() as u64 * b.height() as u64 * 2 <= canvas.width() as u64 * canvas.height() as u64).then_some(b)
@@ -834,6 +866,18 @@ impl<'a> Planner<'a> {
 
     /// render_content for non-adjustment layers.
     fn content(&mut self, layer: &'a Layer) -> Result<Slot, Unsupported> {
+        if matches!(layer.content, LayerContent::Group(_)) && self.live_sources.contains_key(&layer.id) {
+            // The resident group source is its children over transparency, before its own masks,
+            // styles and opacity. Texture storage is supplied by the override, without CPU tiles.
+            let mut pass = Pass::new(Kernel::Content, 0);
+            pass.mask = self.mask_use(layer);
+            pass.tex = Some(TexUse {
+                layer: layer.id,
+                role: Role::Content,
+                surface: SurfaceRef::Derived(std::sync::Arc::new(Surface::new(photocraft_color::PixelFormat::RGBA32F))),
+            });
+            return Ok(self.emit(pass));
+        }
         match &layer.content {
             LayerContent::Group(g) => {
                 let empty = self.clear();
@@ -995,8 +1039,11 @@ impl<'a> Planner<'a> {
     /// Consumes `backdrop`.
     fn effects(&mut self, layer: &'a Layer, clipped: &[&'a Layer], backdrop: Slot, atop: bool) -> Result<Slot, Unsupported> {
         let canvas = self.cx.canvas;
-        let region = bounds::effect_region(layer, canvas);
-        let sb = photocraft_compose::paint_bounds(layer).unwrap_or_else(|| bounds::layer_bounds(layer, canvas));
+        let region = self.live_sources.get(&layer.id).map_or_else(|| bounds::effect_region(layer, canvas), |s| s.0);
+        let sb = self
+            .live_sources
+            .get(&layer.id)
+            .map_or_else(|| photocraft_compose::paint_bounds(layer).unwrap_or_else(|| bounds::layer_bounds(layer, canvas)), |s| s.1);
         let clip = if bounds::transparent_outside(layer) { region } else { canvas };
         // A stroked shape's vector stroke goes above its clipped layers and interior effects
         // (compose::split_parts): the fill and the stroke unmasked, the masks applied after.
@@ -1015,6 +1062,7 @@ impl<'a> Planner<'a> {
         for p in self.passes.iter_mut().rev().take(if vstroke.is_some() { 2 } else { 1 }) {
             if !matches!(layer.content, LayerContent::Group(_)) {
                 p.clip = Some(clip);
+                p.transform_owner = Some(layer.id);
             }
         }
         for c in clipped {

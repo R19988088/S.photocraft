@@ -367,6 +367,7 @@ pub fn export(doc: &Document, name_or_ext: &str, opts: &ExportOptions) -> Result
 /// export fails with [`IoError::Cancelled`]; otherwise the bytes are exactly [`export`]'s.
 pub fn export_with(doc: &Document, name_or_ext: &str, opts: &ExportOptions, ctl: &photocraft_raster::Interrupt) -> Result<ExportResult, IoError> {
     ctl.check().map_err(|_| IoError::Cancelled)?;
+    pixels::materialize_document(doc)?;
     let r = export_stages(doc, name_or_ext, opts, ctl)?;
     ctl.check().map_err(|_| IoError::Cancelled)?;
     ctl.progress(1.0);

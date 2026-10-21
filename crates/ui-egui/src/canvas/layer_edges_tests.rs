@@ -67,6 +67,8 @@ fn layer_edges_follow_live_move_then_release_and_undo() {
             }
             tool_event(&mut app, ToolEvent::Up { x: 260.0, y: 220.0 }, egui::Modifiers::NONE);
             assert_edges(&mut app, &ctx, 0, true, ORIGINAL.translate(80, 40));
+            assert_eq!(app.session.active().unwrap().history.past_len(), before, "release retains the cached edit");
+            crate::transform_tool::commit(&mut app);
             assert_eq!(app.session.active().unwrap().history.past_len(), before + 1);
             app.run("edit.undo", json!({})).unwrap();
             assert_edges(&mut app, &ctx, 0, true, ORIGINAL);

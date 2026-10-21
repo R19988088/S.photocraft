@@ -44,6 +44,7 @@ pub(crate) fn read_region(surface: &photocraft_raster::Surface, area: photocraft
         .and_then(|n| n.checked_mul(surface.channels()))
         .ok_or_else(|| error(purpose, "requested size overflowed"))?;
     let mut out = filled(len, 0.0, purpose)?;
+    surface.try_materialize_region(area).map_err(|error| EngineError::Other(format!("could not read pixels for {purpose}: {error}")))?;
     surface.read_region_into(area, &mut out);
     Ok(out)
 }
@@ -66,5 +67,32 @@ mod tests {
         fail_next_for_test();
         let result = filled::<u8>(16, 0, "test image");
         assert!(result.as_ref().is_err_and(|e| e.to_string().contains("not enough memory for test image")));
+    }
+
+    #[test]
+    fn region_read_reports_backend_failure_and_ignores_unrelated_tiles() {
+        use photocraft_color::PixelFormat;
+        use photocraft_geom::{Rect, TileCoord};
+        use photocraft_raster::{Surface, Tile, TileBackend, TileReadError};
+        use std::sync::Arc;
+
+        #[derive(Debug)]
+        struct Unreadable;
+        impl TileBackend for Unreadable {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn read_bytes(&self) -> std::result::Result<Box<[u8]>, TileReadError> {
+                Err(TileReadError("device lost".into()))
+            }
+        }
+        let mut surface = Surface::new(PixelFormat::RGBA8);
+        let tile = Arc::new(Tile::from_backend(PixelFormat::RGBA8, Arc::new(Unreadable)));
+        surface.set_tile(TileCoord::new(1, 0), tile.clone());
+        assert_eq!(read_region(&surface, Rect::new(0, 0, 1, 1), "test region").unwrap(), vec![0.0; 4]);
+        let result = read_region(&surface, Rect::new(255, 0, 257, 1), "test region");
+        assert!(result.is_err_and(|error| error.to_string().contains("could not read pixels for test region")));
+        assert!(Arc::ptr_eq(surface.tile(TileCoord::new(1, 0)).unwrap(), &tile));
+        assert!(!tile.is_cpu_materialized());
     }
 }

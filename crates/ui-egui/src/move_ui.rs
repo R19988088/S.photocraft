@@ -1,17 +1,13 @@
-//! Move tool drags shown live (#128): while the pointer drags, the canvas shows the document with
-//! the moving layers already at the pointer, exactly as `layer.translate` will leave them, and
-//! recomposites only where they were and where they are. Releasing commits one `layer.translate`
-//! (one history step) whose damage rect refreshes the same area.
+//! Move previews retain an immutable source texture and translate its GPU mesh. Releasing
+//! preserves the session across drags; Enter or a tool switch commits a single history step.
 //!
-//! With a selection, the Move tool drags the selected pixels instead (#578): they float
-//! (`select.float`, the canvas shows the piece at the pointer) until ↩, Deselect or any other
-//! command drops them, as one "Move" history step.
+//! Raster selections are lifted once into that source. Marquee-tool floating selections keep
+//! their existing independent preview path.
 
 use std::sync::Arc;
 
 use photocraft_doc::{DocId, Document, LayerId};
 use photocraft_geom::Rect;
-use serde_json::json;
 
 use crate::PhotocraftApp;
 use crate::state::Tool;
@@ -25,7 +21,7 @@ use crate::state::Tool;
 pub(crate) fn moves_selected_pixels_with(app: &PhotocraftApp, tool: Tool) -> bool {
     let Some(st) = app.session.active() else { return false };
     tool == Tool::Move
-        && app.ui.transform.is_none()
+        && app.ui.tool_options.move_target == "layer"
         && st.doc.selection.is_some()
         && st.selected_layers().len() <= 1
         && st.active_layer.and_then(|id| st.doc.layer(id)).is_some_and(|l| l.visible)
@@ -35,7 +31,9 @@ pub(crate) fn moves_selected_pixels_with(app: &PhotocraftApp, tool: Tool) -> boo
 /// Floats the selected pixels and moves them by (dx, dy) (`select.float`): cuts them the first
 /// time, or with `copy` (⌥) floats a duplicate and leaves them; `copy` on a piece already floating
 /// drops it where it is and floats a copy of it. False when it failed (reported in the status bar).
+#[cfg(test)]
 pub(crate) fn float_selected(app: &mut PhotocraftApp, copy: bool, dx: f64, dy: f64) -> bool {
+    use serde_json::json;
     let floating = app.session.active().is_some_and(|st| photocraft_engine::float_cmds::floating(st).is_some());
     let dropped = if copy && floating { app.run("select.drop", json!({})) } else { Ok(json!(null)) };
     match dropped.and_then(|_| app.run("select.float", json!({"dx": dx, "dy": dy, "copy": copy}))) {
@@ -48,16 +46,97 @@ pub(crate) fn float_selected(app: &mut PhotocraftApp, copy: bool, dx: f64, dy: f
     }
 }
 
+/// Commands that would replace the immutable source must wait for an explicit commit.
+pub(crate) fn guards_command(app: &PhotocraftApp, id: &str) -> bool {
+    if !crate::transform_tool::is_cached_raster(app) {
+        return false;
+    }
+    if id.starts_with("file.save") || id.starts_with("file.export") || matches!(id, "file.close" | "file.closeAll" | "file.closeOthers" | "file.revert") {
+        return true;
+    }
+    if matches!(
+        id,
+        "edit.undo"
+            | "edit.redo"
+            | "edit.copy"
+            | "edit.copyMerged"
+            | "edit.freeTransform"
+            | "layer.setProps"
+            | "layer.renameLayer"
+            | "layer.setLabelColor"
+            | "layer.setExpanded"
+            | "layer.select"
+            | "layer.selectAbove"
+            | "layer.selectBelow"
+            | "layer.selectTop"
+            | "layer.selectBottom"
+    ) || id.starts_with("edit.transform.")
+    {
+        return false;
+    }
+    ["layer.", "paint.", "filter.", "image.", "select.", "edit."].iter().any(|prefix| id.starts_with(prefix)) && !id.ends_with(".list") && !id.ends_with(".get")
+}
+
+/// Translate an immutable transform source without writing document pixels on pointer up.
+/// The first move uploads the source; subsequent moves change only the quad's coordinates.
+pub(crate) fn cached_pointer(app: &mut PhotocraftApp, ev: crate::canvas::ToolEvent, mods: egui::Modifiers) -> bool {
+    use crate::canvas::{Drag, ToolEvent};
+    let cached = crate::transform_tool::is_cached_move(app);
+    if let ToolEvent::Down { x, y, pressure } = ev {
+        if !cached {
+            return false;
+        }
+        let _ = crate::move_mods::filter_event(app, ev, mods);
+        app.drag = Some(Drag::new(Tool::Move, [x, y], vec![[x, y, f64::from(pressure)]], mods, false));
+        return true;
+    }
+    let Some(d) = app.drag.as_ref().filter(|d| d.tool == Tool::Move && d.sel_move.is_none()) else { return false };
+    if app.ui.transform.is_some() && !cached {
+        return false;
+    }
+    let start = d.start;
+    let previous = d.points.last().map_or(start, |p| [p[0], p[1]]);
+    let ev = crate::move_mods::filter_event(app, ev, mods);
+    let cached = crate::transform_tool::is_cached_move(app);
+    let (x, y, pressure, released) = match ev {
+        ToolEvent::Move { x, y, pressure } => (x, y, pressure, false),
+        ToolEvent::Up { x, y } => (x, y, 1.0, true),
+        ToolEvent::Down { .. } => return false,
+    };
+    let delta = [(x - start[0]).round() - (previous[0] - start[0]).round(), (y - start[1]).round() - (previous[1] - start[1]).round()];
+    if !cached && delta != [0.0, 0.0] {
+        let ctx = app.bounds_context.clone().unwrap_or_default();
+        if let Err(error) = crate::transform_tool::begin_cached_move(app, &ctx) {
+            app.ui.status = error;
+            app.ui.status_error = true;
+            app.drag = None;
+            crate::move_mods::finish(app);
+            return true;
+        }
+        app.move_preview = None;
+    }
+    if crate::transform_tool::is_cached_move(app) {
+        crate::transform_tool::nudge(app, delta[0], delta[1]);
+    }
+    if let Some(d) = app.drag.as_mut() {
+        d.points.push([x, y, f64::from(pressure)]);
+    }
+    if released {
+        app.drag = None;
+        if let Some(ctx) = app.bounds_context.clone() {
+            crate::transform_tool::track_steps(app, &ctx);
+        }
+        crate::move_mods::finish(app);
+    }
+    true
+}
+
 /// Preview keys of move drags: `BASE + n`, one per offset shown (see `canvas::display_doc`).
 const BASE: u64 = 1 << 39;
 
 pub(crate) struct MovePreview {
     doc: DocId,
     revision: u64,
-    /// Layers that move ([`photocraft_engine::layer_multi_cmds::move_targets`]).
-    ids: Vec<LayerId>,
-    /// `ids` and every layer inside them: the layers shown at the drag's offset.
-    moving: Vec<LayerId>,
     /// What moving them can change at offset (0, 0), not clipped to the canvas: a layer larger
     /// than the canvas brings its pixels from beyond the edge into view (`None` = anything).
     bounds: Option<Rect>,
@@ -87,87 +166,19 @@ impl MovePreview {
     }
 }
 
-/// The whole-pixel offset of the current Move drag on document `idx`, if one is under way.
-fn drag_offset(app: &PhotocraftApp) -> Option<(i32, i32)> {
-    let d = app.drag.as_ref().filter(|d| d.tool == Tool::Move)?;
-    let end = d.points.last().map_or(d.start, |p| [p[0], p[1]]);
-    let dx = (end[0] - d.start[0]).round().clamp(-1e7, 1e7) as i32;
-    let dy = (end[1] - d.start[1]).round().clamp(-1e7, 1e7) as i32;
-    Some((dx, dy))
-}
-
-/// The document to show while a Move drag is under way on document `idx`: the moving layers at
-/// the pointer. `None` without a drag (or when the layers can't move: locked, say; the drag then
-/// shows its arrow and the release reports why).
+/// Legacy floating selections used by marquee tools. Move-tool previews use the resident
+/// transform textures instead of creating a translated document on every frame.
 pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>, u64)> {
+    if crate::transform_tool::is_cached_move(app) {
+        return None;
+    }
     if app.session.active_index() == Some(idx)
         && let Some(st) = app.session.documents().get(idx)
         && photocraft_engine::float_cmds::floating(st).is_some()
     {
         return floating_doc(app, idx);
     }
-    // Preferences › Interface › Show bounding box when dragging layer: outline and arrow only.
-    if app.session.active_index() != Some(idx) || app.session.prefs().interface.show_bounding_box_when_dragging_layer {
-        return None;
-    }
-    let Some(offset) = drag_offset(app) else {
-        app.move_preview = None;
-        return None;
-    };
-    let mask_target = app.layer_mask_targeted();
-    let st = app.session.documents().get(idx)?;
-    let (doc_id, revision, doc) = (st.doc.id, st.revision, st.doc.clone());
-    let fresh = app.move_preview.as_ref().is_some_and(|p| p.doc == doc_id && p.revision == revision);
-    if !fresh {
-        let ids = photocraft_engine::layer_multi_cmds::move_targets(&doc, &st.selected_layers());
-        if ids.is_empty() {
-            return None;
-        }
-        let all = Rect::new(i32::MIN / 2, i32::MIN / 2, i32::MAX / 2, i32::MAX / 2);
-        let bounds = ids.iter().try_fold(Rect::EMPTY, |acc, id| Some(acc.union(&photocraft_compose::change_bounds(doc.layer(*id)?, all)?)));
-        let canvas = doc.bounds();
-        let moving = with_descendants(&doc, &ids);
-        let bounds = bounds.map(|b| moving.iter().filter_map(|id| shape_reach(doc.layer(*id)?, canvas)).fold(b, |acc, r| acc.union(&r)));
-        app.move_preview = Some(MovePreview { doc: doc_id, revision, ids, moving, bounds, canvas, offsets: Vec::new(), shown: None, floating: false });
-    }
-    let p = app.move_preview.as_mut()?;
-    if offset == (0, 0) && p.offsets.is_empty() {
-        return None;
-    }
-    if p.offsets.last() != Some(&offset) {
-        let t0 = crate::gpu_canvas::now_ms();
-        match photocraft_engine::layer_multi_cmds::moved_target(&doc, &p.ids, offset.0, offset.1, mask_target) {
-            Ok(d) => {
-                // Duotone documents display through their inks.
-                let d = photocraft_engine::mode_cmds::display_document(&d).unwrap_or(d);
-                p.shown = Some(Arc::new(d));
-                p.offsets.push(offset);
-            }
-            Err(_) => {
-                p.shown = None;
-                return None;
-            }
-        }
-        app.perf.span("move preview", crate::gpu_canvas::now_ms() - t0);
-    }
-    let p = app.move_preview.as_ref()?;
-    Some((p.shown.clone()?, p.key()))
-}
-
-/// Where shape layer `l` paints, effects included, not cut at the canvas as its rendered pixels
-/// are: a drag brings the rest of it into view (#3946). `None` for other layers.
-fn shape_reach(l: &photocraft_doc::Layer, canvas: Rect) -> Option<Rect> {
-    let photocraft_doc::LayerContent::Shape(sh) = &l.content else { return None };
-    let b = photocraft_vector::CompiledShape::new(sh, photocraft_vector::DEFAULT_TOLERANCE, canvas).bounds()?;
-    let m = if photocraft_compose::effects::has_effects(l) { photocraft_compose::effects::margin(l) } else { 0 };
-    Some(b.inflate(m))
-}
-
-/// `ids` and every layer inside them (groups move their contents).
-fn with_descendants(doc: &Document, ids: &[LayerId]) -> Vec<LayerId> {
-    let walk = doc.walk();
-    let roots: Vec<_> = walk.iter().filter(|(_, _, l)| ids.contains(&l.id)).map(|(p, _, _)| p.as_slice()).collect();
-    walk.iter().filter(|(p, _, _)| roots.iter().any(|r| p.starts_with(r))).map(|(_, _, l)| l.id).collect()
+    None
 }
 
 /// Where the canvas shows layer `id` of document `doc` at `revision` relative to where it is: the
@@ -175,11 +186,11 @@ fn with_descendants(doc: &Document, ids: &[LayerId]) -> Vec<LayerId> {
 /// so its Layer Edges outline moves in lockstep with its pixels (#2413). `None` when it shows
 /// where it is.
 pub(crate) fn shown_offset(app: &PhotocraftApp, doc: DocId, revision: u64, id: LayerId) -> Option<(i32, i32)> {
-    let p = app.move_preview.as_ref().filter(|p| p.doc == doc && p.revision == revision && !p.floating && p.shown.is_some())?;
-    if !p.moving.contains(&id) {
+    let st = app.session.active()?;
+    if st.doc.id != doc || st.revision != revision {
         return None;
     }
-    p.offsets.last().copied()
+    crate::transform_tool::cached_move_offset(app, doc, id)
 }
 
 /// A floating selection's offset plus a drag of it in progress (`canvas::selection_drag_delta`).
@@ -195,23 +206,13 @@ pub(crate) fn floating_offset(app: &PhotocraftApp) -> Option<(i32, i32)> {
 fn floating_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>, u64)> {
     let offset = floating_offset(app)?;
     let st = app.session.documents().get(idx)?;
-    let f = photocraft_engine::float_cmds::floating(st)?;
+    photocraft_engine::float_cmds::floating(st)?;
     let (doc_id, revision) = (st.doc.id, st.revision);
     let fresh = app.move_preview.as_ref().is_some_and(|p| p.doc == doc_id && p.revision == revision && p.floating);
     if !fresh {
         let bounds = st.doc.selection.as_ref().map(|s| s.content_bounds());
         let canvas = st.doc.bounds();
-        app.move_preview = Some(MovePreview {
-            doc: doc_id,
-            revision,
-            ids: vec![f.layer],
-            moving: Vec::new(),
-            bounds,
-            canvas,
-            offsets: Vec::new(),
-            shown: None,
-            floating: true,
-        });
+        app.move_preview = Some(MovePreview { doc: doc_id, revision, bounds, canvas, offsets: Vec::new(), shown: None, floating: true });
     }
     let st = app.session.documents().get(idx)?;
     let shown = app.move_preview.as_ref()?.offsets.last() != Some(&offset);
@@ -248,291 +249,234 @@ pub(crate) fn damage(app: &PhotocraftApp, doc: DocId, revision: u64, seen: u64, 
 
 /// Whether the canvas shows a Move drag's layers at the pointer.
 pub(crate) fn showing(app: &PhotocraftApp) -> bool {
-    app.move_preview.as_ref().is_some_and(|p| p.shown.is_some())
+    crate::transform_tool::is_cached_move(app) || app.move_preview.as_ref().is_some_and(|p| p.shown.is_some())
 }
 
-/// Whether `key` is a Move drag preview key.
-pub(crate) fn is_preview_key(key: u64) -> bool {
-    key > BASE && key < BASE << 1
-}
-
-/// Release: one `layer.translate` by the drag's offset. The canvas already shows the result, so
-/// its caches are told it showed the document: the command's damage rect refreshes that area.
+/// Keep the final translation pending when a caller finishes a Move gesture directly.
 pub(crate) fn finish(app: &mut PhotocraftApp, dx: f64, dy: f64) {
-    // Only when the canvas shows this very offset (else it recomposites everything once).
-    let at = (dx.clamp(-1e7, 1e7) as i32, dy.clamp(-1e7, 1e7) as i32);
-    let shown = app.move_preview.take().filter(|p| p.shown.is_some() && p.offsets.last() == Some(&at));
     if dx == 0.0 && dy == 0.0 {
         return;
     }
-    if app.run("layer.translate", json!({"dx": dx, "dy": dy})).is_err() {
-        return;
+    if !crate::transform_tool::is_cached_move(app) {
+        let ctx = app.bounds_context.clone().unwrap_or_default();
+        if let Err(error) = crate::transform_tool::begin_cached_move(app, &ctx) {
+            app.ui.status = error;
+            app.ui.status_error = true;
+            return;
+        }
     }
-    let Some(p) = shown else { return };
-    crate::canvas::shown_as_document(app, p.doc, is_preview_key);
+    crate::transform_tool::nudge(app, dx, dy);
 }
 
 #[cfg(test)]
 mod tests {
-    use photocraft_geom::Rect;
+    use crate::{PhotocraftApp, canvas::ToolEvent, state::Tool};
     use serde_json::json;
 
-    use crate::PhotocraftApp;
-    use crate::canvas::ToolEvent;
-    use crate::state::Tool;
-
-    #[test]
-    fn dragging_a_layer_larger_than_the_canvas_redraws_what_comes_in_from_beyond_the_edge() {
+    fn app() -> (PhotocraftApp, photocraft_doc::LayerId) {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
-        app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
+        app.session.execute("file.new", json!({"width":64,"height":64,"background":"transparent"})).unwrap();
         app.sync_views();
-        app.session.execute("layer.new.layer", json!({})).unwrap();
-        app.session
-            .edit("paint", |doc, a| {
-                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(-32, -32, 96, 96), &[1.0, 0.0, 0.0, 1.0]);
-                Ok(())
-            })
-            .unwrap();
-        app.ui.tool = Tool::Move;
-        app.ui.extras.snap = false;
-        app.ui.view.show.smart_guides = false;
-        let m = egui::Modifiers::NONE;
-        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 32.0, y: 32.0, pressure: 1.0 }, m);
-        let mut keys = Vec::new();
-        for x in [42.0, 52.0] {
-            crate::canvas::tool_event(&mut app, ToolEvent::Move { x, y: 32.0, pressure: 1.0 }, m);
-            keys.push(super::display_doc(&mut app, 0).unwrap().1);
-        }
-        let st = app.session.active().unwrap();
-        // From +10 to +20 the strip x 0..10 shows pixels that were off the canvas a frame ago.
-        let r = super::damage(&app, st.doc.id, st.revision, keys[0], keys[1]).unwrap();
-        assert_eq!(r, Rect::new(0, 0, 64, 64));
-    }
-
-    /// A shape reaching past the canvas edge renders cut at the canvas, but its path goes on: a
-    /// drag frame must redraw where the rest of it was, or the cut edge stays behind (#3946).
-    #[test]
-    fn dragging_a_shape_past_the_canvas_edge_leaves_no_trail() {
-        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
-        app.session.execute("file.new", json!({"width": 64, "height": 64, "background": "transparent"})).unwrap();
-        app.sync_views();
-        let id = app.session.execute("shape.create", json!({"kind": "rect", "rect": [40, 16, 50, 32], "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
-        let id = photocraft_doc::LayerId(id);
-        app.ui.tool = Tool::Move;
-        app.ui.extras.snap = false;
-        app.ui.view.show.smart_guides = false;
-        let m = egui::Modifiers::NONE;
-        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 50.0, y: 32.0, pressure: 1.0 }, m);
-        let mut frames = Vec::new();
-        for x in [40.0, 10.0] {
-            crate::canvas::tool_event(&mut app, ToolEvent::Move { x, y: 32.0, pressure: 1.0 }, m);
-            frames.push(super::display_doc(&mut app, 0).unwrap());
-        }
-        let st = app.session.active().unwrap();
-        let r = super::damage(&app, st.doc.id, st.revision, frames[0].1, frames[1].1).unwrap();
-        let alpha = |d: &photocraft_doc::Document, x, y| d.layer(id).and_then(|l| l.surface()).map_or(0.0, |s| s.pixel(x, y)[3]);
-        for y in 0..64 {
-            for x in 0..64 {
-                if alpha(&frames[0].0, x, y) != alpha(&frames[1].0, x, y) {
-                    assert!(r.contains(x, y), "({x}, {y}) changed outside the redrawn {r:?}");
-                }
-            }
-        }
-    }
-
-    /// Dragging with an unlinked mask targeted moves the mask alone, shown live and committed;
-    /// with the mask linked (or the pixels targeted) the layer moves.
-    #[test]
-    fn dragging_with_an_unlinked_mask_targeted_moves_the_mask_alone() {
-        for (linked, mask_target) in [(false, true), (false, false), (true, true)] {
-            let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
-            app.session.execute("file.new", json!({"width": 64, "height": 64, "background": "transparent"})).unwrap();
-            app.sync_views();
-            app.session.execute("layer.new.layer", json!({})).unwrap();
-            app.session.execute("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
-            app.session.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
-            app.session.execute("select.deselect", json!({})).unwrap();
-            app.session.execute("layer.layerMask.revealAll", json!({})).unwrap();
-            app.session.execute("layer.layerMask.linked", json!({"linked": linked})).unwrap();
-            app.ui.mask_target = mask_target;
-            app.ui.tool = Tool::Move;
-            app.ui.extras.snap = false;
-            app.ui.view.show.smart_guides = false;
-            let m = egui::Modifiers::NONE;
-            crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 16.0, y: 16.0, pressure: 1.0 }, m);
-            crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 36.0, y: 16.0, pressure: 1.0 }, m);
-            let shown = super::display_doc(&mut app, 0).unwrap().0;
-            let id = app.session.active().unwrap().active_layer.unwrap();
-            let layer_moved = |d: &photocraft_doc::Document| d.layer(id).and_then(|l| l.surface()).is_some_and(|s| s.pixel(28, 16)[3] > 0.5);
-            let alone = !linked && mask_target;
-            assert_eq!(layer_moved(&shown), !alone, "preview, linked {linked} mask target {mask_target}");
-            crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 36.0, y: 16.0 }, m);
-            let d = &app.session.active().unwrap().doc;
-            assert_eq!(layer_moved(d), !alone, "commit, linked {linked} mask target {mask_target}");
-        }
-    }
-
-    /// Mid-drag on a painted layer: is the layer shown at the pointer?
-    fn live(outline: bool) -> bool {
-        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
-        app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
-        app.sync_views();
-        app.session.execute("layer.new.layer", json!({})).unwrap();
-        app.session.execute("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
-        app.session.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+        app.session.execute("select.rect", json!({"x":8,"y":8,"width":8,"height":8})).unwrap();
+        app.session.execute("edit.fill", json!({"color":"#ff0000"})).unwrap();
         app.session.execute("select.deselect", json!({})).unwrap();
-        app.session.edit_prefs(|p| p.interface.show_bounding_box_when_dragging_layer = outline);
         app.ui.tool = Tool::Move;
-        let m = egui::Modifiers::NONE;
-        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 16.0, y: 16.0, pressure: 1.0 }, m);
-        crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 30.0, y: 20.0, pressure: 1.0 }, m);
-        let shown = super::display_doc(&mut app, 0).is_some();
-        assert_eq!(shown, super::showing(&app));
-        shown
-    }
-
-    #[test]
-    fn bounding_box_preference_turns_the_live_drag_off() {
-        assert!(live(false), "by default the layer follows the pointer");
-        assert!(!live(true), "with the preference on, only the outline and arrow move");
-    }
-
-    /// A `depth`-bit transparent document whose layer holds a red square (8..24)² and a blue one
-    /// (40..56)×(8..24), the red one selected; the Move tool with Auto-Select on.
-    fn selected_pixels(depth: u32) -> (PhotocraftApp, photocraft_doc::LayerId) {
-        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
-        app.session.execute("file.new", json!({"width": 64, "height": 64, "background": "transparent", "depth": depth})).unwrap();
-        app.sync_views();
-        for (x, color) in [(40, "#0000ff"), (8, "#ff0000")] {
-            app.session.execute("select.rect", json!({"x": x, "y": 8, "width": 16, "height": 16})).unwrap();
-            app.session.execute("edit.fill", json!({"color": color})).unwrap();
-        }
-        app.ui.tool = Tool::Move;
-        app.ui.tool_options.move_auto_select = true;
+        app.ui.tool_options.move_auto_select = false;
         app.ui.extras.snap = false;
         app.ui.view.show.smart_guides = false;
+        app.bounds_context = Some(egui::Context::default());
         let id = app.session.active().unwrap().active_layer.unwrap();
         (app, id)
     }
 
-    fn alpha(app: &PhotocraftApp, id: photocraft_doc::LayerId, x: i32, y: i32) -> f32 {
-        app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().rgba(x, y)[3]
+    fn drag(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) {
+        let m = egui::Modifiers::NONE;
+        crate::canvas::tool_event(app, ToolEvent::Down { x: start[0], y: start[1], pressure: 1.0 }, m);
+        crate::canvas::tool_event(app, ToolEvent::Move { x: end[0], y: end[1], pressure: 1.0 }, m);
+        crate::canvas::tool_event(app, ToolEvent::Up { x: end[0], y: end[1] }, m);
     }
 
-    fn offset(app: &PhotocraftApp) -> Option<(i32, i32)> {
-        photocraft_engine::float_cmds::floating(app.session.active().unwrap()).map(|f| f.offset)
-    }
-
-    fn drag(app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2], m: egui::Modifiers) {
-        crate::canvas::tool_event(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }, m);
-        crate::canvas::tool_event(app, ToolEvent::Move { x: to[0], y: to[1], pressure: 1.0 }, m);
-        crate::canvas::tool_event(app, ToolEvent::Up { x: to[0], y: to[1] }, m);
-    }
-
-    /// ↩ through the app's key handling.
-    fn enter(app: &mut PhotocraftApp) {
+    #[test]
+    fn cached_move_keeps_source_unchanged_across_drags_until_enter() {
+        let (mut app, id) = app();
+        let revision = app.session.active().unwrap().revision;
+        let history = app.session.active().unwrap().history.past_len();
+        drag(&mut app, [10.0, 10.0], [20.0, 15.0]);
+        drag(&mut app, [20.0, 15.0], [23.0, 17.0]);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.revision, revision);
+        assert_eq!(st.history.past_len(), history);
+        assert_eq!(st.doc.layer(id).unwrap().surface().unwrap().rgba(10, 10)[3], 1.0);
+        let t = app.ui.transform.as_ref().unwrap();
+        assert_eq!([t.quad[0][0] - t.rect[0], t.quad[0][1] - t.rect[1]], [13.0, 7.0]);
+        assert!(super::display_doc(&mut app, 0).is_none(), "the canvas uses its cached mesh");
         let ctx = egui::Context::default();
-        let key = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
-        let input = egui::RawInput { events: vec![key], ..Default::default() };
-        ctx.run_ui(input, |ui| crate::shortcuts::handle(app, ui.ctx())).textures_delta.clear();
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| crate::shortcuts::handle(&mut app, ui.ctx())).textures_delta.clear();
+        assert!(app.ui.transform.is_none());
+        let st = app.session.active().unwrap();
+        assert_eq!(st.history.past_len(), history + 1);
+        assert_eq!(st.doc.layer(id).unwrap().surface().unwrap().rgba(10, 10)[3], 0.0);
+        assert_eq!(st.doc.layer(id).unwrap().surface().unwrap().rgba(23, 17)[3], 1.0);
+        assert!(app.session.undo());
+        assert_eq!(app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().rgba(10, 10)[3], 1.0);
     }
 
-    /// #578: with a selection the Move tool drags the selected pixels (from anywhere, without an
-    /// Auto-Select pick), not the layer; ↩ drops them as one "Move" step that one undo takes back.
     #[test]
-    fn with_a_selection_the_move_tool_moves_only_the_selected_pixels() {
-        for depth in [8, 16, 32] {
-            let (mut app, id) = selected_pixels(depth);
-            let steps = app.session.active().unwrap().history.past_len();
-            drag(&mut app, [50.0, 40.0], [60.0, 45.0], egui::Modifiers::NONE);
-            assert_eq!(offset(&app), Some((10, 5)), "{depth}-bit: floating");
-            let shown = super::display_doc(&mut app, 0).unwrap().0;
-            let shown_alpha = |x, y| shown.layer(id).unwrap().surface().unwrap().rgba(x, y)[3];
-            assert!(shown_alpha(10, 10) == 0.0 && shown_alpha(30, 25) == 1.0, "{depth}-bit: shown moved");
-            enter(&mut app);
-            assert_eq!(offset(&app), None, "{depth}-bit: ↩ dropped it");
-            assert_eq!(alpha(&app, id, 10, 10), 0.0, "{depth}-bit: the hole is transparent");
-            assert_eq!(alpha(&app, id, 30, 25), 1.0, "{depth}-bit: the red square moved");
-            assert_eq!(alpha(&app, id, 48, 16), 1.0, "{depth}-bit: the unselected blue one stayed");
-            let st = app.session.active().unwrap();
-            assert_eq!(st.doc.selection.as_ref().unwrap().content_bounds(), Rect::new(18, 13, 34, 29), "{depth}-bit");
-            assert_eq!((st.history.past_len(), st.history.undo_label()), (steps + 1, Some("Move")), "{depth}-bit");
-            assert!(app.session.undo());
-            assert!(alpha(&app, id, 10, 10) == 1.0 && alpha(&app, id, 30, 25) == 0.0, "{depth}-bit: undone");
-        }
-    }
-
-    /// ⌥ copies the selected pixels (no layer copy), ⇧ locks the drag to multiples of 45°.
-    #[test]
-    fn alt_copies_and_shift_constrains_the_selected_pixels() {
-        for depth in [8, 16, 32] {
-            let (mut app, id) = selected_pixels(depth);
-            let layers = app.session.active().unwrap().doc.layers.len();
-            drag(&mut app, [16.0, 16.0], [30.0, 28.0], egui::Modifiers::ALT | egui::Modifiers::SHIFT);
-            assert_eq!(offset(&app), Some((13, 13)), "{depth}-bit: 45°");
-            app.run("select.drop", json!({})).unwrap();
-            assert_eq!(app.session.active().unwrap().doc.layers.len(), layers, "{depth}-bit: no layer copy");
-            assert!(alpha(&app, id, 10, 10) == 1.0 && alpha(&app, id, 35, 35) == 1.0, "{depth}-bit: original and copy");
-            assert!(app.session.undo());
-            assert_eq!(alpha(&app, id, 35, 35), 0.0, "{depth}-bit: undone");
-        }
-    }
-
-    /// ⌘-drag with a painting tool drags the selected pixels as the Move tool does, also when ⌘
-    /// comes with the event (control channel, MCP) rather than as the held-key override.
-    #[test]
-    fn command_drag_with_a_painting_tool_moves_only_the_selected_pixels() {
-        let (mut app, id) = selected_pixels(8);
+    fn switching_tools_commits_the_pending_move_once() {
+        let (mut app, id) = app();
+        let h0 = app.session.active().unwrap().history.past_len();
+        drag(&mut app, [10.0, 10.0], [20.0, 10.0]);
+        assert_eq!(app.session.active().unwrap().history.past_len(), h0);
         app.ui.tool = Tool::Brush;
-        app.ui.tool_options.move_auto_select = false;
-        let cmd = egui::Modifiers { mac_cmd: true, command: true, ..Default::default() };
-        drag(&mut app, [50.0, 40.0], [60.0, 45.0], cmd);
-        assert_eq!(offset(&app), Some((10, 5)), "the selected pixels float");
-        drag(&mut app, [50.0, 40.0], [60.0, 45.0], cmd);
-        assert_eq!(offset(&app), Some((20, 10)), "a second drag moves the same floating piece");
-        app.run("select.drop", json!({})).unwrap();
-        assert!(alpha(&app, id, 10, 10) == 0.0 && alpha(&app, id, 40, 30) == 1.0, "the red square moved");
-        assert_eq!(alpha(&app, id, 48, 16), 1.0, "the unselected blue one stayed");
-    }
-
-    /// A click moves nothing and leaves nothing floating (Undo isn't spent putting it back).
-    #[test]
-    fn a_click_with_a_selection_moves_nothing() {
-        let (mut app, id) = selected_pixels(8);
-        let steps = app.session.active().unwrap().history.past_len();
-        drag(&mut app, [16.0, 16.0], [16.0, 16.0], egui::Modifiers::NONE);
-        assert_eq!(offset(&app), None);
-        assert_eq!(app.session.active().unwrap().history.past_len(), steps);
-        assert!(alpha(&app, id, 10, 10) == 1.0 && alpha(&app, id, 48, 16) == 1.0);
+        crate::transform_tool::end_if_left(&mut app);
+        assert!(app.ui.transform.is_none());
+        assert_eq!(app.session.active().unwrap().history.past_len(), h0 + 1);
+        assert_eq!(app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().rgba(20, 10)[3], 1.0);
     }
 
     #[test]
-    fn arrow_keys_nudge_the_selected_pixels() {
-        let (mut app, id) = selected_pixels(16);
-        crate::move_mods::nudge(&mut app, 10.0, 0.0, false);
-        crate::move_mods::nudge(&mut app, 0.0, 1.0, false);
-        assert_eq!(offset(&app), Some((10, 1)));
-        // ⌥ leaves the piece where it is and nudges a copy of it.
-        crate::move_mods::nudge(&mut app, 1.0, 0.0, true);
-        assert_eq!(offset(&app), Some((1, 0)));
-        app.run("select.drop", json!({})).unwrap();
-        assert!(alpha(&app, id, 10, 10) == 0.0 && alpha(&app, id, 18, 20) == 1.0 && alpha(&app, id, 34, 20) == 1.0);
-        assert_eq!(alpha(&app, id, 48, 16), 1.0, "the layer itself didn't move");
+    fn document_commands_cannot_overwrite_or_commit_pending_move() {
+        let (mut app, id) = app();
+        drag(&mut app, [10.0, 10.0], [20.0, 10.0]);
+        let revision = app.session.active().unwrap().revision;
+        let session = app.ui.transform.as_ref().unwrap().session;
+        assert!(app.run("layer.new.layer", json!({})).is_err());
+        assert!(app.run("edit.fill", json!({"color":"#0000ff"})).is_err());
+        assert_eq!(app.session.active().unwrap().revision, revision);
+        assert_eq!(app.ui.transform.as_ref().unwrap().session, session);
+        assert_eq!(app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().rgba(10, 10)[3], 1.0);
     }
 
-    /// Without floatable pixels (a position-locked layer) the Move tool behaves as without a
-    /// selection: it moves the layer, which the lock refuses.
     #[test]
-    fn a_layer_that_cannot_float_moves_whole_as_before() {
-        let (mut app, id) = selected_pixels(8);
-        app.session.execute("layer.lockLayers", json!({"position": true})).unwrap();
-        drag(&mut app, [16.0, 16.0], [26.0, 16.0], egui::Modifiers::NONE);
-        assert_eq!(offset(&app), None);
-        assert!(alpha(&app, id, 10, 10) == 1.0 && alpha(&app, id, 30, 16) == 0.0, "nothing moved");
-        // Without a selection the layer moves whole.
-        app.session.execute("layer.lockLayers", json!({"position": false})).unwrap();
-        app.session.execute("select.deselect", json!({})).unwrap();
-        drag(&mut app, [16.0, 16.0], [26.0, 16.0], egui::Modifiers::NONE);
-        assert!(alpha(&app, id, 10, 10) == 0.0 && alpha(&app, id, 58, 16) == 1.0, "the whole layer moved");
+    fn move_then_transform_preserves_the_same_source_and_pending_translation() {
+        let (mut app, _) = app();
+        drag(&mut app, [10.0, 10.0], [20.0, 10.0]);
+        let before = app.ui.transform.clone().unwrap();
+        let revision = app.session.active().unwrap().revision;
+        crate::menus::invoke(&mut app, &egui::Context::default(), "edit.freeTransform", json!({})).unwrap();
+        let after = app.ui.transform.as_ref().unwrap();
+        assert_eq!(after.session, before.session);
+        assert_eq!(after.quad, before.quad);
+        assert_eq!(app.session.active().unwrap().revision, revision);
+        assert!(!crate::transform_tool::is_cached_move(&app));
+    }
+
+    #[test]
+    fn alt_move_copies_only_selected_pixels_on_the_same_layer() {
+        let (mut app, id) = app();
+        app.ui.tool_options.move_target = "layer".into();
+        app.session.execute("select.rect", json!({"x":8,"y":8,"width":4,"height":8})).unwrap();
+        let n = app.session.active().unwrap().doc.layers.len();
+        let m = egui::Modifiers::ALT;
+        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 10.0, y: 10.0, pressure: 1.0 }, m);
+        crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 30.0, y: 10.0, pressure: 1.0 }, m);
+        crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 30.0, y: 10.0 }, m);
+        assert_eq!(app.session.active().unwrap().doc.layers.len(), n);
+        crate::transform_tool::commit(&mut app);
+        let st = app.session.active().unwrap();
+        let surface = st.doc.layer(id).unwrap().surface().unwrap();
+        assert_eq!(surface.rgba(10, 10)[3], 1.0);
+        assert_eq!(surface.rgba(30, 10)[3], 1.0);
+        assert_eq!(surface.rgba(34, 10)[3], 0.0, "unselected pixels were not copied");
+    }
+
+    #[test]
+    fn cached_move_accumulates_subpixel_pointer_samples() {
+        let (mut app, _) = app();
+        let m = egui::Modifiers::NONE;
+        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 10.0, y: 10.0, pressure: 1.0 }, m);
+        for x in [10.2, 10.4, 10.6, 10.8, 11.0] {
+            crate::canvas::tool_event(&mut app, ToolEvent::Move { x, y: 10.0, pressure: 1.0 }, m);
+        }
+        crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 11.0, y: 10.0 }, m);
+        let t = app.ui.transform.as_ref().unwrap();
+        assert_eq!(t.quad[0][0] - t.rect[0], 1.0);
+    }
+
+    #[test]
+    fn cached_move_escape_discards_without_history_or_pixel_changes() {
+        let (mut app, id) = app();
+        let revision = app.session.active().unwrap().revision;
+        drag(&mut app, [10.0, 10.0], [30.0, 30.0]);
+        crate::transform_tool::cancel(&mut app);
+        assert!(app.ui.transform.is_none());
+        let st = app.session.active().unwrap();
+        assert_eq!(st.revision, revision);
+        assert_eq!(st.doc.layer(id).unwrap().surface().unwrap().rgba(10, 10)[3], 1.0);
+    }
+
+    #[test]
+    fn cached_move_alt_duplicate_cancels_without_leaving_a_layer_or_history() {
+        let (mut app, id) = app();
+        let n = app.session.active().unwrap().doc.layers.len();
+        let h = app.session.active().unwrap().history.past_len();
+        let mods = egui::Modifiers::ALT;
+        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 10., y: 10., pressure: 1. }, mods);
+        crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 30., y: 10., pressure: 1. }, mods);
+        crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 30., y: 10. }, mods);
+        assert_eq!(app.session.active().unwrap().doc.layers.len(), n + 1);
+        crate::transform_tool::cancel(&mut app);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.doc.layers.len(), n);
+        assert_eq!(st.history.past_len(), h);
+        assert_eq!(st.active_layer, Some(id));
+        assert_eq!(st.doc.layer(id).unwrap().surface().unwrap().rgba(10, 10)[3], 1.);
+    }
+
+    #[test]
+    fn cached_move_alt_on_pending_source_cannot_commit_or_duplicate() {
+        let (mut app, _) = app();
+        drag(&mut app, [10., 10.], [20., 10.]);
+        let revision = app.session.active().unwrap().revision;
+        let quad = app.ui.transform.as_ref().unwrap().quad;
+        let session = app.ui.transform.as_ref().unwrap().session;
+        crate::move_mods::nudge(&mut app, 1., 0., true);
+        let mods = egui::Modifiers::ALT;
+        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 20., y: 10., pressure: 1. }, mods);
+        crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 35., y: 10., pressure: 1. }, mods);
+        crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 40., y: 10. }, mods);
+        assert_eq!(app.session.active().unwrap().revision, revision);
+        assert_eq!(app.ui.transform.as_ref().unwrap().session, session);
+        assert_eq!(app.ui.transform.as_ref().unwrap().quad, quad);
+        assert!(app.ui.status_error);
+    }
+
+    #[test]
+    fn cached_move_save_entry_cannot_write_the_uncommitted_source() {
+        let (mut app, _) = app();
+        drag(&mut app, [10., 10.], [20., 10.]);
+        let result = app.write_document("pending.png".into(), &crate::ExportSettings::default(), false);
+        assert!(result.unwrap_err().contains("Press Enter"));
+        let doc = app.session.active().unwrap().doc.clone();
+        assert!(crate::view_cmds::write_copy(&mut app, &doc, "pending.png", None).unwrap_err().contains("Press Enter"));
+        assert!(app.ui.transform.is_some());
+    }
+
+    #[test]
+    fn cached_move_metadata_and_layer_selection_leave_the_frozen_target_pending() {
+        let (mut app, id) = app();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        let other = app.session.active().unwrap().active_layer.unwrap();
+        app.session.execute("layer.select", json!({"layer":id.0})).unwrap();
+        drag(&mut app, [10., 10.], [20., 10.]);
+        let session = app.ui.transform.as_ref().unwrap().session;
+        app.run("layer.setProps", json!({"layer":id.0,"name":"Pending","opacity":0.4})).unwrap();
+        app.run("layer.select", json!({"layer":other.0})).unwrap();
+        crate::transform_tool::end_if_left(&mut app);
+        assert_eq!(app.ui.transform.as_ref().unwrap().session, session);
+        assert_eq!(app.ui.transform.as_ref().unwrap().layer, id.0);
+        let st = app.session.active().unwrap();
+        assert_eq!(super::shown_offset(&app, st.doc.id, st.revision, id), Some((10, 0)), "the frozen source keeps its offset");
+        assert_eq!(super::shown_offset(&app, st.doc.id, st.revision, other), None, "a newly selected layer stays in place");
+        assert_eq!(app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().rgba(10, 10)[3], 1.);
+        crate::transform_tool::commit(&mut app);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.doc.layer(id).unwrap().opacity, 0.4);
+        assert_eq!(st.doc.layer(id).unwrap().surface().unwrap().rgba(20, 10)[3], 1.);
+        assert!(st.doc.layer(other).unwrap().surface().unwrap().content_bounds().is_empty());
     }
 }

@@ -1390,17 +1390,10 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     // Every theme gets the font, style and size controls (#1387), as with Auto-Select (#1275).
                     Tool::Type | Tool::VerticalType | Tool::HorizontalTypeMask | Tool::VerticalTypeMask => crate::type_tool::options_bar(app, ui),
                     Tool::Move if t.pro => {
-                        let o = &mut app.ui.tool_options;
-                        widgets::checkbox(ui, &mut o.move_auto_select, tl!("Auto-Select:"));
-                        widgets::dropdown(
-                            ui,
-                            "move-target",
-                            &mut o.move_target,
-                            &[("layer".to_string(), tl!("Layer")), ("group".to_string(), tl!("Group"))],
-                            76.0,
-                        );
+                        widgets::checkbox(ui, &mut app.ui.tool_options.move_auto_select, tl!("Auto-Select:"));
+                        crate::transform_tool::scope_options(app, ui, "move-target");
                         widgets::vline(ui, 22.0);
-                        widgets::checkbox(ui, &mut o.move_show_transform, tl!("Show Transform Controls"));
+                        widgets::checkbox(ui, &mut app.ui.tool_options.move_show_transform, tl!("Show Transform Controls"));
                         widgets::vline(ui, 22.0);
                         ui.spacing_mut().item_spacing.x = 0.0;
                         for (icon, tip, cmd) in [
@@ -1452,6 +1445,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     Tool::Move => {
                         // The Studio themes keep Photoshop's Auto-Select toggle too (#1275).
                         widgets::checkbox(ui, &mut app.ui.tool_options.move_auto_select, tl!("Auto-Select:"));
+                        crate::transform_tool::scope_options(app, ui, "move-target");
                         // And Show Transform Controls (#5740): without it the box could not be
                         // turned on outside the Pro themes.
                         widgets::checkbox(ui, &mut app.ui.tool_options.move_show_transform, tl!("Show Transform Controls"));
@@ -3319,7 +3313,7 @@ fn draw_layer_thumb(app: &mut PhotocraftApp, ctx: &egui::Context, ui: &egui::Ui,
         }
         _ => {
             // Keep row layout and outside thumbnail decorations when the image is clipped.
-            if ui.is_rect_visible(rect) {
+            if ui.is_rect_visible(rect) && !app.paint_gpu_layer_thumb(p, doc, l, rect) {
                 // The texture is a letterboxed square: draw only the part its frame (the document,
                 // or the layer's bounds) fills.
                 let (tex, frame) = app.layer_thumb(ctx, doc, l);
@@ -3368,7 +3362,7 @@ fn history(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if let Some(layer) = doc.layers.first() {
             widgets::checker(ui.painter(), thumb, 4.0);
-            let (tex, _) = app.layer_thumb(&ctx, &doc, layer);
+            let tex = app.gpu_layer_thumb(&doc, layer).unwrap_or_else(|| app.layer_thumb(&ctx, &doc, layer).0);
             ui.painter().image(tex, thumb, Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
         }
         ui.painter().rect_stroke(thumb, 0.0, Stroke::new(1.0, t.separator), StrokeKind::Outside);
