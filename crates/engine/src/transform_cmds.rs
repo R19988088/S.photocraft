@@ -54,9 +54,11 @@ fn framed_by_selection(doc: &Document, bounds: Rect) -> Rect {
 }
 
 /// A group moves all its descendants, so its frame must not clip raster children to the selection.
-pub(crate) fn whole_layer_bounds(layer: &Layer) -> Rect {
+pub fn whole_layer_bounds(layer: &Layer) -> Rect {
     let content = match &layer.content {
-        LayerContent::Group(g) => g.children.iter().map(whole_layer_bounds).fold(Rect::EMPTY, |a, b| a.union(&b)),
+        LayerContent::Group(g) => {
+            g.children.iter().map(whole_layer_bounds).fold(g.artboard.as_ref().map_or(Rect::EMPTY, |board| board.rect), |a, b| a.union(&b))
+        }
         _ => layer.surface().map_or(Rect::EMPTY, photocraft_compose::bounds::content_bounds),
     };
     if content.is_empty() { layer.mask.as_ref().map_or(Rect::EMPTY, |m| photocraft_compose::bounds::content_bounds(&m.surface)) } else { content }
@@ -350,9 +352,10 @@ fn transform_layer_with(
     ctl: &Interrupt,
 ) -> Result<()> {
     check_layer_budget(doc_sel, l, h)?;
-    apply_transform(doc_sel, group, l, h, affine, interp, ctl)
+    apply_transform(doc_sel, group, l, h, affine, interp, ctl, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_transform(
     doc_sel: Option<&Surface>,
     group: Locks,
@@ -361,6 +364,7 @@ fn apply_transform(
     affine: Option<Affine>,
     interp: Interp,
     ctl: &Interrupt,
+    cached: Option<&crate::cached_transform::CachedCommit>,
 ) -> Result<()> {
     crate::allocation::checkpoint("transforming pixels")?;
     let locks = transform_locks(l, group, false);
@@ -370,7 +374,7 @@ fn apply_transform(
     if h.is_identity() {
         if let LayerContent::Group(g) = &mut l.content {
             for c in g.children.iter_mut() {
-                apply_transform(None, locks, c, h, affine, interp, ctl)?;
+                apply_transform(None, locks, c, h, affine, interp, ctl, cached)?;
             }
         }
         return Ok(());
@@ -383,8 +387,18 @@ fn apply_transform(
     l.fill_cache = None;
     match &mut l.content {
         LayerContent::Group(g) => {
+            if let Some(board) = &mut g.artboard {
+                let r = board.rect;
+                let corners = [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)].map(|(x, y)| h.apply(f64::from(x), f64::from(y)));
+                board.rect = Rect::new(
+                    corners.iter().map(|p| p.0).fold(f64::INFINITY, f64::min).floor() as i32,
+                    corners.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).floor() as i32,
+                    corners.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max).ceil() as i32,
+                    corners.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).ceil() as i32,
+                );
+            }
             for c in g.children.iter_mut() {
-                apply_transform(None, locks, c, h, affine, interp, ctl)?;
+                apply_transform(None, locks, c, h, affine, interp, ctl, cached)?;
             }
         }
         LayerContent::Text(t) => {
@@ -416,31 +430,40 @@ fn apply_transform(
             }
         }
         _ => {
+            let saved = cached.and_then(|c| c.pixels.get(&l.id));
             if let Some(surf) = l.surface_mut() {
-                *surf = match doc_sel {
-                    // Only the selected pixels move: lift them, clear them, warp and paste back. The
-                    // lifted pixels' own bounds are the edge a stretch repeats (#3773).
-                    Some(sel) => {
-                        let (lifted, mut rest) = split_selected(surf, sel)?;
-                        let moved = warp_surface_with(&lifted, lifted.content_bounds(), h, interp, ctl)?.ok_or(EngineError::Cancelled)?;
-                        composite_over(&mut rest, &moved);
-                        rest.prune();
-                        rest
-                    }
-                    None => {
-                        let src = surf.content_bounds();
-                        warp_surface_with(surf, src, h, interp, ctl)?.ok_or(EngineError::Cancelled)?
-                    }
-                };
+                if let Some(saved) = saved {
+                    *surf = saved.clone();
+                } else {
+                    *surf = match doc_sel {
+                        // Only the selected pixels move: lift them, clear them, warp and paste back. The
+                        // lifted pixels' own bounds are the edge a stretch repeats (#3773).
+                        Some(sel) => {
+                            let (lifted, mut rest) = split_selected(surf, sel)?;
+                            let moved = warp_surface_with(&lifted, lifted.content_bounds(), h, interp, ctl)?.ok_or(EngineError::Cancelled)?;
+                            composite_over(&mut rest, &moved);
+                            rest.prune();
+                            rest
+                        }
+                        None => {
+                            let src = surf.content_bounds();
+                            warp_surface_with(surf, src, h, interp, ctl)?.ok_or(EngineError::Cancelled)?
+                        }
+                    };
+                }
             }
         }
     }
     if let Some(m) = l.mask.as_mut()
         && m.linked
     {
-        m.surface = match mask_sel {
-            Some(sel) => warp_gray_selected(&m.surface, sel, h, interp)?,
-            None => warp_gray(&m.surface, h, interp)?,
+        m.surface = if let Some(saved) = cached.and_then(|c| c.masks.get(&l.id)) {
+            saved.clone()
+        } else {
+            match mask_sel {
+                Some(sel) => warp_gray_selected(&m.surface, sel, h, interp)?,
+                None => warp_gray(&m.surface, h, interp)?,
+            }
         };
     }
     if let Some(vm) = l.vector_mask.as_mut()
@@ -579,6 +602,7 @@ fn with_panel_target(s: &Session, p: &Value) -> Value {
     let mut p = if p.is_object() { p.clone() } else { json!({}) };
     if p.get("target").is_none()
         && p.get("layer").is_none()
+        && p.get("layers").is_none()
         && let (Some(m), Some(Value::Object(t))) = (p.as_object_mut(), crate::channel_cmds::targeted_channel(s))
     {
         m.extend(t);
@@ -589,7 +613,11 @@ fn with_panel_target(s: &Session, p: &Value) -> Value {
 fn transform(s: &mut Session, p: &Value) -> Result<Value> {
     let p = &with_panel_target(s, p);
     let st = s.active().ok_or(EngineError::NoDocument)?;
-    let id = crate::commands::explicit_layer(s, p)?.or(st.active_layer);
+    let roots = crate::edit_scope::explicit(&st.doc, p)?;
+    if roots.is_some() && p.get("target").is_some_and(|v| v != "pixels") {
+        return Err(bad("`layers` requires the pixels target"));
+    }
+    let id = roots.as_ref().and_then(|ids| ids.first().copied()).or(crate::commands::explicit_layer(s, p)?).or(st.active_layer);
     let lone = lone_target(&st.doc, id, p)?;
     let id = match (id, lone.is_some() && crate::channel_cmds::is_channel_target(p)) {
         (_, true) => None,
@@ -604,7 +632,20 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
         _ => {
             let b = match (lone, id) {
                 (Some(surf), _) => target_bounds(&st.doc, surf),
-                (None, Some(id)) => transform_bounds(&st.doc, st.doc.layer(id).ok_or(EngineError::NoLayer(id))?),
+                (None, Some(id)) => match &roots {
+                    Some(ids) => ids
+                        .iter()
+                        .filter_map(|id| st.doc.layer(*id))
+                        .map(|l| {
+                            if ids.len() > 1 || p.get("wholeLayers").and_then(Value::as_bool).unwrap_or(false) {
+                                whole_layer_bounds(l)
+                            } else {
+                                transform_bounds(&st.doc, l)
+                            }
+                        })
+                        .fold(Rect::EMPTY, |a, b| a.union(&b)),
+                    None => transform_bounds(&st.doc, st.doc.layer(id).ok_or(EngineError::NoLayer(id))?),
+                },
                 (None, None) => Rect::EMPTY,
             };
             if b.is_empty() {
@@ -636,12 +677,13 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
     let interp = Interp::parse(p.get("interpolation").and_then(Value::as_str).unwrap_or("bicubic"));
     let lone = lone.is_some();
     let p = p.clone();
+    let cached = s.take_cached_transform();
     // A background job when started with `Session::start` (#1015): the warp of a large layer runs
     // on a worker with progress, and can be cancelled.
     crate::jobs::edit_job(
         s,
         "Free Transform",
-        move |doc, _, ctx| ctx.stage(0.0, 1.0, "Transforming", |ctl| transform_doc(doc, id, &p, lone, &h, affine, interp, ctl)),
+        move |doc, _, ctx| ctx.stage(0.0, 1.0, "Transforming", |ctl| transform_doc(doc, id, &p, lone, &h, affine, interp, ctl, cached.as_ref())),
         move |()| json!({"rect": rect}),
     )
 }
@@ -657,6 +699,7 @@ fn transform_doc(
     affine: Option<Affine>,
     interp: Interp,
     ctl: &Interrupt,
+    cached: Option<&crate::cached_transform::CachedCommit>,
 ) -> Result<()> {
     let sel = doc.selection.clone();
     // The selection outline moves too: price it before anything is built.
@@ -680,19 +723,47 @@ fn transform_doc(
         return Ok(());
     }
     let id = id.ok_or_else(|| EngineError::Other("no active layer".into()))?;
-    let is_group = doc.layer(id).is_some_and(Layer::is_group);
-    let group = group_locks(doc, id);
-    // Photoshop turns the Background into a normal layer before transforming it.
-    crate::extra_cmds::background_to_layer(doc, id);
-    let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
-    transform_layer_with(if is_group { None } else { sel.as_ref() }, group, l, h, affine, interp, ctl)?;
-    if !h.is_identity() {
-        // Type layers re-render from their new transform.
-        let snapshot = doc.clone();
-        if let Some(l) = doc.layer_mut(id) {
-            refresh_text(&snapshot, l);
+    let ids = crate::edit_scope::explicit(doc, p)?.unwrap_or_else(|| vec![id]);
+    let whole_layers = ids.len() > 1 || p.get("wholeLayers").and_then(Value::as_bool).unwrap_or(false);
+    let pixel_selection = sel.as_ref().filter(|_| !whole_layers);
+    for id in &ids {
+        let layer = doc.layer(*id).ok_or(EngineError::NoLayer(*id))?;
+        if locked_for_transform(doc, *id) {
+            return Err(EngineError::Other(format!("layer \"{}\" is locked", layer.name)));
         }
-        // The selection outline moves with the pixels.
+        check_layer_budget(if layer.is_group() { None } else { pixel_selection }, layer, h)?;
+    }
+    for id in ids {
+        let is_group = doc.layer(id).is_some_and(Layer::is_group);
+        let group = group_locks(doc, id);
+        // Photoshop turns the Background into a normal layer before transforming it.
+        crate::extra_cmds::background_to_layer(doc, id);
+        let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
+        if p.get("copy").and_then(Value::as_bool).unwrap_or(false) && !moves_whole(l) && pixel_selection.is_some() {
+            let saved = cached.and_then(|c| c.pixels.get(&id));
+            if let Some(saved) = saved {
+                if let Some(surf) = l.surface_mut() {
+                    *surf = saved.clone();
+                }
+            } else if let (Some(surf), Some(selection)) = (l.surface_mut(), pixel_selection) {
+                let (lifted, _) = split_selected(surf, selection)?;
+                let moved = warp_surface_with(&lifted, lifted.content_bounds(), h, interp, ctl)?.ok_or(EngineError::Cancelled)?;
+                composite_over(surf, &moved);
+                surf.prune();
+            }
+        } else {
+            apply_transform(if is_group { None } else { pixel_selection }, group, l, h, affine, interp, ctl, cached)?;
+        }
+        if !h.is_identity() {
+            // Type layers re-render from their new transform.
+            let snapshot = doc.clone();
+            if let Some(l) = doc.layer_mut(id) {
+                refresh_text(&snapshot, l);
+            }
+        }
+    }
+    if !h.is_identity() {
+        // The selection outline moves once for the whole target set.
         if let Some(sel) = &doc.selection {
             doc.selection = Some(warp_gray(sel, h, Interp::Bilinear)?).filter(|s| !s.content_bounds().is_empty());
         }
@@ -706,7 +777,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Free Transform",
         menu: &[],
         shortcut: None,
-        params: r##"{"layer":id?,"rect":[x0,y0,x1,y1]? (source frame; default = layer content ∩ selection),"quad":[[x,y]×4]? (where the frame's corners go, clockwise from top-left),"matrix":[a,b,c,d,e,f]? (affine alternative),"scaleX":%?,"scaleY":%?,"rotate":deg?,"dx":px?,"dy":px? (relative alternative: scale and rotate about the frame's centre, then move, as a Photoshop action records a Free Transform),"interpolation":"bicubic|bilinear|nearest"="bicubic","target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target (an unlinked mask, an alpha channel or the Quick Mask transforms alone; a linked mask moves with its layer)}"##,
+        params: r##"{"layer":id?,"layers":[id,...]? (frozen layer roots; one atomic edit),"wholeLayers":bool=false (ignore pixel selection),"copy":bool=false (copy selected pixels),"rect":[x0,y0,x1,y1]? (source frame; default = layer content ∩ selection),"quad":[[x,y]×4]? (where the frame's corners go, clockwise from top-left),"matrix":[a,b,c,d,e,f]? (affine alternative),"scaleX":%?,"scaleY":%?,"rotate":deg?,"dx":px?,"dy":px? (relative alternative: scale and rotate about the frame's centre, then move, as a Photoshop action records a Free Transform),"interpolation":"bicubic|bilinear|nearest"="bicubic","target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target (an unlinked mask, an alpha channel or the Quick Mask transforms alone; a linked mask moves with its layer)}"##,
         enabled: has_layer,
         journal: true,
         run: transform,
@@ -737,6 +808,57 @@ mod tests {
     fn active_bounds(s: &Session) -> Rect {
         let st = s.active().unwrap();
         st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds()
+    }
+
+    #[test]
+    fn cached_scope_transform_moves_each_layer_once_and_undoes_atomically() {
+        let mut s = session();
+        let a = s.active().unwrap().active_layer.unwrap();
+        s.execute("layer.duplicate", json!({})).unwrap();
+        let b = s.active().unwrap().active_layer.unwrap();
+        let before = s.active().unwrap().doc.clone();
+        s.execute("edit.transform", json!({"layers": [a.0, b.0], "matrix": [1, 0, 0, 1, 7, 9], "interpolation": "nearest"})).unwrap();
+        for id in [a, b] {
+            assert_eq!(s.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds(), Rect::new(17, 19, 37, 29));
+        }
+        s.undo();
+        for id in [a, b] {
+            assert_eq!(
+                s.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds(),
+                before.layer(id).unwrap().surface().unwrap().content_bounds()
+            );
+        }
+    }
+
+    #[test]
+    fn whole_scope_ignores_pixel_selection_but_moves_its_outline_once() {
+        let mut s = session();
+        let a = s.active().unwrap().active_layer.unwrap();
+        s.execute("layer.duplicate", json!({})).unwrap();
+        let b = s.active().unwrap().active_layer.unwrap();
+        s.execute("select.rect", json!({"x":10,"y":10,"width":3,"height":3})).unwrap();
+        s.execute("edit.transform", json!({"layers":[a.0,b.0,a.0],"wholeLayers":true,"matrix":[1,0,0,1,7,9],"interpolation":"nearest"})).unwrap();
+        for id in [a, b] {
+            assert_eq!(s.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds(), Rect::new(17, 19, 37, 29));
+        }
+        assert_eq!(s.active().unwrap().doc.selection.as_ref().unwrap().content_bounds(), Rect::new(17, 19, 20, 22));
+    }
+
+    #[test]
+    fn scoped_transform_refuses_all_targets_atomically_when_one_is_locked() {
+        let mut s = session();
+        let a = s.active().unwrap().active_layer.unwrap();
+        s.execute("layer.duplicate", json!({})).unwrap();
+        let b = s.active().unwrap().active_layer.unwrap();
+        s.execute("layer.lockLayers", json!({"position":true})).unwrap();
+        let revision = s.active().unwrap().revision;
+        let history = s.active().unwrap().history.past_len();
+        assert!(s.execute("edit.transform", json!({"layers":[a.0,b.0],"matrix":[1,0,0,1,7,9]})).is_err());
+        assert_eq!(s.active().unwrap().revision, revision);
+        assert_eq!(s.active().unwrap().history.past_len(), history);
+        for id in [a, b] {
+            assert_eq!(s.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds(), Rect::new(10, 10, 30, 20));
+        }
     }
 
     // ---- Pixel budget (#3773). Tests run with a 2²⁰ px budget, so nothing here comes near the real one. ----

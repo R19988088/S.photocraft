@@ -107,7 +107,7 @@ pub fn cmd_moves(t: Tool) -> bool {
 pub fn cmd_nudges(app: &PhotocraftApp) -> bool {
     let t = app.ui.tool;
     let selecting = crate::tool_feedback::is_selection_tool(t);
-    app.ui.transform.is_none()
+    (app.ui.transform.is_none() || crate::transform_tool::is_cached_move(app))
         && app.ui.text_edit.is_none()
         && (cmd_moves(t) || t == Tool::Move || selecting)
         && !(selecting && (!app.ui.polygon.is_empty() || app.ui.magnetic.active()))
@@ -115,7 +115,7 @@ pub fn cmd_nudges(app: &PhotocraftApp) -> bool {
 
 /// Is ⌘ alone (no other temporary key) making the Move tool now?
 fn cmd_move_held(app: &PhotocraftApp, i: &InputState) -> bool {
-    i.modifiers.command && cmd_moves(app.ui.tool) && app.ui.transform.is_none() && app.ui.text_edit.is_none()
+    i.modifiers.command && cmd_moves(app.ui.tool) && (app.ui.transform.is_none() || crate::transform_tool::is_cached_move(app)) && app.ui.text_edit.is_none()
 }
 
 /// Is `id` a held temporary tool rather than a command?

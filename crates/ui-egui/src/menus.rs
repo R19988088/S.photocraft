@@ -540,7 +540,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
             if app.ui.transform.as_ref().is_some_and(|t| t.content_aware.is_some()) {
                 return Err(crate::transform_tool::CAS_ONLY_SCALES.into());
             }
-            if app.ui.transform.is_none() {
+            if app.ui.transform.is_none() || crate::transform_tool::is_cached_move(app) {
                 crate::transform_tool::begin(app, ctx)?;
             }
             if let Some(t) = app.ui.transform.as_mut() {

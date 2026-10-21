@@ -11,6 +11,7 @@ workspace = true
 bytemuck = { workspace = true }
 half = "2"
 photocraft-geom = { workspace = true }
+photocraft-algo = { workspace = true }
 photocraft-color = { workspace = true }
 photocraft-raster = { workspace = true }
 photocraft-doc = { workspace = true }
@@ -24,6 +25,7 @@ log = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
+photocraft-cms = { workspace = true }
 wgpu = { version = "30" }
 pollster = "1"
 # Shape layers in the effect parity tests.

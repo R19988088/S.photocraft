@@ -193,7 +193,16 @@ fn begin(app: &mut PhotocraftApp, p: [f64; 2], mods: egui::Modifiers) {
     let tool = crate::canvas::event_tool(app, mods);
     let moves_layer = crate::canvas::command_moves_layer(app, tool, p, mods);
     let crop_tol = crate::crop_ui::tolerance(app);
-    let gesture = if let Some(t) = &app.ui.transform {
+    let gesture = if crate::transform_tool::is_cached_move(app) {
+        app.ui.transform.as_ref().map(|t| {
+            let exclude = app
+                .session
+                .active()
+                .map(|st| photocraft_engine::edit_scope::roots(&st.doc, &st.selected_layers(), st.active_layer, &app.ui.tool_options.move_target))
+                .unwrap_or_default();
+            (Gesture::Move { rect: quad_rect(&t.quad) }, exclude)
+        })
+    } else if let Some(t) = &app.ui.transform {
         let corner = match crate::transform_tool::hit(t, p, crate::transform_tool::handle_tolerance(app)) {
             crate::transform_tool::Hit::Corner(index) => t.quad.get(index).map(|&point| (Gesture::TransformCorner { index, point }, vec![LayerId(t.layer)])),
             _ => None,
@@ -604,6 +613,7 @@ mod tests {
         crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 323.0, y: 100.0, pressure: 1.0 }, m);
         assert!(app.prefs_rt.snap_lines.iter().any(|l| l.vertical && l.pos == 300.0 && l.kind.is_smart()), "{:?}", app.prefs_rt.snap_lines);
         crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 323.0, y: 100.0 }, m);
+        crate::transform_tool::commit(&mut app);
         assert_eq!(mover_bounds(&app).x0, 300);
         assert!(app.prefs_rt.snap.is_none());
     }
@@ -620,6 +630,7 @@ mod tests {
             let gesture = app.prefs_rt.snap.as_ref().map(|s| s.gesture.clone());
             assert_eq!(gesture, Some(Gesture::Move { rect: [40.0, 40.0, 90.0, 80.0] }), "{tool:?}: the mover's box");
             crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 323.0, y: 100.0 }, cmd);
+            crate::transform_tool::commit(&mut app);
             assert_eq!(mover_bounds(&app).x0, 300, "{tool:?}: snapped to the target's edge");
         }
     }
@@ -649,6 +660,7 @@ mod tests {
             // The mover's left edge lands 3 px right of the target's and snaps to it.
             crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 323.0, y: 100.0, pressure: 1.0 }, m);
             crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 323.0, y: 100.0 }, m);
+            crate::transform_tool::commit(&mut app);
             assert_eq!(mover_bounds(&app).x0, 300, "{before}: snapped to the target's edge");
         }
     }

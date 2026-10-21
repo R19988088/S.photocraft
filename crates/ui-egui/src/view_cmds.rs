@@ -1471,6 +1471,9 @@ pub(crate) fn write_copy(
     path: &str,
     tga_bits: Option<photocraft_io::TgaBits>,
 ) -> Result<Value, String> {
+    if crate::transform_tool::is_cached_raster(app) && app.session.active().is_some_and(|st| st.doc.id == doc.id) {
+        return Err("Press Enter to apply the pending transform before saving or exporting.".into());
+    }
     let settings = crate::ExportSettings { tga_bits, ..app.save_settings() };
     let export = app.services.export.as_ref().ok_or("no exporter configured")?;
     let (bytes, warnings) = export(doc, path, &settings)?;

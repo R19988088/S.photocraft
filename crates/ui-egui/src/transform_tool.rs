@@ -59,6 +59,11 @@ enum WarpDrag {
 /// Preview state that isn't serialisable: the document without the transformed pixels, and
 /// full-resolution textures of those pixels (transform_tex.rs).
 pub struct TransformPreview {
+    targets: Vec<LayerId>,
+    move_only: bool,
+    gpu_preview: Option<GpuPreview>,
+    copy_selection: bool,
+    whole_layers: bool,
     pub session: u64,
     pub doc: Arc<Document>,
     pub texture: crate::transform_tex::PreviewTextures,
@@ -91,6 +96,513 @@ pub struct TransformPreview {
     committing: Option<JobId>,
     /// Content-Aware Scale's live preview (cas_transform.rs).
     pub(crate) content_aware: Option<crate::cas_transform::Live>,
+}
+
+struct GpuPreview {
+    doc: Arc<Document>,
+    work: Option<GpuWork>,
+    #[cfg(not(target_arch = "wasm32"))]
+    worker: TransformWorker,
+    last: Option<Step>,
+    interpolation: String,
+    region: Option<photocraft_geom::Rect>,
+    last_region: Option<photocraft_geom::Rect>,
+    generation: u64,
+    revision: u64,
+    error: Option<String>,
+}
+
+struct GpuWork {
+    renderer: photocraft_gpu::cached_transform::CachedTransform,
+    groups: photocraft_gpu::cached_group::CachedGroups,
+    state: eframe::egui_wgpu::RenderState,
+}
+
+struct RenderRequest {
+    transform: TransformSession,
+    doc: Arc<Document>,
+    original: Arc<Document>,
+    targets: Vec<LayerId>,
+    region: Option<photocraft_geom::Rect>,
+    generation: u64,
+}
+
+type RenderSources = std::collections::HashMap<LayerId, photocraft_gpu::SourceOverride>;
+type RenderResult = Result<(Arc<Document>, RenderSources), String>;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct TransformWorker {
+    send: std::sync::mpsc::Sender<(GpuWork, RenderRequest)>,
+    receive: std::sync::mpsc::Receiver<(GpuWork, RenderRequest, RenderResult)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TransformWorker {
+    fn new(ctx: egui::Context) -> Result<Self, String> {
+        let (send, jobs) = std::sync::mpsc::channel::<(GpuWork, RenderRequest)>();
+        let (done, receive) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("photocraft-transform".into())
+            .spawn(move || {
+                while let Ok((mut work, request)) = jobs.recv() {
+                    let result = encode_transform(&mut work, &request);
+                    if done.send((work, request, result)).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(Self { send, receive })
+    }
+}
+
+fn encode_transform(work: &mut GpuWork, request: &RenderRequest) -> RenderResult {
+    let t = &request.transform;
+    work.renderer.set_preview_region(request.region.map(|region| work.groups.preview_source_region(region)));
+    work.groups.set_preview_region(request.region);
+    let h = Homography::rect_to_quad(t.rect, t.quad).ok_or("The transform has no valid mapping")?;
+    let mut shown = (*request.doc).clone();
+    if t.warp.is_none() {
+        for (_, _, original) in request.original.walk() {
+            if !request.targets.iter().any(|id| request.original.layer(*id).is_some_and(|root| contains(root, original.id))) {
+                continue;
+            }
+            let Some(r) = original.artboard().map(|board| board.rect) else { continue };
+            let corners = [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)].map(|(x, y)| h.apply(f64::from(x), f64::from(y)));
+            if let Some(layer) = shown.layer_mut(original.id)
+                && let LayerContent::Group(group) = &mut layer.content
+                && let Some(board) = &mut group.artboard
+            {
+                board.rect = photocraft_geom::Rect::new(
+                    corners.iter().map(|p| p.0).fold(f64::INFINITY, f64::min).floor() as i32,
+                    corners.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).floor() as i32,
+                    corners.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max).ceil() as i32,
+                    corners.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).ceil() as i32,
+                );
+            }
+        }
+    }
+    work.groups.refresh_metadata(&shown);
+    let mut encoder = work.state.device.create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor { label: Some("pc_cached_transform") });
+    let mut sources = work
+        .renderer
+        .encode_sampled_with_homography(
+            &work.state.queue,
+            &mut encoder,
+            t.quad,
+            t.warp.is_some(),
+            &t.interpolation,
+            t.warp.is_none().then_some(h),
+            |x, y| t.warp.as_ref().map_or_else(|| h.apply(x, y), |w| w.map(x, y)),
+            |x, y| if t.warp.is_some() { 1.0 } else { h.w(x, y) },
+        )
+        .map_err(|error| error.to_string())?;
+    work.groups
+        .encode_sampled(
+            &work.state.device,
+            &work.state.queue,
+            &mut encoder,
+            &mut sources,
+            t.quad,
+            t.warp.is_some(),
+            &t.interpolation,
+            &|x, y| t.warp.as_ref().map_or_else(|| h.apply(x, y), |w| w.map(x, y)),
+            &|x, y| if t.warp.is_some() { 1.0 } else { h.w(x, y) },
+        )
+        .map_err(|error| error.to_string())?;
+    let submission = work.state.queue.submit([encoder.finish()]);
+    #[cfg(not(target_arch = "wasm32"))]
+    work.state
+        .device
+        .poll(eframe::wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+        .map_err(|error| format!("The transform GPU work did not complete: {error}"))?;
+    #[cfg(target_arch = "wasm32")]
+    let _ = submission;
+    Ok((Arc::new(shown), sources))
+}
+
+fn mask_values(layer: &photocraft_doc::Layer, rect: photocraft_geom::Rect) -> Vec<f32> {
+    let count = rect.width() as usize * rect.height() as usize;
+    if let Some(mask) = photocraft_compose::masks::combined_mask(layer, rect) {
+        let channels = mask.channels().max(1);
+        return mask.read_region(rect).chunks_exact(channels).map(|p| p.first().copied().unwrap_or(1.0)).collect();
+    }
+    if let Some(mask) = layer.mask.as_ref().filter(|m| m.enabled) {
+        let channels = mask.surface.channels().max(1);
+        return mask.surface.read_region(rect).chunks_exact(channels).map(|p| 1.0 - mask.density * (1.0 - p.first().copied().unwrap_or(1.0))).collect();
+    }
+    vec![1.0; count]
+}
+
+fn stationary_mask_values(layer: &photocraft_doc::Layer, canvas: photocraft_geom::Rect, output: photocraft_geom::Rect) -> Vec<f32> {
+    if let Some(mask) = photocraft_compose::masks::combined_mask(layer, canvas) { mask.read_region(output) } else { mask_values(layer, output) }
+}
+
+fn initialize_gpu(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = ctx;
+    let Some(gpu) = app.gpu.as_ref() else {
+        return Ok(());
+    };
+    let state = gpu.render_state().clone();
+    let (Some(t), Some(pv), Some(st)) = (&app.ui.transform, &app.transform_preview, app.session.active()) else { return Ok(()) };
+    if t.target.is_some() || t.path.is_some() || t.selection || t.content_aware.is_some() {
+        return Ok(());
+    }
+    let doc = st.doc.clone();
+    let margin = doc.walk().iter().map(|(_, _, l)| photocraft_compose::effects::margin(l)).max().unwrap_or(0);
+    let frame = photocraft_geom::Rect::new(t.rect[0] as i32, t.rect[1] as i32, t.rect[2] as i32, t.rect[3] as i32);
+    let roots = if pv.targets.is_empty() { vec![LayerId(t.layer)] } else { pv.targets.clone() };
+    let output = doc
+        .walk()
+        .iter()
+        .filter(|(_, _, layer)| roots.iter().any(|id| doc.layer(*id).is_some_and(|root| contains(root, layer.id))))
+        .filter_map(|(_, _, layer)| layer.mask.as_ref().filter(|m| m.linked).map(|m| m.surface.content_bounds()))
+        .fold(doc.bounds().union(&frame), |a, b| a.union(&b))
+        .inflate(margin);
+    let mut shown = (*doc).clone();
+    let mut sources = Vec::new();
+    for (_, _, layer) in doc.walk() {
+        if matches!(layer.content, LayerContent::Group(_) | LayerContent::Adjustment(_))
+            || !roots.iter().any(|id| doc.layer(*id).is_some_and(|r| contains(r, layer.id)))
+        {
+            continue;
+        }
+        let rect = photocraft_compose::layer_bounds(layer, output).intersect(&frame);
+        if rect.is_empty() {
+            continue;
+        }
+        let mut original;
+        let raw = if let Some(s) = layer.surface() {
+            s.clone()
+        } else {
+            let mut solo = (*doc).clone();
+            show_preview_target(&mut solo.layers, layer.id);
+            if let Some(l) = solo.layer_mut(layer.id) {
+                l.opacity = 1.0;
+                l.fill_opacity = 1.0;
+                l.effects.enabled = false;
+                l.mask = None;
+                l.vector_mask = None;
+            }
+            let buffer = photocraft_compose::render(&solo, rect);
+            original = photocraft_raster::Surface::new(photocraft_color::PixelFormat::RGBA32F);
+            original.write_region(rect, &buffer.px.iter().flatten().copied().collect::<Vec<_>>());
+            original
+        };
+        let mut moving = raw.clone();
+        let mut rest = vec![[0.0; 4]; output.width() as usize * output.height() as usize];
+        let mut rest_alpha = vec![0.0; rest.len()];
+        if let Some(selection) = doc.selection.as_ref().filter(|_| !pv.whole_layers && !photocraft_engine::transform_cmds::moves_whole(layer)) {
+            let (lifted, left) = photocraft_engine::transform_cmds::split_selected(&raw, selection).map_err(|e| e.to_string())?;
+            moving = lifted;
+            let remaining = if pv.copy_selection { &raw } else { &left };
+            let format = remaining.format();
+            let colors = format.mode.color_channels();
+            let values = remaining.read_region(output);
+            rest = values
+                .chunks_exact(format.channels())
+                .map(|p| {
+                    let mut c = [0.; 4];
+                    c[..colors.min(4)].copy_from_slice(&p[..colors.min(4)]);
+                    c
+                })
+                .collect();
+            rest_alpha = values.chunks_exact(format.channels()).map(|p| if format.alpha { p[colors] } else { 1.0 }).collect();
+        }
+        let mut linked = layer.clone();
+        if pv.copy_selection {
+            linked.mask = None;
+            linked.vector_mask = None;
+        }
+        if linked.mask.as_ref().is_some_and(|m| !m.linked) {
+            linked.mask = None;
+        }
+        if linked.vector_mask.as_ref().is_some_and(|m| !m.linked) {
+            linked.vector_mask = None;
+        }
+        let format = moving.format();
+        let native = moving.read_region(rect);
+        let colors = format.mode.color_channels();
+        let pixels = native
+            .chunks_exact(format.channels())
+            .map(|p| {
+                let mut c = [0.; 4];
+                c[..colors.min(4)].copy_from_slice(&p[..colors.min(4)]);
+                c
+            })
+            .collect();
+        let alpha = native.chunks_exact(format.channels()).map(|p| if format.alpha { p[colors] } else { 1.0 }).collect();
+        let mask_source = |vector: bool| -> Result<Option<photocraft_gpu::cached_transform::MaskSource>, String> {
+            let mut raw = linked.clone();
+            let feather = if vector {
+                raw.mask = None;
+                raw.vector_mask.as_ref().filter(|m| m.enabled).map(|m| m.feather)
+            } else {
+                raw.vector_mask = None;
+                raw.mask.as_ref().filter(|m| m.enabled).map(|m| m.feather)
+            };
+            let Some(feather) = feather else { return Ok(None) };
+            let density = if vector { raw.vector_mask.as_ref().map_or(1.0, |m| m.density) } else { raw.mask.as_ref().map_or(1.0, |m| m.density) };
+            if let Some(m) = raw.mask.as_mut() {
+                m.feather = 0.0;
+                m.density = 1.0;
+            }
+            if let Some(m) = raw.vector_mask.as_mut() {
+                m.feather = 0.0;
+                m.density = 1.0;
+            }
+            let far = photocraft_geom::Rect::new(-1_000_000, -1_000_000, -999_999, -999_999);
+            let default = mask_values(&raw, far).first().copied().unwrap_or(1.0);
+            let mut source = photocraft_gpu::cached_transform::MaskSource {
+                rect: output,
+                values: mask_values(&raw, output),
+                feather: photocraft_compose::masks::feather_sigma(feather),
+                default,
+                alpha: None,
+                rest: None,
+                density,
+            };
+            if !vector && let Some(mask) = raw.mask.as_ref() {
+                let painted = mask.surface.content_bounds();
+                if !painted.is_empty() {
+                    source.rect = painted;
+                    source.values = mask.surface.read_region(painted);
+                }
+            }
+            if !vector
+                && let Some(selection) = doc.selection.as_ref().filter(|_| !pv.whole_layers && !photocraft_engine::transform_cmds::moves_whole(layer))
+                && let Some(mask) = raw.mask.as_ref()
+                && let Some((lifted, left)) = photocraft_engine::transform_cmds::split_gray_selected(&mask.surface, selection).map_err(|e| e.to_string())?
+            {
+                let selected = lifted.content_bounds();
+                if !selected.is_empty() {
+                    let values = lifted.read_region(selected);
+                    source.rect = selected;
+                    source.values = values.chunks_exact(2).map(|p| p[0]).collect();
+                    source.alpha = Some(values.chunks_exact(2).map(|p| p[1]).collect());
+                    source.rest = Some(left.read_region(output));
+                }
+            }
+            Ok(Some(source))
+        };
+        let linked_mask = mask_source(false)?;
+        let vector_mask = mask_source(true)?;
+        let mut stationary = layer.clone();
+        if !pv.copy_selection {
+            if stationary.mask.as_ref().is_some_and(|m| m.linked) {
+                stationary.mask = None;
+            }
+            if stationary.vector_mask.as_ref().is_some_and(|m| m.linked) {
+                stationary.vector_mask = None;
+            }
+        }
+        let stationary_mask = stationary_mask_values(&stationary, doc.bounds(), output);
+        if let Some(l) = shown.layer_mut(layer.id) {
+            l.content = LayerContent::Raster(raw);
+            l.mask = None;
+            l.vector_mask = None;
+        }
+        sources.push(photocraft_gpu::cached_transform::LayerSource {
+            id: layer.id,
+            rect,
+            pixels,
+            alpha,
+            format,
+            default: moving.default_pixel(),
+            rest,
+            rest_alpha,
+            stationary_mask,
+            linked_mask,
+            vector_mask,
+        });
+    }
+    let mut group_sources = Vec::new();
+    for (_, _, layer) in doc.walk() {
+        let LayerContent::Group(_) = &layer.content else { continue };
+        let moving = roots.iter().any(|id| doc.layer(*id).is_some_and(|root| contains(root, layer.id)));
+        let ancestor = roots.iter().any(|id| contains(layer, *id));
+        if !moving && !ancestor {
+            continue;
+        }
+        let mut linked = layer.clone();
+        let mut stationary = layer.clone();
+        if moving {
+            if linked.mask.as_ref().is_some_and(|m| !m.linked) {
+                linked.mask = None;
+            }
+            if linked.vector_mask.as_ref().is_some_and(|m| !m.linked) {
+                linked.vector_mask = None;
+            }
+            if stationary.mask.as_ref().is_some_and(|m| m.linked) {
+                stationary.mask = None;
+            }
+            if stationary.vector_mask.as_ref().is_some_and(|m| m.linked) {
+                stationary.vector_mask = None;
+            }
+        } else {
+            linked.mask = None;
+            linked.vector_mask = None;
+        }
+        let far = photocraft_geom::Rect::new(-1_000_000, -1_000_000, -999_999, -999_999);
+        let density = linked.mask.as_ref().map_or(1.0, |m| m.density);
+        let vector_density = linked.vector_mask.as_ref().map_or(1.0, |m| m.density);
+        let vector_feather = linked.vector_mask.as_ref().filter(|m| m.enabled).map_or(0.0, |m| photocraft_compose::masks::feather_sigma(m.feather));
+        let mut vector_layer = linked.clone();
+        vector_layer.mask = None;
+        if let Some(mask) = vector_layer.vector_mask.as_mut() {
+            mask.feather = 0.0;
+            mask.density = 1.0;
+        }
+        let vector = vector_layer.vector_mask.as_ref().filter(|m| m.enabled).map(|_| mask_values(&vector_layer, output));
+        let vector_default = mask_values(&vector_layer, far).first().copied().unwrap_or(1.0);
+        linked.vector_mask = None;
+        let feather = linked.mask.as_ref().filter(|m| m.enabled).map_or(0.0, |m| photocraft_compose::masks::feather_sigma(m.feather));
+        if let Some(mask) = linked.mask.as_mut() {
+            mask.feather = 0.0;
+            mask.density = 1.0;
+        }
+        let default = mask_values(&linked, far).first().copied().unwrap_or(1.0);
+        group_sources.push(photocraft_gpu::cached_group::GroupSource {
+            id: layer.id,
+            linked: mask_values(&linked, output),
+            stationary: stationary_mask_values(&stationary, doc.bounds(), output),
+            default,
+            moving,
+            feather,
+            vector,
+            vector_default,
+            vector_feather,
+            density,
+            vector_density,
+        });
+    }
+    let groups = photocraft_gpu::cached_group::CachedGroups::new(&state.device, &state.queue, &shown, output, group_sources).map_err(|e| e.to_string())?;
+    let mut renderer = photocraft_gpu::cached_transform::CachedTransform::new(&state.device, &state.queue, output, sources).map_err(|e| e.to_string())?;
+    for (_, _, layer) in doc.walk() {
+        if layer.vector_mask.as_ref().is_some_and(|mask| mask.enabled) || layer.mask.as_ref().is_some_and(|mask| mask.enabled && mask.feather > 0.) {
+            let far = photocraft_geom::Rect::new(-1_000_000, -1_000_000, -999_999, -999_999);
+            renderer.set_mask_clip(layer.id, doc.bounds(), mask_values(layer, far).first().copied().unwrap_or(1.));
+        }
+    }
+    if let Some(pv) = app.transform_preview.as_mut() {
+        pv.gpu_preview = Some(GpuPreview {
+            doc: Arc::new(shown),
+            work: Some(GpuWork { renderer, groups, state }),
+            #[cfg(not(target_arch = "wasm32"))]
+            worker: TransformWorker::new(ctx.clone())?,
+            last: None,
+            interpolation: String::new(),
+            region: None,
+            last_region: None,
+            generation: 0,
+            revision: 0,
+            error: None,
+        });
+    }
+    Ok(())
+}
+
+/// The canvas viewport limits preview work; Enter always encodes the full native result.
+pub(crate) fn set_preview_region(app: &mut PhotocraftApp, idx: usize, region: photocraft_geom::Rect) {
+    if app.session.active_index() == Some(idx)
+        && let Some(cached) = app.transform_preview.as_mut().and_then(|pv| pv.gpu_preview.as_mut())
+    {
+        cached.region = Some(region);
+    }
+}
+
+/// Present the complete layer stack with frozen source overrides through the GPU compositor.
+pub(crate) fn gpu_display_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Document>, u64)> {
+    gpu_display_doc_impl(app, idx, false)
+}
+
+fn gpu_display_doc_impl(app: &mut PhotocraftApp, idx: usize, committing: bool) -> Option<(Arc<Document>, u64)> {
+    if app.session.active_index() != Some(idx) {
+        return None;
+    }
+    let settled = if committing { None } else { bounding_box_step(app).cloned() };
+    let (Some(t), Some(pv), Some(gpu)) = (&app.ui.transform, &mut app.transform_preview, &app.gpu) else { return None };
+    let mut shown;
+    let t = if let Some(step) = settled {
+        shown = t.clone();
+        step.restore(&mut shown);
+        &shown
+    } else {
+        t
+    };
+    let cached = pv.gpu_preview.as_mut()?;
+    #[cfg(not(target_arch = "wasm32"))]
+    if cached.work.is_none() {
+        let completed = if committing {
+            cached.worker.receive.recv().map_err(|_| ()).ok()
+        } else {
+            match cached.worker.receive.try_recv() {
+                Ok(completed) => Some(completed),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    cached.error = Some("The transform worker stopped before completing the preview".into());
+                    None
+                }
+            }
+        };
+        if let Some((work, request, result)) = completed {
+            cached.work = Some(work);
+            if request.generation == cached.generation {
+                match result {
+                    Ok((doc, sources)) => {
+                        cached.doc = doc;
+                        gpu.set_source_overrides(cached.doc.id.0, sources);
+                        cached.last = Some(Step::of(&request.transform));
+                        cached.interpolation = request.transform.interpolation;
+                        cached.last_region = request.region;
+                        cached.revision = cached.revision.wrapping_add(1);
+                        cached.error = None;
+                    }
+                    Err(error) => cached.error = Some(error),
+                }
+            }
+        } else if committing {
+            cached.error = Some("The transform worker stopped before completing the preview".into());
+        }
+    }
+    let now = Step::of(t);
+    if (committing || cached.last.as_ref() != Some(&now) || cached.interpolation != t.interpolation || cached.last_region != cached.region)
+        && let Some(mut work) = cached.work.take()
+    {
+        // While the worker is occupied, the current session itself holds the latest request.
+        let request = RenderRequest {
+            transform: t.clone(),
+            doc: cached.doc.clone(),
+            original: pv.doc.clone(),
+            targets: pv.targets.clone(),
+            region: if committing { None } else { cached.region },
+            generation: cached.generation,
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if !committing {
+            if let Err(error) = cached.worker.send.send((work, request)) {
+                cached.work = Some(error.0.0);
+                cached.error = Some("The transform worker stopped before accepting the preview".into());
+            }
+            return Some((if cached.revision == 0 { pv.doc.clone() } else { cached.doc.clone() }, (1 << 40) + pv.session + cached.revision * (1 << 20)));
+        }
+        match encode_transform(&mut work, &request) {
+            Ok((doc, sources)) => {
+                cached.doc = doc;
+                gpu.set_source_overrides(cached.doc.id.0, sources);
+                cached.last = Some(now);
+                cached.interpolation = t.interpolation.clone();
+                cached.last_region = request.region;
+                cached.revision = cached.revision.wrapping_add(1);
+                cached.error = None;
+            }
+            Err(error) => cached.error = Some(error),
+        }
+        cached.work = Some(work);
+    }
+    Some((if cached.revision == 0 { pv.doc.clone() } else { cached.doc.clone() }, (1 << 40) + pv.session + cached.revision * (1 << 20)))
 }
 
 /// What [`follow_edits`] needs to rebuild the preview document.
@@ -137,9 +649,17 @@ impl Step {
     }
 }
 
+/// Bounding-box-only Move keeps the pixels at the last released state during a drag.
+fn bounding_box_step(app: &PhotocraftApp) -> Option<&Step> {
+    if !app.session.prefs().interface.show_bounding_box_when_dragging_layer || app.drag.as_ref().is_none_or(|drag| drag.tool != Tool::Move) {
+        return None;
+    }
+    app.transform_preview.as_ref().filter(|preview| preview.move_only)?.steps.settled.as_ref()
+}
+
 /// The session's own history: inside Free Transform, Undo steps back through the
 /// handle drags, nudges and option edits rather than the document's history.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Steps {
     /// The box when it last came to rest (set when the session starts).
     settled: Option<Step>,
@@ -190,31 +710,64 @@ fn corners(r: [f64; 4]) -> [[f64; 2]; 4] {
 /// Start Free Transform on the active layer (or its selected pixels), or on the targeted unlinked
 /// layer mask, alpha channel or Quick Mask.
 pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
+    begin_impl(app, ctx, None)
+}
+
+fn begin_impl(app: &mut PhotocraftApp, ctx: &egui::Context, copy_override: Option<(bool, bool)>) -> Result<(), String> {
+    if is_cached_move(app) {
+        if let Some(pv) = app.transform_preview.as_mut() {
+            pv.move_only = false;
+        }
+        return Ok(());
+    }
     if let Some((params, path)) = crate::vector_ui::free_transform_path(app) {
         return begin_path(app, ctx, params, path);
     }
     if app.session.active().is_some_and(|st| photocraft_engine::float_cmds::floating(st).is_some()) {
         app.run("select.drop", json!({}))?;
     }
-    let target = crate::canvas::paint_target(app);
+    let target = if app.ui.tool_options.move_target == "layer" { crate::canvas::paint_target(app) } else { json!("pixels") };
     let st = app.session.active().ok_or("no document")?;
     let (doc, revision) = (st.doc.clone(), st.revision);
     let lone = photocraft_engine::transform_cmds::lone_target(&doc, st.active_layer, &json!({ "target": target })).map_err(|e| e.to_string())?.cloned();
     if let Some(surf) = lone {
         return begin_lone(app, ctx, doc, surf, target);
     }
-    let id = st.active_layer.ok_or("no active layer")?;
+    let copied_layers = copy_override.is_some_and(|(_, layers)| layers);
+    let scope = if copied_layers { "layer" } else { &app.ui.tool_options.move_target };
+    let targets = photocraft_engine::edit_scope::roots(&doc, &st.selected_layers(), st.active_layer, scope);
+    let id = targets
+        .iter()
+        .copied()
+        .find(|id| doc.layer(*id).is_some_and(|l| !photocraft_engine::transform_cmds::whole_layer_bounds(l).is_empty()))
+        .or_else(|| targets.first().copied())
+        .or(st.active_layer)
+        .ok_or("no active layer")?;
     let layer = doc.layer(id).ok_or("no layer")?;
-    if photocraft_engine::transform_cmds::locked_for_transform(&doc, id) {
+    if targets.iter().any(|id| photocraft_engine::transform_cmds::locked_for_transform(&doc, *id))
+        || photocraft_engine::transform_cmds::locked_for_transform(&doc, id)
+    {
         // Photoshop refuses before the box opens rather than when it is committed (#2585).
         app.ui.open_dialog(crate::state::DialogKind::Error, json!({"message": tl!(LOCKED)}).as_object().cloned().unwrap_or_default());
         return Err(LOCKED.into());
     }
-    if matches!(layer.content, LayerContent::Adjustment(_)) && layer.mask.is_none() {
+    if targets.len() == 1 && matches!(layer.content, LayerContent::Adjustment(_)) && layer.mask.is_none() {
         return Err("Adjustment layers have nothing to transform".into());
     }
     // With a selection the box is the selection's (#5297).
-    let b = photocraft_engine::transform_cmds::transform_frame(&doc, layer);
+    let scoped_selection = app.ui.tool_options.move_target != "all" && targets.len() == 1 && !layer.is_group();
+    let b = targets
+        .iter()
+        .filter_map(|id| doc.layer(*id))
+        .map(|l| {
+            if scoped_selection {
+                photocraft_engine::transform_cmds::transform_frame(&doc, l)
+            } else {
+                photocraft_engine::transform_cmds::whole_layer_bounds(l)
+            }
+        })
+        .reduce(|a, b| a.union(&b))
+        .unwrap_or_else(|| photocraft_engine::transform_cmds::transform_frame(&doc, layer));
     if b.is_empty() {
         return Err("Could not transform: the layer is empty".into());
     }
@@ -224,32 +777,65 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
     // Preview document: the moving pixels removed (layer hidden, or the selection lifted out).
     let mut pd = (*doc).clone();
     let mut lifted = None;
+    let copy_selection =
+        copy_override.map(|(pixels, _)| pixels).unwrap_or_else(|| app.ui.tool == Tool::Move && app.drag.as_ref().is_some_and(|d| d.modifiers.alt))
+            && doc.selection.is_some();
+    let multiple = targets.len() > 1;
+    let legacy_preview = app.gpu.is_none();
     // Type, shapes and smart objects move whole, selection or not (#2630): only pixels are lifted.
-    if let Some(sel) = doc.selection.clone().filter(|_| !photocraft_engine::transform_cmds::moves_whole(layer) && layer.surface().is_some()) {
+    if let Some(sel) = doc
+        .selection
+        .clone()
+        .filter(|_| legacy_preview && scoped_selection && !multiple && !photocraft_engine::transform_cmds::moves_whole(layer) && layer.surface().is_some())
+    {
         if let Some(surf) = pd.layer_mut(id).and_then(|l| l.surface_mut()) {
             let (l, rest) = photocraft_engine::transform_cmds::split_selected(surf, &sel).map_err(|e| e.to_string())?;
-            *surf = rest;
+            if !copy_selection {
+                *surf = rest;
+            }
             lifted = Some(l);
         }
-    } else if let Some(l) = pd.layer_mut(id) {
+    } else if legacy_preview && let Some(l) = pd.layer_mut(id) {
         l.visible = false;
     }
     // egui reports the renderer's limit in the app; offscreen harnesses only through the device.
     let max_side = ctx.input(|i| i.max_texture_side).max(app.gpu.as_ref().map_or(1, |g| g.max_texture_side()));
     // The layers covering the moving pixels draw over them instead of under them.
-    let above = Above::new(ctx, format!("transform-{session}-above"), &doc, id, max_side);
-    above.hide_in(&mut pd.layers);
+    let above = (legacy_preview && !multiple).then(|| Above::new(ctx, format!("transform-{session}-above"), &doc, id, max_side));
+    if let Some(above) = &above {
+        above.hide_in(&mut pd.layers);
+    }
+    if legacy_preview && multiple {
+        for target in &targets {
+            if let Some(l) = pd.layer_mut(*target) {
+                l.visible = false;
+            }
+        }
+    }
     // A style is drawn again from the pixels as the box moves them, so they are read without it.
     // Not for the selected part of a layer: its style belongs to that part and the rest together.
-    let styled = lifted.is_none() && photocraft_compose::effects::has_effects(layer);
-    let (image, uv) = preview_image(&doc, id, lifted.as_ref(), b, max_side, styled);
+    let styled = legacy_preview && !multiple && lifted.is_none() && photocraft_compose::effects::has_effects(layer);
+    let (image, uv) = if !legacy_preview {
+        (egui::ColorImage::filled([1, 1], Color32::TRANSPARENT), [1.0, 1.0])
+    } else if multiple {
+        let mut solo = (*doc).clone();
+        show_only(&mut solo.layers, &targets);
+        composite_image(&solo, b, max_side)
+    } else {
+        preview_image(&doc, id, lifted.as_ref(), b, max_side, styled)
+    };
     let texture = crate::transform_tex::PreviewTextures::new(ctx, format!("transform-{session}"), image, uv);
     app.transform_preview = Some(TransformPreview {
+        targets,
+        move_only: false,
+        gpu_preview: None,
+        copy_selection,
+        whole_layers: !scoped_selection || multiple,
         session,
         doc: Arc::new(pd),
         texture,
-        opacity: layer.opacity * layer.fill_opacity,
-        above: Some(above),
+        opacity: if multiple { 1.0 } else { layer.opacity * layer.fill_opacity },
+        above,
         styled: styled.then(|| crate::transform_fx::StyledPreview::new(format!("transform-{session}-styled"))),
         follow: Some(Follow { revision, hidden: lifted.is_none() }),
         committing: None,
@@ -281,7 +867,146 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
         skew_v: 0.0,
     });
     start_steps(app);
+    if let Err(error) = initialize_gpu(app, ctx) {
+        app.ui.transform = None;
+        app.transform_preview = None;
+        return Err(error);
+    }
     Ok(())
+}
+
+fn rebase_step(step: &mut Step, rect: [f64; 4]) -> Result<(), String> {
+    let h = Homography::rect_to_quad(step.rect, step.quad).ok_or("The transform has no valid mapping")?;
+    step.quad = corners(rect).map(|[x, y]| {
+        let (x, y) = h.apply(x, y);
+        [x, y]
+    });
+    if let Some(warp) = &mut step.warp {
+        let old = warp.bounds;
+        let sx = (rect[2] - rect[0]) / (old[2] - old[0]);
+        let sy = (rect[3] - rect[1]) / (old[3] - old[1]);
+        if !sx.is_finite() || !sy.is_finite() {
+            return Err("The warp has empty source bounds".into());
+        }
+        if let Some(mesh) = &mut warp.mesh {
+            let original = BezierMesh::fit(&|u, v| [old[0] + u * (old[2] - old[0]), old[1] + v * (old[3] - old[1])], mesh.us.clone(), mesh.vs.clone());
+            for (point, base) in mesh.points.iter_mut().zip(original.points) {
+                *point = [rect[0] + (base[0] - old[0]) * sx + point[0] - base[0], rect[1] + (base[1] - old[1]) * sy + point[1] - base[1]];
+            }
+        }
+        warp.bounds = rect;
+    }
+    step.rect = rect;
+    Ok(())
+}
+
+/// Replace frozen sources without writing pending pixels or adding document history.
+fn change_scope(app: &mut PhotocraftApp, ctx: &egui::Context, scope: &str) -> Result<(), String> {
+    let Some(old_t) = app.ui.transform.take() else { return Ok(()) };
+    let Some(old_pv) = app.transform_preview.take() else {
+        app.ui.transform = Some(old_t);
+        return Err("The transform source is unavailable".into());
+    };
+    let old_scope = std::mem::replace(&mut app.ui.tool_options.move_target, scope.to_owned());
+    let result = begin_impl(app, ctx, Some((old_pv.copy_selection, false))).and_then(|()| {
+        let rect = app.ui.transform.as_ref().ok_or("The transform source is unavailable")?.rect;
+        // Validate all history mappings before replacing the session.
+        let mut now = Step::of(&old_t);
+        rebase_step(&mut now, rect)?;
+        let mut steps = old_pv.steps.clone();
+        for step in steps.undo.iter_mut().chain(steps.redo.iter_mut()).chain(steps.settled.iter_mut()) {
+            rebase_step(step, rect)?;
+        }
+        if let Some((_, step)) = &mut steps.nudged {
+            rebase_step(step, rect)?;
+        }
+        let t = app.ui.transform.as_mut().ok_or("The transform source is unavailable")?;
+        now.restore(t);
+        t.session = old_t.session;
+        t.interpolation = old_t.interpolation.clone();
+        t.mode = old_t.mode;
+        t.skew_v = old_t.skew_v;
+        t.made = old_t.made;
+        if old_t.made.is_some() {
+            t.layer = old_t.layer;
+        }
+        if let Some(pv) = app.transform_preview.as_mut() {
+            pv.session = old_pv.session;
+            pv.tool = old_pv.tool;
+            pv.move_only = old_pv.move_only;
+            pv.steps = steps;
+            if let (Some(old), Some(new)) = (&old_pv.gpu_preview, &mut pv.gpu_preview) {
+                new.region = old.region;
+            }
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        app.ui.transform = Some(old_t);
+        app.transform_preview = Some(old_pv);
+        app.ui.tool_options.move_target = old_scope;
+        return Err(error);
+    }
+    if let Some(gpu) = &app.gpu {
+        gpu.clear_source_overrides(old_pv.doc.id.0);
+    }
+    ctx.request_repaint();
+    Ok(())
+}
+
+/// Start a Move session using the same immutable GPU source and deferred commit as Transform.
+pub(crate) fn begin_cached_move(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
+    begin_impl(app, ctx, app.move_mods.dup_from.map(|_| (false, true)))?;
+    if let Some(pv) = app.transform_preview.as_mut() {
+        pv.move_only = true;
+    }
+    Ok(())
+}
+
+pub(crate) fn begin_cached_move_copy(app: &mut PhotocraftApp, ctx: &egui::Context, copy: bool) -> Result<(), String> {
+    begin_impl(app, ctx, Some((copy, false)))?;
+    if let Some(pv) = app.transform_preview.as_mut() {
+        pv.move_only = true;
+    }
+    Ok(())
+}
+
+pub(crate) fn begin_cached_move_layers_copy(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
+    begin_impl(app, ctx, Some((false, true)))?;
+    if let Some(pv) = app.transform_preview.as_mut() {
+        pv.move_only = true;
+    }
+    Ok(())
+}
+
+pub(crate) fn is_cached_raster(app: &PhotocraftApp) -> bool {
+    app.transform_preview.as_ref().is_some_and(|pv| pv.move_only || pv.gpu_preview.is_some())
+        || app.ui.transform.as_ref().is_some_and(|t| !t.selection && t.target.is_none() && t.path.is_none() && t.content_aware.is_none())
+}
+
+pub(crate) fn is_cached_move(app: &PhotocraftApp) -> bool {
+    app.transform_preview.as_ref().is_some_and(|pv| pv.move_only)
+}
+
+/// Offset for the frozen target hierarchy, independent of subsequent layer selection.
+pub(crate) fn cached_move_offset(app: &PhotocraftApp, document: DocId, id: LayerId) -> Option<(i32, i32)> {
+    let (Some(t), Some(pv)) = (&app.ui.transform, &app.transform_preview) else { return None };
+    if !pv.move_only || pv.doc.id != document {
+        return None;
+    }
+    let moving =
+        if pv.targets.is_empty() { t.layer == id.0 } else { pv.targets.iter().any(|root| pv.doc.layer(*root).is_some_and(|layer| contains(layer, id))) };
+    let (quad, rect) = bounding_box_step(app).map_or((t.quad, t.rect), |step| (step.quad, step.rect));
+    moving.then(|| ((quad[0][0] - rect[0]).round() as i32, (quad[0][1] - rect[1]).round() as i32))
+}
+
+/// A prior released move or nudge must survive an unrelated cross-document drag.
+pub(crate) fn has_settled_move(app: &PhotocraftApp) -> bool {
+    app.transform_preview.as_ref().filter(|pv| pv.move_only).is_some_and(|pv| {
+        !pv.steps.undo.is_empty()
+            || !pv.steps.redo.is_empty()
+            || pv.steps.settled.as_ref().is_some_and(|step| step.quad != corners(step.rect) || step.warp.as_ref().is_some_and(|warp| !warp.is_identity()))
+    })
 }
 
 /// Free Transform on a copy (⌥⌘T, no menu item): duplicates the active layer (with a selection,
@@ -346,6 +1071,11 @@ pub(crate) fn begin_content_aware(
     let (image, uv) = crate::transform_tex::read_surface(surf, None, region, max_side);
     let texture = crate::transform_tex::PreviewTextures::new(ctx, format!("transform-{session}"), image, uv);
     app.transform_preview = Some(TransformPreview {
+        targets: Vec::new(),
+        move_only: false,
+        gpu_preview: None,
+        copy_selection: false,
+        whole_layers: false,
         session,
         doc: Arc::new(pd),
         texture,
@@ -412,7 +1142,7 @@ fn take_back_made(app: &mut PhotocraftApp, document: DocId, layer: LayerId) {
 
 /// After the transform: the step that made the layer and the transform become one history step,
 /// the transform's for a copy and Place Embedded for a placed file.
-fn fold_made(app: &mut PhotocraftApp, document: DocId, made: MadeLayer) {
+fn fold_made(app: &mut PhotocraftApp, document: DocId, made: MadeLayer, move_only: bool) {
     // A background commit lands in its own document, which need not be the active one by then.
     let Some(index) = app.session.documents().iter().position(|st| st.doc.id == document) else { return };
     let active = app.session.active_index();
@@ -421,6 +1151,8 @@ fn fold_made(app: &mut PhotocraftApp, document: DocId, made: MadeLayer) {
         st.history.purge_last();
         if made == MadeLayer::Place {
             st.history.set_current_label(photocraft_engine::file_cmds::PLACE_EMBEDDED);
+        } else if move_only {
+            st.history.set_current_label(crate::move_mods::DUPLICATE_MOVE_LABEL);
         }
     }
     if let Some(active) = active {
@@ -467,6 +1199,11 @@ fn begin_lone(
     let (image, uv) = crate::transform_tex::read_surface(&lifted, None, b, max_side);
     let texture = crate::transform_tex::PreviewTextures::new(ctx, format!("transform-{session}"), image, uv);
     app.transform_preview = Some(TransformPreview {
+        targets: Vec::new(),
+        move_only: false,
+        gpu_preview: None,
+        copy_selection: false,
+        whole_layers: false,
         session,
         doc: Arc::new(pd),
         texture,
@@ -520,6 +1257,11 @@ fn begin_path(app: &mut PhotocraftApp, ctx: &egui::Context, params: serde_json::
     let texture =
         crate::transform_tex::PreviewTextures::new(ctx, format!("transform-{session}"), egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT]), [1.0, 1.0]);
     app.transform_preview = Some(TransformPreview {
+        targets: Vec::new(),
+        move_only: false,
+        gpu_preview: None,
+        copy_selection: false,
+        whole_layers: false,
         session,
         doc,
         texture,
@@ -605,6 +1347,11 @@ pub fn begin_selection(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(
     let mut pd = (*doc).clone();
     pd.selection = None;
     app.transform_preview = Some(TransformPreview {
+        targets: Vec::new(),
+        move_only: false,
+        gpu_preview: None,
+        copy_selection: false,
+        whole_layers: false,
         session,
         doc: Arc::new(pd),
         texture,
@@ -697,7 +1444,7 @@ pub fn enter_warp(app: &mut PhotocraftApp, ctx: &egui::Context) {
 /// the selection). Its Warp is Warp Text: only the styles, and the type stays editable (#3004).
 pub fn warps_type(app: &PhotocraftApp) -> bool {
     let Some(t) = &app.ui.transform else { return false };
-    if t.selection || t.target.is_some() || t.path.is_some() {
+    if t.selection || t.target.is_some() || t.path.is_some() || app.transform_preview.as_ref().is_some_and(|pv| pv.targets.len() > 1) {
         return false;
     }
     app.session.active().and_then(|st| st.doc.layer(LayerId(t.layer))).is_some_and(|l| matches!(l.content, LayerContent::Text(_)))
@@ -1014,16 +1761,78 @@ fn contains(l: &photocraft_doc::Layer, id: LayerId) -> bool {
 /// Undo and Redo while the commit runs in the background.
 const STILL_APPLYING: &str = "Free Transform is still being applied";
 
+fn cached_commit(app: &mut PhotocraftApp) -> Result<Option<photocraft_engine::cached_transform::CachedCommit>, String> {
+    if app.transform_preview.as_ref().is_none_or(|pv| pv.gpu_preview.is_none()) {
+        return Ok(None);
+    }
+    let index = app.session.active_index().ok_or("no document")?;
+    // Enter can arrive before the canvas draws the latest numerical or pointer edit.
+    let _ = gpu_display_doc_impl(app, index, true);
+    let doc = app.session.active().ok_or("no document")?.doc.clone();
+    let pv = app.transform_preview.as_mut().ok_or("no cached transform")?;
+    let gpu = pv.gpu_preview.as_mut().ok_or("no GPU transform")?;
+    if let Some(error) = &gpu.error {
+        return Err(error.clone());
+    }
+    let work = gpu.work.as_ref().ok_or("The transform preview has not completed")?;
+    let leaves = work.renderer.readback_native(&work.state.queue).map_err(|e| e.to_string())?;
+    let groups = work.groups.readback_masks(&work.state.device, &work.state.queue).map_err(|e| e.to_string())?;
+    let mut pixels = std::collections::HashMap::new();
+    let mut masks = std::collections::HashMap::new();
+    let raw_mask = |id: LayerId, source: photocraft_raster::Surface| -> Result<Option<photocraft_raster::Surface>, String> {
+        if pv.copy_selection {
+            return Ok(None);
+        }
+        let Some(mask) = doc.layer(id).and_then(|l| l.mask.as_ref()).filter(|m| m.enabled && m.linked) else { return Ok(None) };
+        let mut result = photocraft_raster::Surface::with_default(mask.surface.format(), &mask.surface.default_pixel());
+        let rect = source.content_bounds();
+        result.try_write_region(rect, &source.read_region(rect)).map_err(|e| e.to_string())?;
+        result.prune();
+        Ok(Some(result))
+    };
+    for (id, surface, mask) in leaves {
+        if doc.layer(id).is_some_and(|l| matches!(l.content, LayerContent::Raster(_))) {
+            pixels.insert(id, surface);
+        }
+        if let Some(source) = mask
+            && let Some(mask) = raw_mask(id, source)?
+        {
+            masks.insert(id, mask);
+        }
+    }
+    for (id, source) in groups {
+        if let Some(mask) = raw_mask(id, source)? {
+            masks.insert(id, mask);
+        }
+    }
+    Ok(Some(photocraft_engine::cached_transform::CachedCommit { document: doc.id, pixels, masks }))
+}
+
 pub fn commit(app: &mut PhotocraftApp) {
     if committing(app).is_some() {
         return;
     }
     let document = app.transform_preview.as_ref().map(|pv| pv.doc.id);
     if document.is_some_and(|id| app.session.active().is_none_or(|st| st.doc.id != id)) {
-        cancel(app);
+        end_if_left(app);
         return;
     }
     let type_layer = warps_type(app);
+    let changed = app.ui.transform.as_ref().is_some_and(|t| t.warp.as_ref().map_or(t.quad != corners(t.rect), |w| !w.is_identity()));
+    let cached = if changed {
+        match cached_commit(app) {
+            Ok(c) => c,
+            Err(error) => {
+                app.ui.status = error;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if let (Some(gpu), Some(document)) = (&app.gpu, document) {
+        gpu.clear_source_overrides(document.0);
+    }
     let Some(t) = app.ui.transform.take() else { return };
     let mut preview = app.transform_preview.take();
     if let Some(options) = &t.content_aware {
@@ -1064,12 +1873,27 @@ pub fn commit(app: &mut PhotocraftApp) {
         return;
     }
     let made = t.made;
+    if let Some(cached) = cached
+        && let Err(error) = app.session.stage_cached_transform(cached)
+    {
+        keep_open(app, t, preview, error.to_string());
+        return;
+    }
     let r = if let Some(w) = &t.warp {
         // Type with a Warp Text can be warped back to None; the engine skips an unchanged style.
         if w.is_identity() && !type_layer {
             return;
         }
-        app.run("edit.transform.warp", json!({"layer": t.layer, "rect": t.rect, "warp": w, "interpolation": t.interpolation}))
+        let mut p = json!({"layer": t.layer, "rect": t.rect, "warp": w, "interpolation": t.interpolation});
+        if let Some(pv) = &preview {
+            if pv.whole_layers {
+                p["wholeLayers"] = json!(true);
+            }
+            if !pv.targets.is_empty() {
+                p["layers"] = json!(pv.targets.iter().map(|id| id.0).collect::<Vec<_>>());
+            }
+        }
+        app.run("edit.transform.warp", p)
     } else {
         if t.quad == corners(t.rect) {
             return; // untouched: nothing to do and no history step; a ⌥⌘T copy or a place stays
@@ -1078,8 +1902,21 @@ pub fn commit(app: &mut PhotocraftApp) {
         if let Some(target) = &t.target {
             p["target"] = target.clone();
         }
+        if let Some(pv) = &preview {
+            if pv.whole_layers {
+                p["wholeLayers"] = json!(true);
+            }
+            if !pv.targets.is_empty() {
+                p["layers"] = json!(pv.targets.iter().map(|id| id.0).collect::<Vec<_>>());
+            }
+        }
+        if preview.as_ref().is_some_and(|pv| pv.copy_selection) {
+            p["copy"] = json!(true);
+        }
         app.run("edit.transform", p)
     };
+    // A command may reject in the UI guard before the engine consumes its typed payload.
+    let _ = app.session.take_cached_transform();
     // A large layer's warp runs in the background: the session stays until the job ends.
     if let Ok(v) = &r
         && let Some(job) = v.get("pending").and_then(serde_json::Value::as_bool).filter(|p| *p).and(v.get("job")).and_then(serde_json::Value::as_u64)
@@ -1090,18 +1927,21 @@ pub fn commit(app: &mut PhotocraftApp) {
         app.transform_preview = preview;
         return;
     }
+    if let (Some(gpu), Some(document)) = (&app.gpu, document) {
+        gpu.clear_source_overrides(document.0);
+    }
     match r {
-        Ok(_) => finish(app, document, LayerId(t.layer), made, true),
+        Ok(_) => finish(app, document, LayerId(t.layer), made, true, preview.as_ref().is_some_and(|pv| pv.move_only)),
         Err(e) => keep_open(app, t, preview, e),
     }
 }
 
 /// After the transform landed or not: fold the layer the session made into its step, or take it
 /// back.
-fn finish(app: &mut PhotocraftApp, document: Option<DocId>, layer: LayerId, made: Option<MadeLayer>, landed: bool) {
+fn finish(app: &mut PhotocraftApp, document: Option<DocId>, layer: LayerId, made: Option<MadeLayer>, landed: bool, move_only: bool) {
     let (Some(made), Some(document)) = (made, document) else { return };
     if landed {
-        fold_made(app, document, made);
+        fold_made(app, document, made, move_only);
     } else {
         take_back_made(app, document, layer);
     }
@@ -1125,23 +1965,24 @@ pub fn on_job_event(app: &mut PhotocraftApp, e: &JobEvent) {
         keep_open(app, t, Some(pv), msg.clone());
         return;
     }
-    finish(app, Some(pv.doc.id), LayerId(t.layer), t.made, matches!(e.outcome, JobOutcome::Done(_)));
+    finish(app, Some(pv.doc.id), LayerId(t.layer), t.made, matches!(e.outcome, JobOutcome::Done(_)), pv.move_only);
 }
 
 /// A commit the engine refused (a result over the pixel budget, #3773): the box stays open as it
 /// was, with the reason in the status bar, so the transform can be changed or cancelled. A copy or
 /// a placed layer it made goes only when it is cancelled.
-fn keep_open(app: &mut PhotocraftApp, t: TransformSession, preview: Option<TransformPreview>, e: String) {
+fn keep_open(app: &mut PhotocraftApp, t: TransformSession, mut preview: Option<TransformPreview>, e: String) {
+    if let Some(cached) = preview.as_mut().and_then(|pv| pv.gpu_preview.as_mut()) {
+        cached.last = None;
+    }
     app.ui.transform = Some(t);
     app.transform_preview = preview;
     app.ui.status = e;
 }
 
-/// A transform whose layer or document went away (undo, close) ends silently; picking another tool
-/// or selecting another layer (Layers panel, ⌘-click, the control channel) applies it, so the box
-/// never stays on a layer that is no longer the active one (#1400). Checked every frame and before
-/// each pointer event, so a press with a tool chosen just before it (`ui.pointer`'s `tool`) goes to
-/// that tool.
+/// A transform whose source disappeared (undo, close) ends silently. A tool switch applies it;
+/// layer selection keeps its frozen roots pending. Checked each frame and before pointer input,
+/// so a press with a newly chosen tool goes to that tool once the commit succeeds.
 pub fn end_if_left(app: &mut PhotocraftApp) {
     let Some(t) = &app.ui.transform else { return };
     if committing(app).is_some() {
@@ -1151,10 +1992,18 @@ pub fn end_if_left(app: &mut PhotocraftApp) {
 
     let layer = LayerId(t.layer);
     let made = t.made;
-    let selection = t.selection;
     let preview_doc_id = app.transform_preview.as_ref().map(|pv| pv.doc.id);
     let switched_document = preview_doc_id.is_some_and(|id| id != st.doc.id);
 
+    if switched_document && app.transform_preview.as_ref().is_some_and(|pv| pv.gpu_preview.is_some()) {
+        if let Some(index) = app.session.documents().iter().position(|s| Some(s.doc.id) == preview_doc_id) {
+            app.session.set_active(index);
+            app.ui.status = "Press Enter to apply the pending transform, or Escape to cancel it before changing documents".into();
+        } else {
+            cancel(app);
+        }
+        return;
+    }
     let editing_placed_smart_object = switched_document
         && made == Some(MadeLayer::Place)
         && preview_doc_id
@@ -1165,13 +2014,10 @@ pub fn end_if_left(app: &mut PhotocraftApp) {
         app.transform_preview = None;
     } else if switched_document || st.doc.layer(layer).is_none() {
         cancel(app);
-    } else if app.transform_preview.as_ref().is_some_and(|pv| pv.tool != app.ui.tool)
-        || (!selection && st.active_layer.is_some_and(|active| active.0 != layer.0))
-    {
+    } else if app.transform_preview.as_ref().is_some_and(|pv| pv.tool != app.ui.tool) {
         commit(app);
-        // Picking another tool or layer can't leave a refused transform open: it ends, as Esc would.
-        if app.ui.transform.is_some() {
-            cancel(app);
+        if let Some(pv) = &app.transform_preview {
+            app.ui.tool = pv.tool;
         }
     }
 }
@@ -1185,6 +2031,30 @@ pub fn follow_edits(app: &mut PhotocraftApp) {
     let (Some(t), Some(pv)) = (&app.ui.transform, app.transform_preview.as_mut()) else { return };
     let Some(follow) = pv.follow.as_mut() else { return };
     let Some(st) = app.session.active().filter(|st| st.doc.id == pv.doc.id && st.revision != follow.revision) else { return };
+    if let Some(cached) = pv.gpu_preview.as_mut() {
+        let mut shown = (*st.doc).clone();
+        for (_, _, old) in cached.doc.walk() {
+            if old.mask.is_none()
+                && old.vector_mask.is_none()
+                && matches!(old.content, LayerContent::Raster(_))
+                && let Some(live) = shown.layer_mut(old.id)
+                && pv.targets.iter().any(|id| cached.doc.layer(*id).is_some_and(|r| contains(r, old.id)))
+            {
+                // Session pixels remain frozen; metadata and other layers remain live.
+                live.content = old.content.clone();
+                live.mask = None;
+                live.vector_mask = None;
+            }
+        }
+        cached.doc = Arc::new(shown);
+        cached.generation = cached.generation.wrapping_add(1);
+        cached.last = None;
+        follow.revision = st.revision;
+        return;
+    }
+    if pv.targets.len() > 1 {
+        return;
+    }
     let id = LayerId(t.layer);
     let (Some(live), Some(moving)) = (st.doc.layer(id), pv.doc.layer(id)) else { return };
     let mut pd = (*st.doc).clone();
@@ -1202,6 +2072,12 @@ pub fn follow_edits(app: &mut PhotocraftApp) {
 }
 
 pub fn cancel(app: &mut PhotocraftApp) {
+    if is_cached_move(app) {
+        app.drag = None;
+    }
+    if let (Some(gpu), Some(pv)) = (&app.gpu, &app.transform_preview) {
+        gpu.clear_source_overrides(pv.doc.id.0);
+    }
     // Esc while the commit runs cancels the job; the session ends when it does.
     if let Some(job) = committing(app) {
         crate::jobs_ui::cancel(app, job);
@@ -2138,6 +3014,17 @@ fn front_vertices(h: &Homography, n: usize) -> Vec<bool> {
 /// Photoshop. The box, handles and reference point are [`draw_overlay`], drawn over the guides.
 pub fn draw_content(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
     let (Some(t), Some(pv)) = (&app.ui.transform, &app.transform_preview) else { return };
+    if pv.gpu_preview.is_some() {
+        return;
+    }
+    let mut shown;
+    let t = if let Some(step) = bounding_box_step(app) {
+        shown = t.clone();
+        step.clone().restore(&mut shown);
+        &shown
+    } else {
+        t
+    };
     if let Some(w) = &t.warp {
         draw_warp_content(painter, xf, t, w, pv);
         return;
@@ -2193,6 +3080,12 @@ pub fn draw_content(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
 /// drew; the warp grid and its split guides for a warp.
 pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
     let (Some(t), Some(pv)) = (&app.ui.transform, &app.transform_preview) else { return };
+    if let Some(error) = pv.gpu_preview.as_ref().and_then(|cached| cached.error.as_ref()) {
+        painter.text(xf.rect.left_top() + vec2(12.0, 12.0), egui::Align2::LEFT_TOP, error, egui::FontId::proportional(14.0), Color32::RED);
+    }
+    if pv.move_only {
+        return;
+    }
     let scr = |q: [f64; 2]| xf.to_screen(q[0] as f32, q[1] as f32);
     if let Some(w) = &t.warp {
         let over_canvas = painter.ctx().input(|i| i.pointer.hover_pos()).filter(|p| xf.rect.contains(*p)).map(|p| xf.to_doc(p));
@@ -2327,6 +3220,14 @@ pub(crate) fn draw_selection(
 /// and fill are the layer's as they are now, so edits made while the box is open show.
 pub(crate) fn styled_frame(app: &PhotocraftApp, zoom: f32, dragging: bool) -> Option<(&crate::transform_fx::StyledPreview, crate::transform_fx::Frame<'_>)> {
     let (t, pv) = (app.ui.transform.as_ref()?, app.transform_preview.as_ref()?);
+    let mut shown;
+    let t = if let Some(step) = bounding_box_step(app) {
+        shown = t.clone();
+        step.clone().restore(&mut shown);
+        &shown
+    } else {
+        t
+    };
     let styled = pv.styled.as_ref().filter(|_| t.warp.is_none())?;
     let st = app.session.active().filter(|st| st.doc.id == pv.doc.id)?;
     let layer = st.doc.layer(LayerId(t.layer)).filter(|l| l.visible && photocraft_compose::effects::has_effects(l))?;
@@ -2770,7 +3671,7 @@ fn size_pct(u: &crate::layer_props_ui::LenUnit, v: f32, side: f64) -> f64 {
 /// narrow for both pins the buttons to the right edge and clips the fields, so Commit and Cancel
 /// are always reachable.
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    let Some(t) = app.ui.transform.clone() else { return };
+    let Some(mut t) = app.ui.transform.clone() else { return };
     let bar = ui.available_rect_before_wrap();
     let warping = t.warp.is_some();
     let buttons_w = if warping { WARP_ACTIONS_W } else { ACTIONS_W };
@@ -2778,6 +3679,14 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let fields = egui::Rect::from_min_max(bar.min, egui::pos2(split, bar.bottom()));
     let mut row = ui.new_child(egui::UiBuilder::new().id_salt("transform-fields").max_rect(fields).layout(egui::Layout::left_to_right(egui::Align::Center)));
     row.set_clip_rect(fields);
+    if !t.selection && t.target.is_none() && t.path.is_none() && t.content_aware.is_none() {
+        if scope_options(app, &mut row, "transform-target")
+            && let Some(current) = &app.ui.transform
+        {
+            t = current.clone();
+        }
+        crate::widgets::vline(&mut row, 22.0);
+    }
     if let Some(w) = t.warp.clone() {
         warp_fields(app, &mut row, &w);
     } else if t.content_aware.is_some() {
@@ -2790,6 +3699,23 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let actions = egui::Rect::from_min_max(egui::pos2(start, bar.top()), egui::pos2(start + buttons_w, bar.bottom()));
     let mut btns = ui.new_child(egui::UiBuilder::new().id_salt("transform-actions").max_rect(actions).layout(egui::Layout::right_to_left(egui::Align::Center)));
     transform_actions(app, &mut btns, warping, t.content_aware.is_none());
+}
+
+/// Move and Transform share the same pending-source scope change.
+pub(crate) fn scope_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: &str) -> bool {
+    let mut scope = app.ui.tool_options.move_target.clone();
+    let options = [("layer".to_owned(), tl!("Layer")), ("all".to_owned(), tl!("All Layers")), ("group".to_owned(), tl!("Group"))];
+    if !crate::widgets::dropdown(ui, id, &mut scope, &options, 100.0) {
+        return false;
+    }
+    if app.ui.transform.is_some() {
+        if let Err(error) = change_scope(app, ui.ctx(), &scope) {
+            app.ui.status = error;
+        }
+    } else {
+        app.ui.tool_options.move_target = scope;
+    }
+    true
 }
 
 fn transform_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &TransformSession) {
@@ -3229,7 +4155,7 @@ mod tests {
     #[test]
     fn transform_bar_pins_warp_cancel_and_commit() {
         use egui_kittest::Harness;
-        use egui_kittest::kittest::Queryable;
+        use egui_kittest::kittest::{NodeT, Queryable};
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.ui.transform = Some(session());
         let width = 720.0;
@@ -3244,6 +4170,11 @@ mod tests {
         );
         PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
         h.run_steps(6);
+        assert!(
+            h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|node| node.accesskit_node().value().as_deref() == Some("Group")).unwrap().rect().left()
+                < 120.0,
+            "scope remains first in the actual transform bar"
+        );
         let commit = h.get_by_label("Commit transform").rect();
         let cancel = h.get_by_label("Cancel transform").rect();
         let mode = h.get_by_label("Switch between free transform and warp modes").rect();
@@ -3253,6 +4184,11 @@ mod tests {
         h.get_by_label("Switch between free transform and warp modes").click();
         h.run_steps(2);
         assert!(h.state().ui.transform.as_ref().unwrap().warp.is_some());
+        assert!(
+            h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|node| node.accesskit_node().value().as_deref() == Some("Group")).unwrap().rect().left()
+                < 120.0,
+            "warp retains its scope selector"
+        );
         h.get_by_label("Switch between free transform and warp modes").click();
         h.run_steps(2);
         assert!(h.state().ui.transform.as_ref().unwrap().warp.is_none());
@@ -3289,7 +4225,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.ui.transform = Some(session());
-        let width = 2000.0;
+        let width = 2400.0;
         let mut h = Harness::builder().with_size(vec2(width, 48.0)).build_ui_state(
             |ui, app: &mut PhotocraftApp| {
                 if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
@@ -3377,7 +4313,8 @@ mod tests {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.ui.transform = Some(session());
         setup(&mut app);
-        let mut h = Harness::builder().with_size(vec2(900.0, 360.0)).build_ui_state(
+        // Keep every numeric field visible after the scope selector; narrow-bar clipping is tested separately.
+        let mut h = Harness::builder().with_size(vec2(1200.0, 360.0)).build_ui_state(
             |ui, app: &mut PhotocraftApp| {
                 if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     return;
@@ -3899,8 +4836,8 @@ mod tests {
     }
 
     /// A commit the engine refuses (here a collapsed box; a result over the pixel budget, #3773, is
-    /// refused the same way) shows the reason and keeps the box open, unchanged; picking another
-    /// tool then ends it.
+    /// refused the same way) shows the reason and keeps the box open, unchanged. A tool switch
+    /// also keeps the rejected edit available until it is repaired or explicitly cancelled.
     #[test]
     fn a_refused_commit_keeps_the_box_open() {
         let ctx = egui::Context::default();
@@ -3919,7 +4856,10 @@ mod tests {
         assert_eq!((st.revision, st.history.past_len()), (revision, steps), "the document was not changed");
         app.ui.tool = if app.ui.tool == Tool::Brush { Tool::Move } else { Tool::Brush };
         end_if_left(&mut app);
-        assert!(app.ui.transform.is_none() && app.transform_preview.is_none(), "another tool ends it");
+        assert!(app.ui.transform.is_some() && app.transform_preview.is_some(), "a refused commit preserves the pending edit");
+        assert_eq!(app.ui.tool, app.transform_preview.as_ref().unwrap().tool);
+        cancel(&mut app);
+        assert!(app.ui.transform.is_none() && app.transform_preview.is_none());
     }
 
     /// #352: ⌥⌘T transforms a copy. OK leaves the original and a moved copy as one history step;
@@ -3973,8 +4913,8 @@ mod tests {
                 // Cloning a document deliberately shares layer IDs, but gets a fresh document ID.
                 let other = app.session.active().unwrap().doc.as_ref().clone();
                 app.session.add_document(other, None);
-                app.run("layer.new.layer", json!({})).unwrap();
-                app.run("layer.new.layer", json!({})).unwrap();
+                app.session.execute("layer.new.layer", json!({})).unwrap();
+                app.session.execute("layer.new.layer", json!({})).unwrap();
                 assert!(app.session.undo());
                 let st = app.session.active().unwrap();
                 let (doc, history, redo, revision, layer) =
@@ -4001,7 +4941,7 @@ mod tests {
         let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
         begin_copy(&mut app, &egui::Context::default()).unwrap();
         app.run("file.new", json!({"width": 64, "height": 64})).unwrap();
-        app.run("layer.new.layer", json!({})).unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
         let doc = app.session.active().unwrap().doc.clone();
         let steps = app.session.active().unwrap().history.past_len();
         app.session.close(0);
@@ -4031,7 +4971,7 @@ mod tests {
     fn cancelling_a_copy_does_not_undo_a_later_edit() {
         let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
         begin_copy(&mut app, &egui::Context::default()).unwrap();
-        app.run("layer.new.layer", json!({})).unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
         let st = app.session.active().unwrap();
         let (doc, history) = (st.doc.clone(), st.history.entries());
         cancel(&mut app);
@@ -4090,6 +5030,7 @@ mod tests {
     #[test]
     fn edits_during_a_selection_transform_keep_the_lifted_pixels_out() {
         let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
+        app.ui.tool_options.move_target = "layer".into();
         app.ui.tool = Tool::Move;
         app.session.execute("select.rect", json!({"x": 8, "y": 8, "width": 8, "height": 16})).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 800.0)).with_max_steps(64).build_eframe(move |cc| {
@@ -4145,10 +5086,10 @@ mod tests {
         assert_eq!(st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds(), photocraft_geom::Rect::new(28, 8, 44, 24));
     }
 
-    /// #1400: selecting another layer while transforming applies the box to the layer it was on,
-    /// and the next transform starts on the newly selected layer.
+    /// Selecting another layer leaves the cached transform bound to its frozen roots. Enter
+    /// applies those roots once; the next transform starts on the newly selected layer.
     #[test]
-    fn selecting_another_layer_applies_the_transform_and_the_next_one_follows() {
+    fn selecting_another_layer_keeps_frozen_targets_until_enter_and_the_next_one_follows() {
         let ctx = egui::Context::default();
         let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
         let first = app.session.active().unwrap().active_layer.unwrap();
@@ -4169,7 +5110,13 @@ mod tests {
         let steps = app.session.active().unwrap().history.past_len();
         app.run("layer.select", json!({"layer": second.0})).unwrap();
         end_if_left(&mut app);
-        assert!(app.ui.transform.is_none() && app.transform_preview.is_none(), "the box left the old layer");
+        assert!(app.ui.transform.is_some() && app.transform_preview.is_some(), "the box stays on its frozen target");
+        assert_eq!(app.ui.transform.as_ref().unwrap().layer, first.0);
+        let pending = app.session.active().unwrap();
+        assert_eq!(pending.history.past_len(), steps, "selecting a layer does not submit pixels");
+        assert_eq!(pending.doc.layer(first).unwrap().surface().unwrap().content_bounds(), photocraft_geom::Rect::new(8, 8, 24, 24));
+        commit(&mut app);
+        assert!(app.ui.transform.is_none() && app.transform_preview.is_none());
         let st = app.session.active().unwrap();
         assert_eq!(st.active_layer, Some(second));
         assert_eq!(st.history.past_len(), steps + 1, "applied as one step");
@@ -4215,6 +5162,7 @@ mod tests {
     fn the_box_is_the_selection_and_the_ants_follow_it() {
         let ctx = gpu_ctx();
         let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
+        app.ui.tool_options.move_target = "layer".into();
         let xf = ViewXform {
             rect: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 400.0)),
             zoom: 2.0,
@@ -5278,6 +6226,7 @@ mod tests {
     #[test]
     fn targeted_unlinked_mask_transforms_alone_through_the_box() {
         let mut app = masked_app(false);
+        app.ui.tool_options.move_target = "layer".into();
         app.ui.mask_target = true;
         let ctx = egui::Context::default();
         begin(&mut app, &ctx).unwrap();
@@ -5412,5 +6361,204 @@ mod tests {
         let st = app.session.active().unwrap();
         assert!(matches!(&st.doc.layer(st.active_layer.unwrap()).unwrap().content, LayerContent::Text(t) if t.warp.is_none()));
         assert_eq!(past(&app), before + 2);
+    }
+    #[test]
+    fn pending_scope_expands_sources_without_committing_and_applies_one_translation() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
+        let first = app.session.active().unwrap().active_layer.unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        let second = app.session.active().unwrap().active_layer.unwrap();
+        app.session
+            .edit("paint", |doc, _| {
+                doc.layer_mut(second).unwrap().surface_mut().unwrap().fill_rect(photocraft_geom::Rect::new(32, 8, 40, 24), &[0., 0., 1., 1.]);
+                Ok(())
+            })
+            .unwrap();
+        app.ui.tool_options.move_target = "layer".into();
+        begin(&mut app, &ctx).unwrap();
+        let source = app.session.active().unwrap().doc.clone();
+        let before = app.session.active().unwrap().history.past_len();
+        let id = app.ui.transform.as_ref().unwrap().session;
+        app.ui.transform.as_mut().unwrap().quad.iter_mut().for_each(|p| p[0] += 3.0);
+        track_steps(&mut app, &ctx);
+        change_scope(&mut app, &ctx, "all").unwrap();
+        let t = app.ui.transform.as_ref().unwrap();
+        assert_eq!(t.session, id);
+        assert_eq!(t.rect, [0., 0., 64., 64.]);
+        assert_eq!(t.quad, corners(t.rect).map(|[x, y]| [x + 3., y]));
+        assert!(Arc::ptr_eq(&source, &app.session.active().unwrap().doc));
+        assert_eq!(app.session.active().unwrap().history.past_len(), before);
+        assert!(app.transform_preview.as_ref().unwrap().targets.contains(&first));
+        assert!(app.transform_preview.as_ref().unwrap().targets.contains(&second));
+        commit(&mut app);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.history.past_len(), before + 1);
+        assert_eq!(st.doc.layer(first).unwrap().surface().unwrap().content_bounds(), photocraft_geom::Rect::new(11, 8, 27, 24));
+        assert_eq!(st.doc.layer(second).unwrap().surface().unwrap().content_bounds(), photocraft_geom::Rect::new(35, 8, 43, 24));
+        app.session.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(app.session.active().unwrap().doc.layer(first).unwrap().surface().unwrap().content_bounds(), photocraft_geom::Rect::new(8, 8, 24, 24));
+    }
+
+    #[test]
+    fn pending_scope_group_freezes_the_parent_and_rebases_custom_warp() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
+        let first = app.session.active().unwrap().active_layer.unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        let second = app.session.active().unwrap().active_layer.unwrap();
+        app.session
+            .edit("paint", |doc, _| {
+                doc.layer_mut(second).unwrap().surface_mut().unwrap().fill_rect(photocraft_geom::Rect::new(32, 8, 40, 24), &[0., 0., 1., 1.]);
+                Ok(())
+            })
+            .unwrap();
+        app.session.execute("layer.select", json!({"layer":first.0,"mode":"add"})).unwrap();
+        let group = LayerId(app.session.execute("layer.new.groupFromLayers", json!({})).unwrap()["layer"].as_u64().unwrap());
+        app.session.execute("layer.select", json!({"layer":second.0})).unwrap();
+        app.ui.tool_options.move_target = "layer".into();
+        begin(&mut app, &ctx).unwrap();
+        let rect = app.ui.transform.as_ref().unwrap().rect;
+        let mut mesh = BezierMesh::identity(rect, 1, 1);
+        mesh.points[5][0] += 4.;
+        app.ui.transform.as_mut().unwrap().warp = Some(Warp::custom(mesh, rect));
+        let source = app.session.active().unwrap().doc.clone();
+        change_scope(&mut app, &ctx, "group").unwrap();
+        let pv = app.transform_preview.as_ref().unwrap();
+        assert_eq!(pv.targets, vec![group]);
+        assert!(pv.whole_layers);
+        let t = app.ui.transform.as_ref().unwrap();
+        assert_eq!(t.rect, [8., 8., 40., 24.]);
+        let warp = t.warp.as_ref().unwrap();
+        assert_eq!(warp.bounds, t.rect);
+        // Expanding the source keeps the existing four-pixel deformation.
+        let identity = BezierMesh::identity(t.rect, 1, 1);
+        assert!((warp.mesh.as_ref().unwrap().points[5][0] - identity.points[5][0] - 4.).abs() < 1e-9);
+        assert!(Arc::ptr_eq(&source, &app.session.active().unwrap().doc));
+        cancel(&mut app);
+        assert!(Arc::ptr_eq(&source, &app.session.active().unwrap().doc));
+    }
+
+    #[test]
+    fn rejected_scope_keeps_the_pending_source_geometry_and_history() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
+        let first = app.session.active().unwrap().active_layer.unwrap();
+        app.session
+            .edit("lock", |doc, _| {
+                doc.layer_mut(first).unwrap().locks.position = true;
+                Ok(())
+            })
+            .unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        app.session
+            .edit("paint", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photocraft_geom::Rect::new(32, 8, 40, 24), &[0., 0., 1., 1.]);
+                Ok(())
+            })
+            .unwrap();
+        app.ui.tool_options.move_target = "layer".into();
+        begin(&mut app, &ctx).unwrap();
+        app.ui.transform.as_mut().unwrap().quad.iter_mut().for_each(|p| p[0] += 3.0);
+        track_steps(&mut app, &ctx);
+        let before = Step::of(app.ui.transform.as_ref().unwrap());
+        let targets = app.transform_preview.as_ref().unwrap().targets.clone();
+        let history = app.transform_preview.as_ref().unwrap().steps.undo.clone();
+        let source = app.session.active().unwrap().doc.clone();
+        assert!(change_scope(&mut app, &ctx, "all").is_err());
+        assert_eq!(app.ui.tool_options.move_target, "layer");
+        assert_eq!(Step::of(app.ui.transform.as_ref().unwrap()), before);
+        assert_eq!(app.transform_preview.as_ref().unwrap().targets, targets);
+        assert_eq!(app.transform_preview.as_ref().unwrap().steps.undo, history);
+        assert!(Arc::ptr_eq(&source, &app.session.active().unwrap().doc));
+    }
+
+    #[test]
+    fn automation_save_requires_pending_transform_to_be_applied() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
+        begin(&mut app, &ctx).unwrap();
+        nudge(&mut app, 4.0, 3.0);
+        let before = app.session.active().unwrap().doc.clone();
+        let error = app.save_automation(Some("pending.png".into())).unwrap_err();
+        assert!(error.contains("pending transform"), "{error}");
+        assert!(Arc::ptr_eq(&before, &app.session.active().unwrap().doc));
+        cancel(&mut app);
+        let error = app.save_automation(Some("cancelled.png".into())).unwrap_err();
+        assert!(error.contains("no exporter configured"), "{error}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_cached_nine_grid_drag_preserves_source_and_commits_one_undo_step() {
+        let _gpu = photocraft_testkit::gpu_lock();
+        let rs = egui_kittest::wgpu::create_render_state(crate::gpu_canvas::wgpu_setup(), Default::default());
+        let ctx = egui::Context::default();
+        let mut app = app_with_square(192, photocraft_geom::Rect::new(24, 24, 168, 168));
+        app.session
+            .edit("marker", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photocraft_geom::Rect::new(66, 66, 78, 78), &[0., 0., 1., 1.]);
+                Ok(())
+            })
+            .unwrap();
+        app.gpu = Some(crate::gpu_canvas::GpuCanvas::new(&rs));
+        app.ui.tool_options.move_target = "layer".into();
+        begin(&mut app, &ctx).unwrap();
+        enter_warp(&mut app, &ctx);
+        let t = app.ui.transform.as_mut().unwrap();
+        t.warp = Some(Warp::custom(BezierMesh::identity(t.rect, 3, 3), t.rect));
+        let source = app.session.active().unwrap().doc.clone();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        let past = app.session.active().unwrap().history.past_len();
+        for event in [ToolEvent::Down { x: 72., y: 72., pressure: 1. }, ToolEvent::Move { x: 85., y: 82., pressure: 1. }, ToolEvent::Up { x: 85., y: 82. }] {
+            assert!(pointer(&mut app, event, egui::Modifiers::NONE));
+        }
+        let warp = app.ui.transform.as_ref().unwrap().warp.as_ref().unwrap();
+        assert!(!warp.is_identity());
+        assert_eq!(warp.mesh.as_ref().unwrap().us.len(), 4);
+        assert!(Arc::ptr_eq(&source, &app.session.active().unwrap().doc));
+        assert_eq!(app.session.active().unwrap().history.past_len(), past);
+        commit(&mut app);
+        assert!(app.ui.transform.is_none(), "{}", app.ui.status);
+        let st = app.session.active().unwrap();
+        let committed = st.doc.layer(layer).unwrap().surface().unwrap().clone();
+        assert_ne!(Some(&committed), source.layer(layer).unwrap().surface());
+        assert_eq!(st.history.past_len(), past + 1);
+        assert!(app.session.undo());
+        assert_eq!(app.session.active().unwrap().doc.layer(layer).unwrap().surface(), source.layer(layer).unwrap().surface());
+        assert!(app.session.redo());
+        assert_eq!(app.session.active().unwrap().doc.layer(layer).unwrap().surface(), Some(&committed));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_cached_worker_commits_latest_geometry_beyond_the_preview_region() {
+        let _gpu = photocraft_testkit::gpu_lock();
+        let rs = egui_kittest::wgpu::create_render_state(crate::gpu_canvas::wgpu_setup(), Default::default());
+        let ctx = egui::Context::default();
+        let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
+        app.gpu = Some(crate::gpu_canvas::GpuCanvas::new(&rs));
+        app.ui.tool_options.move_target = "layer".into();
+        begin(&mut app, &ctx).unwrap();
+        let index = app.session.active_index().unwrap();
+        let source = app.session.active().unwrap().doc.clone();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        let past = app.session.active().unwrap().history.past_len();
+        set_preview_region(&mut app, index, photocraft_geom::Rect::new(0, 0, 12, 12));
+        app.ui.transform.as_mut().unwrap().quad.iter_mut().for_each(|p| p[0] += 3.);
+        assert!(gpu_display_doc(&mut app, index).is_some());
+        assert!(app.transform_preview.as_ref().unwrap().gpu_preview.as_ref().unwrap().work.is_none(), "preview owns the one worker");
+        // Enter arrives while an older, clipped preview is still in flight.
+        app.ui.transform.as_mut().unwrap().quad.iter_mut().for_each(|p| p[0] += 10.);
+        set_preview_region(&mut app, index, photocraft_geom::Rect::new(0, 0, 4, 4));
+        assert!(Arc::ptr_eq(&source, &app.session.active().unwrap().doc));
+        commit(&mut app);
+        assert!(app.ui.transform.is_none(), "{}", app.ui.status);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.history.past_len(), past + 1);
+        assert_eq!(st.doc.layer(layer).unwrap().surface().unwrap().content_bounds(), photocraft_geom::Rect::new(21, 8, 37, 24));
+        let mut pixel = [0.; 4];
+        st.doc.layer(layer).unwrap().surface().unwrap().read_pixel(36, 23, &mut pixel);
+        assert_eq!(pixel, [1., 0., 0., 1.]);
     }
 }

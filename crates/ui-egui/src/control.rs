@@ -131,8 +131,9 @@ pub enum Outcome {
 /// field's value is validated before the first one is applied, so a typo, an unknown field, a
 /// bad value or a bad nested key can't reply with success while nothing — or only half of it —
 /// changed (#412).
-pub const UI_SET_FIELDS: [&str; 40] = [
+pub const UI_SET_FIELDS: [&str; 41] = [
     "tool",
+    "moveTarget",
     "strokeTrace",
     "panels",
     "dock",
@@ -494,6 +495,11 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                     Some(t) => Tool::from_name(t).map(Some).ok_or_else(|| format!("unknown tool `{t}`"))?,
                     None => None,
                 };
+                let move_target = match p.get("moveTarget") {
+                    Some(Value::String(value)) if matches!(value.as_str(), "layer" | "all" | "group") => Some(value.clone()),
+                    Some(_) => return Err("moveTarget must be layer, all or group".into()),
+                    None => None,
+                };
                 let gradient_classic = bool_field(p, "gradientClassic")?;
                 // The stroke latency trace (`stroke_trace`), at runtime: on (stderr) or off. A CSV
                 // file is only for the user's own launch (`--stroke-trace <path>`): a path over the
@@ -676,6 +682,9 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                     // Each tool keeps its own brush (#218), so switch it in before `brushSize`
                     // below sets the new tool's size.
                     crate::paint_mouse::sync_tool_brush(app);
+                }
+                if let Some(scope) = move_target {
+                    app.ui.tool_options.move_target = scope;
                 }
                 let gradient_before = app.ui.tool_options.clone();
                 if let Some(mode) = gradient_blend {
@@ -1991,6 +2000,19 @@ mod tests {
             assert!(!r.to_string().contains("unknown field"), "{field}: {r}");
         }
         assert_eq!(call(&mut app, &ctx, "ui.set", Value::Null)["ok"], true);
+    }
+
+    #[test]
+    fn cached_edit_scope_control_validates_before_changing_tool() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        let ctx = egui::Context::default();
+        let rejected = call(&mut app, &ctx, "ui.set", json!({"tool": "move", "moveTarget": "invalid"}));
+        assert_eq!(rejected["ok"], false);
+        assert_eq!(app.ui.tool, Tool::Brush);
+        for scope in ["layer", "all", "group"] {
+            assert_eq!(call(&mut app, &ctx, "ui.set", json!({"moveTarget": scope}))["ok"], true);
+            assert_eq!(app.ui.tool_options.move_target, scope);
+        }
     }
 
     #[test]

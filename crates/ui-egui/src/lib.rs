@@ -710,6 +710,7 @@ pub struct PhotocraftApp {
     thumb_documents: Vec<(DocId, std::sync::Weak<Document>)>,
     /// Content bounds cached per (key, revision): scanning a 36 MP layer every frame cost ~77 ms.
     bounds_cache: HashMap<u64, (u64, photocraft_geom::Rect)>,
+    bounds_context: Option<egui::Context>,
     /// Downsampled proxy of the active document for live previews: (doc, revision, k, proxy).
     pub(crate) proxy: Option<(DocId, u64, u32, std::sync::Arc<Document>)>,
     /// Key of the preview currently uploaded to the GPU (doc, params hash).
@@ -927,6 +928,7 @@ impl PhotocraftApp {
             snapshot_thumbs: HashMap::new(),
             thumb_documents: Vec::new(),
             bounds_cache: HashMap::new(),
+            bounds_context: None,
             proxy: None,
             proxy_uploaded: None,
             outline_cache: None,
@@ -1093,6 +1095,9 @@ impl PhotocraftApp {
     }
 
     fn run_command(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        if move_ui::guards_command(self, id) {
+            return Err(tl!("Press Enter to apply the move or Esc to cancel it before editing the document.").into());
+        }
         if matches!(id, "paint.setSymmetry" | "paint.symmetryFromPath" | "paint.symmetryDisable") {
             self.ui.symmetry_transform = None;
         }
@@ -1644,6 +1649,9 @@ impl PhotocraftApp {
     /// `None` when the save went to a background job (#2017), which finishes it in
     /// [`jobs_ui::tick`].
     pub(crate) fn write_document(&mut self, path: String, settings: &ExportSettings, copy: bool) -> Result<Option<(String, Vec<String>)>, String> {
+        if crate::transform_tool::is_cached_raster(self) {
+            return Err("Press Enter to apply the pending transform before saving or exporting.".into());
+        }
         if self.background_jobs
             && let Some(save) = self.services.save_file.clone()
         {
@@ -1762,6 +1770,9 @@ impl PhotocraftApp {
     /// [`Self::save_automation`] writing a Targa with `tga_bits` per pixel (`None`: 32 with an
     /// alpha channel or transparency, else 24). Automation saves never prompt.
     pub fn save_automation_with(&mut self, path: Option<String>, tga_bits: Option<photocraft_io::TgaBits>) -> Result<Value, String> {
+        if crate::transform_tool::is_cached_raster(self) {
+            return Err("Press Enter to apply the pending transform before saving or exporting.".into());
+        }
         let target = {
             let state = self.session.active().ok_or("no document")?;
             // As File › Save: without `path` only a layered file is written back (#416).
@@ -1882,6 +1893,7 @@ impl eframe::App for PhotocraftApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.bounds_context = Some(ctx.clone());
         self.cap_frame_rate();
         i18n::set_current(i18n::Lang::from_pref(&self.session.prefs().interface.language));
         // Caps Lock state read from the OS once per frame (see `Services::caps_lock`): the canvas

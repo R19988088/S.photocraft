@@ -40,6 +40,10 @@
 pub mod bounds;
 pub mod cached_feather;
 mod cached_fields;
+pub mod cached_group;
+mod cached_image;
+mod cached_resample;
+pub mod cached_transform;
 mod fx;
 pub mod health;
 pub mod native_format;
@@ -526,6 +530,7 @@ impl SourceOverride {
 
 pub struct Compositor {
     source_overrides: HashMap<LayerId, SourceOverride>,
+    render_bounds: Option<Rect>,
     cached_fields: Option<cached_fields::Fields>,
     kit: Kit,
     pool: Vec<(wgpu::Texture, wgpu::TextureView)>,
@@ -785,6 +790,7 @@ impl Compositor {
         let dummy = Tex::new(device, "pc_compose_dummy", 1, 1, wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureUsages::TEXTURE_BINDING).view;
         Self {
             source_overrides: HashMap::new(),
+            render_bounds: None,
             cached_fields: None,
             kit: Kit { pipelines, bgl0, bgl1, dummy },
             pool: Vec::new(),
@@ -1223,7 +1229,7 @@ impl Compositor {
         flush: bool,
     ) -> Result<Stats, Unsupported> {
         let canvas = doc.bounds();
-        let region = region.intersect(&canvas);
+        let region = region.intersect(&self.render_bounds.unwrap_or(canvas));
         let mut plan = plan::plan_live(doc, &self.source_overrides)?;
         if !self.source_overrides.is_empty() {
             // Cached sources can leave their original bounds. Every intermediate slot is
@@ -1958,6 +1964,11 @@ impl Compositor {
         let v = t.view.clone();
         self.temps.push((t, frame));
         v
+    }
+
+    /// Offscreen group presentations can extend beyond the document canvas.
+    pub fn set_render_bounds(&mut self, bounds: Option<Rect>) {
+        self.render_bounds = bounds;
     }
 
     /// Install resident replacements while a cached canvas edit is active.

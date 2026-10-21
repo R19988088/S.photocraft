@@ -272,11 +272,13 @@ mod tests {
         app.ui.extras.snap = false;
         app.ui.view.show.smart_guides = false;
         drag(&mut app, [20.0, 20.0], [10.0, 5.0], egui::Modifiers::NONE);
+        crate::transform_tool::commit(&mut app);
         assert_eq!(boards(&app), vec![photocraft_geom::Rect::new(10, 5, 50, 45)]);
         let st = app.session.active().unwrap();
         assert_eq!(st.active_layer, Some(st.doc.artboards()[0].0));
         // ⌥-drag: the copy follows the pointer, the original stays.
         drag(&mut app, [20.0, 20.0], [50.0, 0.0], egui::Modifiers::ALT);
+        crate::transform_tool::commit(&mut app);
         let mut got = boards(&app);
         got.sort_by_key(|r| r.x0);
         assert_eq!(got, vec![photocraft_geom::Rect::new(10, 5, 50, 45), photocraft_geom::Rect::new(60, 5, 100, 45)]);

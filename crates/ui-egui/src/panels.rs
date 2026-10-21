@@ -1392,17 +1392,10 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     // Every theme gets the font, style and size controls (#1387), as with Auto-Select (#1275).
                     Tool::Type | Tool::VerticalType | Tool::HorizontalTypeMask | Tool::VerticalTypeMask => crate::type_tool::options_bar(app, ui),
                     Tool::Move if t.pro => {
-                        let o = &mut app.ui.tool_options;
-                        widgets::checkbox(ui, &mut o.move_auto_select, tl!("Auto-Select:"));
-                        widgets::dropdown(
-                            ui,
-                            "move-target",
-                            &mut o.move_target,
-                            &[("layer".to_string(), tl!("Layer")), ("group".to_string(), tl!("Group"))],
-                            76.0,
-                        );
+                        widgets::checkbox(ui, &mut app.ui.tool_options.move_auto_select, tl!("Auto-Select:"));
+                        crate::transform_tool::scope_options(app, ui, "move-target");
                         widgets::vline(ui, 22.0);
-                        widgets::checkbox(ui, &mut o.move_show_transform, tl!("Show Transform Controls"));
+                        widgets::checkbox(ui, &mut app.ui.tool_options.move_show_transform, tl!("Show Transform Controls"));
                         widgets::vline(ui, 22.0);
                         ui.spacing_mut().item_spacing.x = 0.0;
                         for (icon, tip, cmd) in [
@@ -1454,6 +1447,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     Tool::Move => {
                         // The Studio themes keep Photoshop's Auto-Select toggle too (#1275).
                         widgets::checkbox(ui, &mut app.ui.tool_options.move_auto_select, tl!("Auto-Select:"));
+                        crate::transform_tool::scope_options(app, ui, "move-target");
                         // And Show Transform Controls (#5740): without it the box could not be
                         // turned on outside the Pro themes.
                         widgets::checkbox(ui, &mut app.ui.tool_options.move_show_transform, tl!("Show Transform Controls"));

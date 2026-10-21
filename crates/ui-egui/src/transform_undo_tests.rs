@@ -105,9 +105,11 @@ fn free_transform_starts_where_the_selected_pixels_were_moved() {
     let mut h = harness();
     h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 100, "height": 60})).unwrap();
     drag(&mut h, [150.0, 130.0], [250.0, 180.0]);
-    assert_eq!(photocraft_engine::float_cmds::floating(h.state().session.active().unwrap()).unwrap().offset, (100, 50));
+    assert!(crate::transform_tool::is_cached_move(h.state()));
+    assert_eq!(h.state().session.active().unwrap().doc.selection.as_ref().unwrap().content_bounds(), photocraft_geom::Rect::new(100, 100, 200, 160));
     begin(&mut h);
     assert_eq!(quad(&h), [[200.0, 150.0], [300.0, 150.0], [300.0, 210.0], [200.0, 210.0]]);
+    key(&mut h, Modifiers::NONE, Key::Enter);
     let st = h.state().session.active().unwrap();
     assert!(photocraft_engine::float_cmds::floating(st).is_none());
     assert_eq!(st.doc.selection.as_ref().unwrap().content_bounds(), photocraft_geom::Rect::new(200, 150, 300, 210));
@@ -344,10 +346,10 @@ fn the_first_drag_from_the_move_tools_controls_undoes() {
     assert!(close(quad(&h), [[100.0, 100.0], [200.0, 100.0], [200.0, 160.0], [100.0, 160.0]]), "{:?}", quad(&h));
 }
 
-/// #3402's layer-switch case (#5297): selected pixels moved with the Move tool, then moved again
-/// in the Free Transform box, land where the box left them when another layer is picked.
+/// A cached transform retains its original target when another layer is selected.
+/// Enter applies that frozen target once, including its selected pixels.
 #[test]
-fn picking_another_layer_applies_the_transform_of_moved_selected_pixels() {
+fn picking_another_layer_keeps_the_cached_transform_target_until_enter() {
     let mut h = harness();
     let layer = h.state().session.active().unwrap().active_layer.unwrap();
     h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 100, "height": 60})).unwrap();
@@ -360,7 +362,9 @@ fn picking_another_layer_applies_the_transform_of_moved_selected_pixels() {
     h.state_mut().run("layer.select", json!({"layer": other.0})).unwrap();
     crate::transform_tool::end_if_left(h.state_mut());
     h.run_steps(3);
-    assert!(h.state().ui.transform.is_none(), "picking another layer applies the transform");
+    assert_eq!(h.state().ui.transform.as_ref().unwrap().layer, layer.0, "layer selection cannot replace the frozen source");
+    key(&mut h, Modifiers::NONE, Key::Enter);
+    assert!(h.state().ui.transform.is_none());
     let st = h.state().session.active().unwrap();
     let landed = photocraft_geom::Rect::new(220, 160, 320, 220);
     let (pixels, selection) = (st.doc.layer(layer).unwrap().surface().unwrap().content_bounds(), st.doc.selection.as_ref().map(|s| s.content_bounds()));

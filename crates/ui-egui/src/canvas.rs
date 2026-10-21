@@ -1169,9 +1169,17 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> (std::sync::Ar
         return shown;
     }
     crate::transform_tool::follow_edits(app);
-    let st = &app.session.documents()[idx];
     if let Some(l) = live_stroke(app, idx) {
         return (l.stroke.doc().clone(), l.display_key());
+    }
+    if let Some(shown) = crate::transform_tool::gpu_display_doc(app, idx) {
+        return shown;
+    }
+    let st = &app.session.documents()[idx];
+    if app.ui.transform.is_none()
+        && let Some(gpu) = &app.gpu
+    {
+        gpu.clear_source_overrides(st.doc.id.0);
     }
     if let (Some(t), Some(pv)) = (&app.ui.transform, &app.transform_preview)
         && app.session.active_index() == Some(idx)
@@ -1580,6 +1588,7 @@ pub(crate) fn effect_reach(layers: &[photocraft_doc::Layer]) -> i32 {
 /// unchanged lower-stack composites can be reused by the compositor inside that region.
 /// Returns false if there is no GPU canvas.
 fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible: DRect) -> bool {
+    crate::transform_tool::set_preview_region(app, idx, visible);
     let Some(gpu) = app.gpu.clone() else { return false };
     let Some((revision, last_damage, id)) = app
         .session
@@ -3078,7 +3087,8 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // Painting must consume this frame's input before uploading its image: painting first
     // displayed the previous stroke step, including a blank frame at pointer-down.
     let crop_camera = primary && crate::crop_mode::moves_image(app);
-    let paint_after_input = crop_camera || (primary && (strokes_live(app.ui.tool) || app.ui.tool == Tool::Liquify));
+    let paint_after_input = crop_camera
+        || (primary && (strokes_live(app.ui.tool) || app.ui.tool == Tool::Liquify || app.active_tool() == Tool::Move || app.ui.transform.is_some()));
     let paint_canvas = |app: &mut PhotocraftApp, ui: &egui::Ui, view: &View, xf: ViewXform| {
         let point_zoom = view.zoom / ppp;
         let drop_shadow = border == photocraft_engine::prefs::CanvasBorder::DropShadow;
@@ -5402,6 +5412,11 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     // Free Transform picks the handle under the press where the user clicked: the snapped press
     // can land outside the corner's grab area and turn a corner drag into a move of the whole box.
     let transform_ev = if matches!(raw, ToolEvent::Down { .. }) { raw } else { ev };
+    // Move sessions share Free Transform's immutable GPU source, but a press anywhere
+    // translates it rather than grabbing transform handles.
+    if crate::move_ui::cached_pointer(app, ev, mods) {
+        return;
+    }
     if crate::transform_tool::pointer(app, transform_ev, mods) {
         return;
     }
@@ -5523,7 +5538,10 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             }
             // Auto-Select (or ⌘-click while it is off) picks the layer under the pointer first
             // (not when the selected pixels move: those are the active layer's).
-            if !crate::move_ui::moves_selected_pixels_with(app, tool) && app.ui.tool_options.move_auto_select != mods.command {
+            if app.ui.tool_options.move_target != "all"
+                && !crate::move_ui::moves_selected_pixels_with(app, tool)
+                && app.ui.tool_options.move_auto_select != mods.command
+            {
                 let target = app.ui.tool_options.move_target.clone();
                 let mode = if mods.shift { "add" } else { "replace" };
                 let before = app.session.active().map(|st| st.selected_layers());
@@ -5564,16 +5582,17 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                 app.move_blocked = true;
                 return;
             }
-            // With a selection: cut the selected pixels (⌥ copies them) and drag them as a floating
-            // piece, from anywhere, as a marquee ⌘-drag does.
-            if crate::move_ui::moves_selected_pixels_with(app, tool) {
-                if crate::move_ui::float_selected(app, mods.alt, 0.0, 0.0) {
-                    let mut d = Drag::new(tool, [x, y], vec![[x, y, pressure as f64]], mods, false);
-                    d.sel_move = Some(true);
-                    app.drag = Some(d);
-                }
+            if app.ui.tool_options.move_target == "layer"
+                && let Some(why) = hidden_target(app, tool)
+            {
+                app.ui.status = why.into();
+                app.ui.status_error = true;
                 return;
             }
+            // Raster selections are lifted once by the cached session on first movement.
+            // The committed document stays unchanged until Enter or a tool switch.
+            app.drag = Some(Drag::new(tool, [x, y], vec![[x, y, pressure as f64]], mods, false));
+            return;
         }
         ToolEvent::Move { x, y, .. } => {
             if let Some(d) = app.guide_drag.as_mut().filter(|d| d.index.is_some()) {
@@ -8608,6 +8627,7 @@ mod transform_controls_tests {
         app.run("select.rect", json!({"x": 100, "y": 100, "width": 100, "height": 60})).unwrap();
         app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
         app.ui.tool = Tool::Move;
+        app.ui.tool_options.move_target = "layer".into();
         app.ui.tool_options.move_show_transform = true;
         assert!(crate::move_ui::float_selected(&mut app, false, 100.0, 50.0));
         let xf =
@@ -8630,6 +8650,7 @@ mod transform_controls_tests {
         app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
         app.run("select.rect", json!({"x": 60, "y": 80, "width": 100, "height": 120})).unwrap();
         app.ui.tool = Tool::Move;
+        app.ui.tool_options.move_target = "layer".into();
         app.ui.tool_options.move_show_transform = true;
         let xf =
             ViewXform { rect: Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), zoom: 1.0, center: [200.0, 150.0], flip: false, rotation: 0.0, aspect: 1.0 };

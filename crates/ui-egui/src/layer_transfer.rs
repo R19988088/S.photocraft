@@ -63,7 +63,8 @@ pub fn begin_from_panel(app: &PhotocraftApp, ctx: &egui::Context, layer: LayerId
 fn move_drag(app: &PhotocraftApp) -> Option<[f64; 2]> {
     let d = app.drag.as_ref().filter(|d| d.tool == Tool::Move && d.sel_move.is_none())?;
     let st = app.session.active()?;
-    let plain = app.ui.transform.is_none() && app.guide_drag.is_none() && st.doc.selection.is_none() && st.floating.is_none();
+    let transform_allows_transfer = app.ui.transform.is_none() || (crate::transform_tool::is_cached_move(app) && !crate::transform_tool::has_settled_move(app));
+    let plain = transform_allows_transfer && app.guide_drag.is_none() && st.doc.selection.is_none() && st.floating.is_none();
     plain.then_some(d.start)
 }
 
@@ -89,6 +90,9 @@ pub fn over_tab(app: &mut PhotocraftApp, ctx: &egui::Context, index: usize) {
         // The Move drag ends without moving anything; an ⌥-drag's copy is taken back.
         app.drag = None;
         app.move_preview = None;
+        if crate::transform_tool::is_cached_move(app) {
+            crate::transform_tool::cancel(app);
+        }
         crate::move_mods::abandon(app);
         let active = app.session.active().and_then(|st| st.active_layer).unwrap_or(active);
         if !begin(app, ctx, active, Some(grab)) {

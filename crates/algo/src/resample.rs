@@ -153,6 +153,12 @@ fn position(o: i32, scale: f64, edge: Option<(i32, i32)>) -> f64 {
     j + ((u - j) * PHASES).round() / PHASES
 }
 
+/// Shared axis weights for resident GPU bicubic reduction. Coordinates stay in document space;
+/// missing coverage reads the surface default, exactly as `resize_surface` does.
+pub fn bicubic_axis_taps(dst0: i32, dst1: i32, scale: f64, content: (i32, i32)) -> Vec<(i32, Vec<f32>, f32)> {
+    taps(dst0, dst1, scale, keys(Resample::Bicubic, scale), None, content).into_iter().map(|t| (t.start, t.weights, t.outside)).collect()
+}
+
 /// The source pixels `[floor(o / scale), floor((o + 1) / scale))` output pixel `o` covers.
 fn cover(o: i32, scale: f64) -> (i32, i32) {
     let a = (o as f64 / scale + 1e-9).floor() as i32;

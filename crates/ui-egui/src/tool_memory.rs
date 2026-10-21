@@ -19,6 +19,12 @@ pub(crate) fn select(app: &mut PhotocraftApp, tool: Tool) {
             return;
         }
     }
+    if tool != app.ui.tool && app.ui.transform.is_some() {
+        crate::transform_tool::commit(app);
+        if app.ui.transform.is_some() {
+            return;
+        }
+    }
     app.stylus.tool_before_eraser = None;
     app.ui.spring = None;
     app.ui.tool = tool;

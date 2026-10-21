@@ -5152,6 +5152,8 @@ dependencies = [
  "bytemuck",
  "half",
  "log",
+ "photocraft-algo",
+ "photocraft-cms",
  "photocraft-color",
  "photocraft-compose",
  "photocraft-doc",
