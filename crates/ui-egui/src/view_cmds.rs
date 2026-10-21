@@ -1129,11 +1129,15 @@ pub fn form_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 Value::Number(n) => {
                     ui.label(label(&k));
                     if let Some(mut i) = n.as_i64() {
-                        ui.add(egui::DragValue::new(&mut i).custom_parser(crate::widgets::parse_num));
+                        let mut response = ui.add(egui::DragValue::new(&mut i).speed(0.0).custom_parser(crate::widgets::parse_num));
+                        let rect = response.rect;
+                        crate::widgets::numeric_gestures(ui, &mut response, &mut i, None, rect, 1.0);
                         json!(i)
                     } else {
                         let mut x = n.as_f64().unwrap_or(0.0);
-                        ui.add(egui::DragValue::new(&mut x).speed(0.5).custom_parser(crate::widgets::parse_num));
+                        let mut response = ui.add(egui::DragValue::new(&mut x).speed(0.0).custom_parser(crate::widgets::parse_num));
+                        let rect = response.rect;
+                        crate::widgets::numeric_gestures(ui, &mut response, &mut x, None, rect, 0.01);
                         json!(x)
                     }
                 }

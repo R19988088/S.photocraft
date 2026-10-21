@@ -47,7 +47,7 @@ pub(crate) fn update(ui: &Ui, resp: &Response, value: &mut f32, before: f32, ran
     let mut scrub = ui.data(|d| d.get_temp::<Scrub>(key)).unwrap_or(Scrub { precise: f64::from(before), pending: None });
     let delta = unwarped(delta, pos, &mut scrub.pending);
     let speed = if slow { speed / 10.0 } else { speed };
-    let change = f64::from(delta.x - delta.y) * speed;
+    let change = f64::from(delta.x) * speed;
     let (lo, hi) = (f64::from(*range.start()), f64::from(*range.end()));
     if change.is_finite() && change != 0.0 && lo <= hi {
         scrub.precise = (scrub.precise + change).clamp(lo, hi);

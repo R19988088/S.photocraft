@@ -1632,10 +1632,14 @@ fn tablet_fields(ui: &mut egui::Ui, obj: &mut Map<String, Value>, lang: crate::i
             ui.horizontal(|ui| {
                 ui.label(RichText::new(tl!(label)).color(t.text_dim));
                 let mut value = obj.get(key).and_then(Value::as_f64).unwrap_or(*range.start());
-                if ui.add(egui::Slider::new(&mut value, range).step_by(speed)).changed() {
+                let slider_changed = ui.add(egui::Slider::new(&mut value, range.clone()).step_by(speed).show_value(false)).changed();
+                let mut response =
+                    ui.add(egui::DragValue::new(&mut value).range(range.clone()).speed(0.0).max_decimals(2).custom_parser(crate::widgets::parse_num));
+                let rect = response.rect;
+                crate::widgets::numeric_gestures(ui, &mut response, &mut value, Some(range), rect, speed);
+                if slider_changed || response.changed() {
                     obj.insert(key.into(), json!(value));
                 }
-                ui.label(format!("{value:.2}"));
             });
         };
         row("deadZone", "Pressure dead zone", 0.0..=0.3, 0.01);
@@ -1743,14 +1747,19 @@ fn field_rows(ui: &mut egui::Ui, section: &str, obj: &mut Map<String, Value>, ke
             }
             Value::Number(n) => {
                 ui.label(RichText::new(tl!(&label)).color(t.text_dim));
-                let (lo, hi) = prefs::range(&path).unwrap_or((-1e9, 1e9));
+                let range = prefs::range(&path);
+                let (lo, hi) = range.unwrap_or((-1e9, 1e9));
                 if n.is_u64() || n.is_i64() {
                     let mut x = n.as_i64().unwrap_or(0);
-                    ui.add(egui::DragValue::new(&mut x).range(lo as i64..=hi as i64).custom_parser(crate::widgets::parse_num));
+                    let mut response = ui.add(egui::DragValue::new(&mut x).range(lo as i64..=hi as i64).speed(0.0).custom_parser(crate::widgets::parse_num));
+                    let rect = response.rect;
+                    crate::widgets::numeric_gestures(ui, &mut response, &mut x, range.map(|(lo, hi)| lo as i64..=hi as i64), rect, 1.0);
                     obj.insert(k, json!(x));
                 } else {
                     let mut x = n.as_f64().unwrap_or(0.0);
-                    ui.add(egui::DragValue::new(&mut x).range(lo..=hi).speed(0.1).max_decimals(3).custom_parser(crate::widgets::parse_num));
+                    let mut response = ui.add(egui::DragValue::new(&mut x).range(lo..=hi).speed(0.0).max_decimals(3).custom_parser(crate::widgets::parse_num));
+                    let rect = response.rect;
+                    crate::widgets::numeric_gestures(ui, &mut response, &mut x, range.map(|(lo, hi)| lo..=hi), rect, 0.001);
                     obj.insert(k, json!(x));
                 }
             }

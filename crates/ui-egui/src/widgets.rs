@@ -265,6 +265,64 @@ pub fn pill_tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
     resp
 }
 
+/// Numeric fields traverse their range over two visible field widths.
+/// Unbounded forms use twice the displayed magnitude rather than a machine-type limit.
+pub(crate) fn numeric_gestures<T: egui::emath::Numeric>(
+    ui: &mut Ui,
+    response: &mut Response,
+    value: &mut T,
+    range: Option<std::ops::RangeInclusive<T>>,
+    rect: Rect,
+    unit: f64,
+) {
+    if !ui.is_enabled() || !response.enabled() {
+        return;
+    }
+    let current = value.to_f64();
+    let (lo, hi) = range.as_ref().map_or((T::MIN.to_f64(), T::MAX.to_f64()), |r| (r.start().to_f64(), r.end().to_f64()));
+    let span = range.as_ref().map_or(current.abs().max(1.0) * 2.0, |_| hi - lo);
+    let key = response.id.with("numeric-drag");
+    let wrapped = ui.data(|d| d.get_temp::<bool>(response.id.with("native-wrapped-drag"))).unwrap_or(false);
+    if !wrapped && (response.drag_started() || response.dragged()) {
+        let initial = ui.data(|d| d.get_temp::<(f64, f64)>(key));
+        let (start, span) = initial.unwrap_or((current, span));
+        ui.data_mut(|d| d.insert_temp(key, (start, span)));
+        if let (Some(origin), Some(pointer)) = (ui.input(|i| i.pointer.press_origin()), response.interact_pointer_pos()) {
+            let delta = f64::from(pointer.x - origin.x) / (2.0 * f64::from(rect.width().max(1.0))) * span;
+            let next = ((start + delta) / unit).round() * unit;
+            if next.is_finite() && lo <= hi {
+                let next = T::from_f64(next.clamp(lo, hi));
+                if next != *value {
+                    *value = next;
+                    response.mark_changed();
+                }
+            }
+        }
+    }
+    if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+        ui.data_mut(|d| d.remove::<(f64, f64)>(key));
+    }
+    let edge = (rect.width() * 0.18).min(10.0);
+    for (index, direction) in [-1.0, 1.0].into_iter().enumerate() {
+        let x = if index == 0 { rect.left() } else { rect.right() - edge };
+        let hit = Rect::from_min_size(pos2(x, rect.top()), vec2(edge, rect.height())).intersect(ui.clip_rect());
+        let tap = ui.interact(hit, response.id.with(("numeric-edge", index)), Sense::click());
+        if tap.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if tap.clicked() {
+            let next = value.to_f64() + direction * unit;
+            if next.is_finite() && lo <= hi {
+                let next = T::from_f64(next.clamp(lo, hi));
+                if next != *value {
+                    *value = next;
+                    response.mark_changed();
+                }
+            }
+        }
+    }
+}
+
 /// Monospace numeric field with a dimmed unit suffix, Photoshop style. Drag to scrub. Typed
 /// arithmetic (`1920/2`) applies on Enter, Tab or click-away, and a unit after a number converts
 /// into the field's unit (`1in` in a px field, at the resolution [`set_field_resolution`] gave).
@@ -585,20 +643,31 @@ fn value_field_box(
             ui.spacing_mut().button_padding = Vec2::ZERO;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
-                ui.allocate_ui_with_layout(field.size(), layout, |ui| number_edit(ui, value, range, fine, decimals, units, wrap_drag)).inner
+                ui.allocate_ui_with_layout(field.size(), layout, |ui| number_edit(ui, value, range.clone(), fine, decimals, units, (wrap_drag, rect.width())))
+                    .inner
             })
             .inner
         }
     };
     ui.data_mut(|d| d.insert_temp(slot.id, resp.id));
+    let hit = Rect::from_min_max(rect.min, pos2(rect.right() - trailing, rect.bottom()));
+    numeric_gestures(ui, &mut resp, value, Some(range), hit, if fine { 0.01 } else { 1.0 });
     if let Some(s) = scrub {
         if s.started && ui.memory(|m| m.has_focus(resp.id)) {
             ui.memory_mut(|m| m.surrender_focus(resp.id));
         }
-        if s.steps != 0.0 {
+        if s.started {
+            ui.data_mut(|d| d.insert_temp(resp.id.with("numeric-label-value"), *value));
+        }
+        if s.steps != 0.0 && lo <= hi {
             let unit = if fine { 0.01 } else { 1.0 };
             // Onto the step grid first, so a whole-number field drops its decimals (55.4 + 1 = 56).
-            let v = ((*value / unit).round() + s.steps) * unit;
+            let speed = (hi - lo) / (2.0 * rect.width().max(1.0));
+            let key = resp.id.with("numeric-label-value");
+            let start = if s.started { *value } else { ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(*value) };
+            let precise = (start + s.steps * speed).clamp(lo, hi);
+            ui.data_mut(|d| d.insert_temp(key, precise));
+            let v = (precise / unit).round() * unit;
             let v = (v * 1e4).round() / 1e4;
             // `f32::clamp` panics on a reversed or NaN range, which `DragValue::range` accepts.
             let v = if lo <= hi { v.clamp(lo, hi) } else { v };
@@ -805,8 +874,9 @@ fn number_edit(
     fine: bool,
     decimals: Option<u32>,
     units: crate::numeric_expression::Units,
-    wrap_drag: bool,
+    drag: (bool, f32),
 ) -> Response {
+    let (wrap_drag, width) = drag;
     let (id, ctx) = (ui.next_auto_id(), ui.ctx().clone());
     // Focused before the DragValue is drawn, so it gains focus this frame and selects its text.
     if ui.data_mut(|d| d.remove_temp::<bool>(first_field_id())).unwrap_or(false) {
@@ -839,9 +909,9 @@ fn number_edit(
     let math = ui.memory(|m| m.has_focus(id)) && ui.data(|d| d.get_temp(held)).unwrap_or(false);
     ui.data_mut(|d| d.insert_temp(held, math));
     let before = *value;
-    let speed = if fine { 0.01 } else { 0.5 };
+    let speed = f64::from(*range.end() - *range.start()) / (2.0 * f64::from(width.max(1.0)));
     let wrapping = wrap_drag && crate::scrub_wrap::active(ui);
-    let wrapped_drag = wrapping && ui.input(|i| i.pointer.primary_down());
+    ui.data_mut(|d| d.insert_temp(id.with("native-wrapped-drag"), wrapping));
     let mut resp = ui.add(
         egui::DragValue::new(value)
             .range(range.clone())
@@ -849,7 +919,7 @@ fn number_edit(
             // scaled to 2400 pt in a 1296 pt field, must not change it (#5717).
             .clamp_existing_to_range(false)
             // A warp is an absolute-position jump. The scoped scrub below removes that jump.
-            .speed(if wrapped_drag { 0.0 } else { speed })
+            .speed(0.0)
             .custom_formatter(move |v, _| match decimals {
                 Some(d) => fmt_num_prec(v, d),
                 None if fine => fmt_num2(v),
@@ -1819,6 +1889,74 @@ mod tests {
     use egui::{Key, Modifiers};
 
     #[test]
+    fn numeric_field_edges_step_and_horizontal_drag_spans_two_field_widths() {
+        use egui::{Event, PointerButton, Pos2, Rect, vec2};
+        use egui_kittest::Harness;
+
+        fn gesture(h: &mut Harness<'_, (f32, Rect, bool)>, from: Pos2, to: Pos2) {
+            h.event(Event::PointerMoved(from));
+            h.run_steps(1);
+            h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+            h.run_steps(1);
+            if from != to {
+                for fraction in [0.25, 0.5, 0.75, 1.0] {
+                    h.event(Event::PointerMoved(from + (to - from) * fraction));
+                    h.run_steps(1);
+                }
+            }
+            h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            h.run_steps(2);
+        }
+
+        let mut h = Harness::builder().with_size(vec2(500.0, 300.0)).build_ui_state(
+            |ui, state: &mut (f32, Rect, bool)| {
+                ui.add_enabled_ui(state.2, |ui| {
+                    state.1 = super::value_field_in(ui, &mut state.0, 0.0..=100.0, "", 100.0, 0.0, super::FieldOpts::default()).1;
+                });
+            },
+            (50.0, Rect::NOTHING, true),
+        );
+        crate::PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ProMedium);
+        h.run_steps(3);
+        let rect = h.state().1;
+        assert_eq!(rect.width(), 100.0);
+        let left = egui::pos2(rect.left() + 3.0, rect.center().y);
+        let right = egui::pos2(rect.right() - 3.0, rect.center().y);
+        gesture(&mut h, left, left);
+        assert_eq!(h.state().0, 49.0, "left edge decrements by one");
+        gesture(&mut h, right, right);
+        assert_eq!(h.state().0, 50.0, "right edge increments by one");
+        h.state_mut().0 = 50.5;
+        h.run_steps(2);
+        gesture(&mut h, right, right);
+        assert_eq!(h.state().0, 51.5, "edge clicks add exactly one without snapping fractional values");
+
+        h.state_mut().0 = 0.0;
+        h.run_steps(2);
+        gesture(&mut h, rect.center(), rect.center() + vec2(100.0, 0.0));
+        assert_eq!(h.state().0, 50.0, "one field width covers half the range");
+        h.state_mut().0 = 0.0;
+        h.run_steps(2);
+        gesture(&mut h, rect.center(), rect.center() + vec2(200.0, 0.0));
+        assert_eq!(h.state().0, 100.0, "two field widths cover the full range");
+        h.state_mut().0 = 50.0;
+        h.run_steps(2);
+        gesture(&mut h, rect.center(), rect.center() + vec2(200.0, 0.0));
+        assert_eq!(h.state().0, 100.0, "drag clamps at the maximum");
+        h.state_mut().0 = 50.0;
+        h.run_steps(2);
+        gesture(&mut h, rect.center(), rect.center() + vec2(0.0, 100.0));
+        assert_eq!(h.state().0, 50.0, "vertical motion does not scrub");
+
+        h.state_mut().2 = false;
+        h.run_steps(2);
+        gesture(&mut h, left, left);
+        gesture(&mut h, right, right);
+        gesture(&mut h, rect.center(), rect.center() + vec2(100.0, 0.0));
+        assert_eq!(h.state().0, 50.0, "disabled fields ignore clicks and drags");
+    }
+
+    #[test]
     fn checkbox_label_is_a_button_target_not_selectable_text() {
         use egui::CursorIcon;
         use egui_kittest::{Harness, kittest::Queryable};
@@ -2157,8 +2295,7 @@ mod tests {
         }
     }
 
-    /// Photoshop's scrubby labels: dragging the label right before a field moves its value, a
-    /// step a point (Shift ×10); a label with no field right after it moves nothing.
+    /// Labels use the adjacent field's proportional travel; unlinked labels do nothing.
     #[test]
     fn dragging_a_label_scrubs_the_field_right_after_it() {
         let mut h = Harness::new_ui_state(
@@ -2193,9 +2330,9 @@ mod tests {
             h.run();
         };
         drag(&mut h, "Size:", 20.0, Modifiers::NONE);
-        assert_eq!(h.state().0, 120.0);
+        assert_eq!(h.state().0, 225.0);
         drag(&mut h, "Size:", -3.0, Modifiers::SHIFT);
-        assert_eq!(h.state().0, 90.0);
+        assert_eq!(h.state().0, 38.0);
         drag(&mut h, "Mode:", 20.0, Modifiers::NONE);
         assert_eq!(h.state().1, 100.0, "the field isn't right after the label");
     }
