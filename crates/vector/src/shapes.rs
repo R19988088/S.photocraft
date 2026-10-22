@@ -76,7 +76,7 @@ pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, radii: [f64; 4]) -> Path {
             out.pop();
         }
     }
-    Path::new(vec![Subpath { closed: true, knots: out, op: Default::default() }])
+    Path::new(vec![Subpath { style: None, closed: true, knots: out, op: Default::default() }])
 }
 
 /// Ellipse inscribed in the rectangle.
@@ -90,7 +90,7 @@ pub fn ellipse(x: f64, y: f64, w: f64, h: f64) -> Path {
         smooth((cx, cy + ry), (cx + kx, cy + ry), (cx - kx, cy + ry)),
         smooth((cx - rx, cy), (cx - rx, cy + ky), (cx - rx, cy - ky)),
     ];
-    Path::new(vec![Subpath { closed: true, knots, op: Default::default() }])
+    Path::new(vec![Subpath { style: None, closed: true, knots, op: Default::default() }])
 }
 
 /// Regular polygon (or star when `star_ratio < 1`) inscribed in the rectangle's ellipse, first
@@ -166,4 +166,30 @@ mod tests {
         let top = polygon(0.0, 0.0, 10.0, 10.0, 3, 1.0).subpaths[0].knots[0].anchor;
         assert!((top.x - 5.0).abs() < 1e-9 && top.y.abs() < 1e-9);
     }
+}
+
+/// Recover an axis-aligned rectangle from its actual outline, including old combined shapes.
+pub fn rectangle_from_subpath(sub: &Subpath) -> Option<LiveShape> {
+    if !sub.closed || !(4..=8).contains(&sub.knots.len()) {
+        return None;
+    }
+    let path = Path::new(vec![sub.clone()]);
+    let (x0, y0, x1, y1) = path.control_bounds()?;
+    let eps = 1e-6;
+    let edge = |axis: usize, value: f64, other: usize, end: f64| -> Option<f64> {
+        sub.knots.iter().map(|k| [k.anchor.x, k.anchor.y]).filter(|p| (p[axis] - value).abs() < eps).map(|p| (p[other] - end).abs()).reduce(f64::min)
+    };
+    let radii = [edge(1, y0, 0, x0)?, edge(1, y0, 0, x1)?, edge(1, y1, 0, x1)?, edge(1, y1, 0, x0)?];
+    let live = LiveShape::Rect { rect: [x0, y0, x1 - x0, y1 - y0], radii };
+    let generated = live_path(&live);
+    let expected = generated.subpaths.first()?;
+    let same = |a: &Knot, b: &Knot| {
+        [a.anchor, a.in_ctrl, a.out_ctrl].iter().zip([b.anchor, b.in_ctrl, b.out_ctrl]).all(|(p, q)| (p.x - q.x).abs() < eps && (p.y - q.y).abs() < eps)
+    };
+    if expected.knots.len() != sub.knots.len()
+        || !(0..sub.knots.len()).any(|offset| expected.knots.iter().enumerate().all(|(i, k)| same(k, &sub.knots[(i + offset) % sub.knots.len()])))
+    {
+        return None;
+    }
+    Some(live)
 }

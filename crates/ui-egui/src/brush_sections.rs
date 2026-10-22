@@ -675,7 +675,7 @@ pub(crate) fn dual_brush_header(ui: &mut egui::Ui, b: &mut BrushSettings, lane: 
         if widgets::pill_tab(ui, tl!("Secondary Brush"), *lane == 1).clicked() {
             *lane = 1;
         }
-        let mut secondary = if b.dual_brush.enabled { (b.dual_brush.secondary_strength * 100.0).round() } else { 0.0 };
+        let mut secondary = (b.dual_brush.secondary_strength * 100.0).round();
         if widgets::value_field(ui, &mut secondary, 0.0..=100.0, "%", 70.0).changed() {
             b.dual_brush.enabled = secondary > 0.0;
             b.dual_brush.secondary_strength = secondary.round() / 100.0;
@@ -747,16 +747,6 @@ fn pose(ui: &mut egui::Ui, b: &mut BrushSettings) {
     ui.add_space(8.0);
     pct(ui, tl!("Pressure"), &mut p.pressure, 1.0);
     widgets::checkbox(ui, &mut p.override_pressure, tl!("Override Pressure"));
-}
-
-#[allow(dead_code)] // Smoothing is not part of the reference categories.
-fn smoothing(ui: &mut egui::Ui, b: &mut BrushSettings) {
-    let s = &mut b.smoothing;
-    pct(ui, tl!("Smoothing"), &mut s.amount, 1.0);
-    widgets::checkbox(ui, &mut s.pulled_string, tl!("Pulled String Mode"));
-    widgets::checkbox(ui, &mut s.catch_up, tl!("Stroke Catch-up"));
-    widgets::checkbox(ui, &mut s.catch_up_on_end, tl!("Catch-up on Stroke End"));
-    widgets::checkbox(ui, &mut s.adjust_for_zoom, tl!("Adjust for Zoom"));
 }
 
 fn material_control(ui: &mut egui::Ui, id: &str, control: &mut Control, fade_steps: &mut u32) {
@@ -1103,10 +1093,26 @@ fn motion_settings(ui: &mut egui::Ui, b: &mut BrushSettings) {
         signed_pct(ui, tl!("Anchor Y"), &mut motion.anchor_point_y, -1.0, 1.0);
         widgets::dropdown(ui, "motion-guide-mode", &mut motion.guide_mode, &[(GuideMode::Off, "Off"), (GuideMode::Anchor, "Anchor")], 150.0);
         pct(ui, tl!("Anchor Delay"), &mut motion.anchor_delay, 1.0);
-        pct(ui, tl!("Anchor Smooth"), &mut motion.anchor_smooth, 1.0);
-        pct(ui, tl!("Stroke Smoothing"), &mut motion.smoothing, 1.0);
         pct(ui, tl!("Tilt Delay"), &mut motion.tilt_delay, 1.0);
         widgets::checkbox(ui, &mut motion.anchor_delay_pressure_enabled, tl!("Pressure Controls Anchor Delay"));
+    });
+    ui.separator();
+    let rope = &mut b.smoothing;
+    let mut enabled = rope.enabled && rope.pulled_string;
+    if widgets::checkbox(ui, &mut enabled, tl!("Pulled String Mode")).changed() {
+        rope.enabled = enabled;
+        rope.pulled_string = enabled;
+        if enabled && rope.amount <= 0.0 {
+            rope.amount = 0.1;
+        }
+    }
+    ui.add_enabled_ui(enabled, |ui| {
+        let mut length = rope.amount * paint::dynamics::MAX_STRING_PX as f32;
+        if num(ui, tl!("Length:"), &mut length, 0.0..=paint::dynamics::MAX_STRING_PX as f32, "px") {
+            rope.amount = length / paint::dynamics::MAX_STRING_PX as f32;
+        }
+        widgets::checkbox(ui, &mut rope.catch_up_on_end, tl!("Catch-up on Stroke End"));
+        widgets::checkbox(ui, &mut rope.adjust_for_zoom, tl!("Adjust for Zoom"));
     });
 }
 
@@ -1234,6 +1240,23 @@ mod tests {
         );
         h.run_steps(3);
         h
+    }
+
+    #[test]
+    fn motion_page_keeps_pulled_string_independent_of_anchor_enable() {
+        let mut h = section_harness(2, BrushSettings::default());
+        assert!(!h.state().motion.enabled);
+        for label in ["Smoothing", "Stroke Smoothing", "Anchor Smooth", "Stroke Catch-up"] {
+            assert!(h.query_by_label(label).is_none(), "{label} was removed");
+        }
+        h.get_by_label("Pulled String Mode").click();
+        h.run_steps(2);
+        let b = h.state();
+        assert!(b.smoothing.enabled && b.smoothing.pulled_string && b.smoothing.amount > 0.0);
+        assert!(!b.motion.enabled, "rope does not enable unrelated anchor motion");
+        h.get_by_label("Pulled String Mode").click();
+        h.run_steps(2);
+        assert!(!h.state().smoothing.enabled && !h.state().smoothing.pulled_string);
     }
 
     #[test]

@@ -1117,8 +1117,6 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                             pressure_button(ui, &mut b.pressure_flow, tl!("Pressure for Flow"));
 
                         });
-                        opt_label(ui, tl!("Smoothing"));
-                        smoothing_field(ui, b, 58.0);
                     }
                     // Pencil: Photoshop's options (no hardness or flow: the pencil is always hard).
                     Tool::Pencil => {
@@ -1135,8 +1133,6 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         let held = app.held_erase;
                         paint_mode_dropdown(ui, "pencil-mode", b, &mut app.ui.tool_options.pencil_clear, held);
                         percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, if t.pro { 62.0 } else { 66.0 });
-                        opt_label(ui, tl!("Smoothing"));
-                        smoothing_field(ui, b, if t.pro { 58.0 } else { 66.0 });
                         widgets::vline(ui, 22.0);
                         widgets::checkbox(ui, &mut app.ui.tool_options.pencil_auto_erase, tl!("Auto Erase"));
                     }
@@ -1171,8 +1167,6 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                             percent_field(ui, tl!("Flow"), &mut b.flow, 1.0..=100.0, 66.0);
                             pressure_button(ui, &mut b.pressure_flow, tl!("Pressure for Flow"));
                         });
-                        opt_label(ui, tl!("Smoothing"));
-                        smoothing_field(ui, b, 66.0);
                     }
                     Tool::MixerBrush => {
                         brush_preset_chip(ui, b, &mut app.ui);
@@ -4024,15 +4018,6 @@ fn brush_attribute_controls(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushS
     }
 }
 
-/// Options-bar Smoothing % (the brush's stroke smoothing; the live stroke and the commit use it).
-fn smoothing_field(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings, width: f32) {
-    let mut sm = (b.motion.smoothing * 100.0).round();
-    if widgets::value_field(ui, &mut sm, 0.0..=100.0, "%", width).changed() {
-        b.motion.enabled = true;
-        b.motion.smoothing = (sm / 100.0).clamp(0.0, 1.0);
-    }
-}
-
 /// Options-bar brush size: a logarithmic slider keeps small diameters easy to set.
 fn brush_size_slider(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings) {
     let max = photocraft_engine::paint::MAX_BRUSH_SIZE;
@@ -4046,29 +4031,6 @@ fn brush_size_slider(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings
     if response.changed() {
         b.size = log_size.exp().round().clamp(1.0, max);
     }
-}
-
-/// Options-bar gear beside Smoothing: Photoshop's smoothing options popup, edited on the brush
-/// like the Smoothing % (so they stay per tool and reach the live stroke and the commit).
-#[allow(dead_code)]
-fn smoothing_options(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings) {
-    let resp = icons::button(ui, "settings", 24.0, false, tl!("Set additional smoothing options"));
-    let resp = crate::brush_picker::named(resp, "Set additional smoothing options");
-    egui::Popup::from_toggle_button_response(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-        if b.c3_tip_math {
-            widgets::checkbox(ui, &mut b.motion.enabled, tl!("Enable Stroke Motion"));
-            let mut delay = b.motion.tilt_delay * 100.0;
-            if widgets::slider_row(ui, tl!("Tilt Delay"), &mut delay, 0.0..=100.0, "%", None).changed() {
-                b.motion.tilt_delay = delay / 100.0;
-            }
-            return;
-        }
-        let s = &mut b.smoothing;
-        widgets::checkbox(ui, &mut s.pulled_string, tl!("Pulled String Mode"));
-        widgets::checkbox(ui, &mut s.catch_up, tl!("Stroke Catch-up"));
-        widgets::checkbox(ui, &mut s.catch_up_on_end, tl!("Catch-up on Stroke End"));
-        widgets::checkbox(ui, &mut s.adjust_for_zoom, tl!("Adjust for Zoom"));
-    });
 }
 
 /// Options-bar brush chip: a click shows or hides Photoshop's Brush Preset picker below it (size,
@@ -6478,7 +6440,7 @@ mod compact_visual_regressions {
                     crate::theme::install_fonts(&ctx);
                     crate::theme::apply(&ctx, kind);
                     let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
-                    let (tool, last_label) = if Tokens::get(&ctx).pro { (Tool::Pencil, "Auto Erase") } else { (Tool::Brush, "Smoothing") };
+                    let (tool, last_label) = (Tool::Pencil, "Auto Erase");
                     app.ui.tool = tool;
                     let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 120.0));
                     let mut output = ctx.run_ui(input_at_scale(screen, scale), |ui| options_bar(&mut app, ui));

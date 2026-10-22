@@ -399,12 +399,10 @@ impl Default for ToolState {
         Self {
             foreground: [0.0, 0.0, 0.0, 1.0],
             background: [1.0, 1.0, 1.0, 1.0],
-            // Photoshop's Brush tool starts at 10 % Smoothing.
             brush: photocraft_paint::BrushSettings {
                 c3_tip_math: true,
                 mix_settings: photocraft_paint::transport::BrushMixSettings { strength: 0.5, ..Default::default() },
                 texture: photocraft_paint::brush::Texture { c3_math: true, ..Default::default() },
-                smoothing: photocraft_paint::brush::Smoothing { amount: 0.1, ..Default::default() },
                 ..Default::default()
             },
             presets: photocraft_paint::presets::builtin(),

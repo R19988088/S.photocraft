@@ -392,7 +392,7 @@ mod tests {
             .into_iter()
             .map(|k| Knot::smooth(Point::new(k[0][0], k[0][1]), Point::new(k[1][0], k[1][1]), Point::new(k[2][0], k[2][1])))
             .collect();
-        Path::new(vec![Subpath { closed: true, knots, op: Default::default() }])
+        Path::new(vec![Subpath { style: None, closed: true, knots, op: Default::default() }])
     }
 
     #[test]

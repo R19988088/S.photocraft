@@ -1077,9 +1077,36 @@ impl PhotocraftApp {
         if gate.is_some() {
             self.session.authorize = gate;
         }
+        let replaces_shape_path = id.starts_with("layer.combineShapes.")
+            || matches!(id, "shape.rasterize" | "layer.rasterize.shape")
+            || (id == "shape.edit"
+                && (params.get("path").is_some()
+                    || params.get("op").is_some()
+                    || (params.get("components").is_none()
+                        && ["kind", "rect", "radii", "radius", "sides", "starRatio", "from", "to", "weight"].iter().any(|key| params.get(*key).is_some()))));
         let result = self.run_command(id, params);
         if gate.is_some() {
             self.session.authorize = None;
+        }
+        if result.is_ok() && (replaces_shape_path || matches!(id, "layer.select" | "select.allLayers" | "select.deselectLayers")) {
+            self.ui.shape_components = None;
+        }
+        if result.is_ok()
+            && matches!(
+                id,
+                "edit.undo"
+                    | "edit.redo"
+                    | "history.undo"
+                    | "history.redo"
+                    | "history.selectState"
+                    | "history.deleteState"
+                    | "history.selectSnapshot"
+                    | "file.revert"
+            )
+            && let Some(components) = &mut self.ui.shape_components
+        {
+            // Restored paths can reuse an index for another component; keep explicit deselection.
+            components.targets.clear();
         }
         // An explicit channel target (⌘2, ⌘\, ⌘3…) decides what the Layers panel targets too:
         // ⌘2 after the mask was targeted goes back to the layer's pixels.
@@ -1914,6 +1941,16 @@ impl eframe::App for PhotocraftApp {
         }
         self.last_frame_time = now;
         self.sync_views();
+        if self.ui.shape_components.as_ref().is_some_and(|c| Some(c.doc) != self.session.active().map(|s| s.doc.id)) {
+            self.ui.shape_components = None;
+        }
+        if let (Some(c), Some(st)) = (&mut self.ui.shape_components, self.session.active()) {
+            c.targets.retain(|t| {
+                st.doc
+                    .layer(t.layer)
+                    .is_some_and(|l| matches!(&l.content, photocraft_doc::LayerContent::Shape(sh) if sh.path.components().iter().any(|r| r.start == t.index)))
+            });
+        }
         crate::type_font_preview::follow_hover(self, ctx);
         self.check_gpu(ctx);
         #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
@@ -1930,6 +1967,7 @@ impl eframe::App for PhotocraftApp {
             vector_ui::pen_commit(self, false);
         }
         transform_tool::end_if_left(self);
+        workspace_ui::refresh_held_command(self, ctx);
         shape_stroke_ui::sync_editor(self, ctx);
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);

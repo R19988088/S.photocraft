@@ -75,8 +75,16 @@ pub enum FillRule {
     EvenOdd,
 }
 
+/// A component's fill override; absent styles inherit the shape layer's fill.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComponentStyle {
+    pub fill: Option<Fill>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Subpath {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<ComponentStyle>,
     pub closed: bool,
     pub knots: Vec<Knot>,
     #[serde(default)]
@@ -86,7 +94,7 @@ pub struct Subpath {
 impl Subpath {
     /// Closed polygon through `pts` (corner knots).
     pub fn polygon(pts: &[(f64, f64)]) -> Self {
-        Subpath { closed: true, knots: pts.iter().map(|&(x, y)| Knot::corner(x, y)).collect(), op: PathOp::Combine }
+        Subpath { style: None, closed: true, knots: pts.iter().map(|&(x, y)| Knot::corner(x, y)).collect(), op: PathOp::Combine }
     }
     /// Open polyline through `pts`.
     pub fn polyline(pts: &[(f64, f64)]) -> Self {

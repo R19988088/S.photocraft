@@ -59,6 +59,7 @@ pub struct Rasterizer {
     bounds: Option<(f64, f64, f64, f64)>,
     /// Every component combines and none is inverted: inside = any component inside.
     union_only: bool,
+    component_filter: Option<usize>,
 }
 
 impl Rasterizer {
@@ -66,6 +67,13 @@ impl Rasterizer {
     /// inverted).
     pub fn new(inverted: bool) -> Self {
         Rasterizer { inverted, union_only: true, ..Default::default() }
+    }
+
+    /// Exact visible coverage owned by one component after all path operations.
+    pub fn for_component(&self, component: usize) -> Self {
+        let mut r = self.clone();
+        r.component_filter = Some(component);
+        r
     }
 
     /// Adds a component made of closed polygons (open input is closed implicitly).
@@ -139,10 +147,11 @@ impl Rasterizer {
     /// Whether the combined shape is inside given per-component winding numbers.
     #[inline]
     fn inside(&self, wind: &[i32], union_count: i32) -> bool {
-        if self.union_only {
+        if self.union_only && self.component_filter.is_none() {
             return (union_count > 0) ^ self.inverted;
         }
         let mut acc = false;
+        let mut owner = None;
         for (i, c) in self.comps.iter().enumerate() {
             let v = match c.rule {
                 FillRule::NonZero => wind[i] != 0,
@@ -150,6 +159,9 @@ impl Rasterizer {
             };
             // Photoshop applies the first component as "combine".
             let op = if i == 0 { PathOp::Combine } else { c.op };
+            if v && matches!(op, PathOp::Combine | PathOp::Join) || v && !acc && op == PathOp::Exclude {
+                owner = Some(i);
+            }
             acc = match op {
                 // A joined component (only reachable when built by hand) combines.
                 PathOp::Combine | PathOp::Join => acc | v,
@@ -158,7 +170,7 @@ impl Rasterizer {
                 PathOp::Exclude => acc ^ v,
             };
         }
-        acc ^ self.inverted
+        (acc ^ self.inverted) && self.component_filter.is_none_or(|i| owner == Some(i))
     }
 
     fn comp_inside(&self, comp: usize, w: i32) -> bool {

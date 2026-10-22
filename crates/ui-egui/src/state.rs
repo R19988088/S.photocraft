@@ -1096,6 +1096,8 @@ impl Default for ColorPanelState {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiState {
+    #[serde(default, skip_deserializing)]
+    pub shape_components: Option<crate::vector_ui::ComponentSelection>,
     pub tool: Tool,
     /// The last tool used in each shortcut group (the tools sharing a key, [`Tool::key`]), at most
     /// one per group: the group's key brings it back, as in Photoshop (#2608).
@@ -1366,6 +1368,7 @@ impl Default for UiState {
             layer_picker: None,
             mask_target: false,
             vector_mask_target: false,
+            shape_components: None,
             properties_layer: None,
             brush_picker: None,
             brush_picker_list: crate::brush_picker::list_state(),

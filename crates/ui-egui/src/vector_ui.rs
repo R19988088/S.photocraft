@@ -118,15 +118,17 @@ pub fn shape_bounds(o: &ToolOptions, tool: Tool, start: [f64; 2], end: [f64; 2],
 }
 
 /// Finish a Shape-tool drag: ⇧ constrains proportions, ⌥ draws from the centre.
-pub fn finish_shape(app: &mut PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
+pub fn finish_shape(app: &mut PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers, combine: bool) {
     let Some(mut p) = shape_geometry(&app.ui.tool_options, tool, start, end, mods) else { return };
+    // Combine into the selected shape even when the new component starts outside it.
+    if combine && let Some((target, _)) = active_shape_path(app) {
+        p["addTo"] = json!(target);
+        p["op"] = json!("combine");
+    }
     if tool == Tool::CustomShape {
-        // ⇧ keeps the shape's proportions (the rect is already squared).
-        if let Ok(rect) = serde_json::from_value(p["rect"].take()) {
-            let (fill, stroke) = (fill_param(app), stroke_param(app));
-            crate::preset_panels::finish_custom_shape(app, rect, mods.shift, fill, stroke);
-        }
-        return;
+        let Some(shape) = shape_preview(app, tool, start, end, mods) else { return };
+        p["kind"] = json!("path");
+        p["path"] = json!(shape.path);
     }
     if let Err(e) = create_shape(app, p) {
         app.ui.status = e;
@@ -143,7 +145,9 @@ fn fill_param(app: &PhotocraftApp) -> Value {
 pub fn create_shape(app: &mut PhotocraftApp, mut geometry: Value) -> Result<Value, String> {
     geometry["fill"] = fill_param(app);
     geometry["stroke"] = stroke_param(app);
-    app.run("shape.create", geometry)
+    let result = app.run("shape.create", geometry)?;
+    app.ui.shape_components = None;
+    Ok(result)
 }
 
 /// The preview and command both use the full float tool colours, including transparent paint.
@@ -402,7 +406,7 @@ pub(crate) fn pen_path(pen: &PenPath) -> Path {
             smooth: !pen.unlinked.contains(&i) && (k[1] != k[0] || k[2] != k[0]),
         })
         .collect();
-    Path::new(vec![photocraft_doc::vector::Subpath { closed: false, knots, op: Default::default() }])
+    Path::new(vec![photocraft_doc::vector::Subpath { style: None, closed: false, knots, op: Default::default() }])
 }
 
 /// The Pen path being drawn becomes `path`'s first subpath, edited with ⌘/Ctrl (Direct Selection);
@@ -778,80 +782,199 @@ pub(crate) fn free_transform_path(app: &PhotocraftApp) -> Option<(Value, Path)> 
     Some((params, path))
 }
 
-fn point_in_subpath(sp: &photocraft_doc::vector::Subpath, pt: [f64; 2]) -> bool {
-    if !sp.closed || sp.knots.len() < 3 {
-        return false;
-    }
-    let mut inside = false;
-    let n = sp.knots.len();
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let xi = sp.knots[i].anchor.x;
-        let yi = sp.knots[i].anchor.y;
-        let xj = sp.knots[j].anchor.x;
-        let yj = sp.knots[j].anchor.y;
-        let intersect = ((yi > pt[1]) != (yj > pt[1])) && (pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi);
-        if intersect {
-            inside = !inside;
-        }
-    }
-    inside
+/// A component is identified by its layer and first subpath (joined holes belong to it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentTarget {
+    pub layer: photocraft_doc::LayerId,
+    pub index: usize,
 }
 
-/// The topmost visible shape layer under `at` (document coordinates):
-/// hits the shape path or anchor within `tol`, or any non-transparent pixel of the shape's raster surface,
-/// or point inside the shape's filled geometry.
-pub fn pick_shape_at(doc: &Document, at: [f64; 2], tol: f64) -> Option<photocraft_doc::LayerId> {
-    let (x, y) = (at[0].floor() as i32, at[1].floor() as i32);
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComponentSelection {
+    pub doc: photocraft_doc::DocId,
+    pub targets: Vec<ComponentTarget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComponentSelectMode {
+    Replace,
+    Add,
+    Toggle,
+}
+
+fn visible_shape(doc: &Document, path: &[usize]) -> bool {
+    (1..=path.len()).all(|n| doc.layer_at(&path[..n]).is_some_and(|l| l.visible && l.opacity > 0.0))
+}
+
+fn component_path(sh: &photocraft_doc::ShapeLayer, range: std::ops::Range<usize>) -> Path {
+    Path { subpaths: sh.path.subpaths.get(range).unwrap_or_default().to_vec(), fill_rule: sh.path.fill_rule, inverted: false }
+}
+
+fn component_has_fill(sh: &photocraft_doc::ShapeLayer, index: usize) -> bool {
+    sh.path.subpaths.get(index).is_some_and(|s| s.style.as_ref().map_or(sh.fill.is_some(), |s| s.fill.is_some()))
+}
+
+fn filled_at(path: &Path, at: [f64; 2]) -> bool {
+    photocraft_vector::fill_rasterizer(path, 0.05)
+        .render(photocraft_doc::Rect::from_xywh(at[0].floor() as i32, at[1].floor() as i32, 1, 1))
+        .first()
+        .is_some_and(|v| *v > 0.0)
+}
+
+fn component_hit(sh: &photocraft_doc::ShapeLayer, range: std::ops::Range<usize>, at: [f64; 2], tol: f64) -> bool {
+    let has_fill = component_has_fill(sh, range.start);
+    let p = component_path(sh, range);
+    let edge_tol = tol.max(sh.stroke.as_ref().map_or(0.0, |s| f64::from(s.width) / 2.0));
+    photocraft_vector::edit::hit(&p, photocraft_geom::Point::new(at[0], at[1]), edge_tol, &[]).is_some() || (has_fill && filled_at(&p, at))
+}
+
+fn component_at(doc: &Document, at: [f64; 2], tol: f64) -> Option<ComponentTarget> {
+    if !at.iter().all(|v| v.is_finite()) {
+        return None;
+    }
     for (path, _, l) in doc.walk().iter().rev() {
-        if !l.visible || !(1..=path.len()).all(|n| doc.layer_at(&path[..n]).is_some_and(|a| a.visible)) {
+        if !visible_shape(doc, path) {
             continue;
         }
-        let board = path.first().and_then(|i| doc.layers.get(*i)).and_then(|t| t.artboard());
-        if board.is_some_and(|a| !a.rect.contains(x, y)) {
+        if path
+            .first()
+            .and_then(|i| doc.layers.get(*i))
+            .and_then(|l| l.artboard())
+            .is_some_and(|a| !a.rect.contains(at[0].floor() as i32, at[1].floor() as i32))
+        {
             continue;
         }
-        if let LayerContent::Shape(sh) = &l.content {
-            if photocraft_vector::edit::hit(&sh.path, photocraft_geom::Point::new(at[0], at[1]), tol, &[]).is_some() {
-                return Some(l.id);
-            }
-            if sh.fill.is_some() {
-                if let Some(surf) = l.surface() {
-                    let mut px = [[0.0f32; 4]; 1];
-                    surf.read_rgba_into(photocraft_doc::Rect::from_xywh(x, y, 1, 1), &mut px);
-                    if px[0][3] > 0.0 {
-                        return Some(l.id);
-                    }
-                }
-                if let Some(photocraft_doc::LiveShape::Rect { rect, .. }) = &sh.live {
-                    let x0 = rect[0].min(rect[0] + rect[2]);
-                    let x1 = rect[0].max(rect[0] + rect[2]);
-                    let y0 = rect[1].min(rect[1] + rect[3]);
-                    let y1 = rect[1].max(rect[1] + rect[3]);
-                    if at[0] >= x0 && at[0] <= x1 && at[1] >= y0 && at[1] <= y1 {
-                        return Some(l.id);
-                    }
-                }
-                if let Some(photocraft_doc::LiveShape::Ellipse { rect }) = &sh.live {
-                    let rx = rect[2].abs() / 2.0;
-                    let ry = rect[3].abs() / 2.0;
-                    if rx > 1e-6 && ry > 1e-6 {
-                        let cx = rect[0] + rect[2] / 2.0;
-                        let cy = rect[1] + rect[3] / 2.0;
-                        let dx = (at[0] - cx) / rx;
-                        let dy = (at[1] - cy) / ry;
-                        if dx * dx + dy * dy <= 1.0 {
-                            return Some(l.id);
-                        }
-                    }
-                }
-                if sh.path.subpaths.iter().any(|sp| point_in_subpath(sp, at)) {
-                    return Some(l.id);
-                }
+        let LayerContent::Shape(sh) = &l.content else { continue };
+        for range in sh.path.components().into_iter().rev() {
+            if component_hit(sh, range.clone(), at, tol) {
+                return Some(ComponentTarget { layer: l.id, index: range.start });
             }
         }
     }
     None
+}
+
+fn apply_component_selection(app: &mut PhotocraftApp, hits: Vec<ComponentTarget>, mode: ComponentSelectMode) {
+    let Some(doc) = app.session.active().map(|s| s.doc.id) else { return };
+    // Keep the desired component state local while layer commands reset explicit selection.
+    let mut selected = app.ui.shape_components.take().filter(|c| c.doc == doc).unwrap_or_else(|| ComponentSelection { doc, targets: Vec::new() });
+    if mode == ComponentSelectMode::Replace {
+        selected.targets.clear();
+    }
+    for hit in &hits {
+        if let Some(pos) = selected.targets.iter().position(|t| t == hit) {
+            if mode == ComponentSelectMode::Toggle {
+                selected.targets.remove(pos);
+            } else if mode == ComponentSelectMode::Add {
+                let target = selected.targets.remove(pos);
+                selected.targets.push(target);
+            }
+        } else {
+            selected.targets.push(*hit);
+        }
+    }
+    // The last retained target is active after removing a component. A clicked retained target
+    // takes precedence, including Add on an already selected component.
+    let active = hits.last().filter(|hit| selected.targets.contains(hit)).copied().or_else(|| selected.targets.last().copied());
+    let mut layers = Vec::new();
+    for t in &selected.targets {
+        if !layers.contains(&t.layer) {
+            layers.push(t.layer);
+        }
+    }
+    if let Some(active) = active {
+        layers.retain(|id| *id != active.layer);
+        layers.push(active.layer);
+    }
+    let result = if let Some(first) = layers.first() {
+        app.run("layer.select", json!({"layer":first.0,"mode":"replace"})).and_then(|_| {
+            for id in layers.iter().skip(1) {
+                app.run("layer.select", json!({"layer":id.0,"mode":"add"}))?;
+            }
+            Ok(())
+        })
+    } else {
+        app.run("select.deselectLayers", json!({})).map(|_| ())
+    };
+    if let Err(e) = result {
+        app.ui.status = e;
+        app.ui.status_error = true;
+    }
+    app.ui.shape_components = Some(selected);
+}
+
+/// Select/toggle the frontmost component; returns whether the pointer hit a component.
+pub fn select_component_at(app: &mut PhotocraftApp, at: [f64; 2], tol: f64, mode: ComponentSelectMode) -> bool {
+    let hit = app.session.active().and_then(|st| component_at(&st.doc, at, tol));
+    if hit.is_none() && mode != ComponentSelectMode::Replace {
+        return false;
+    }
+    apply_component_selection(app, hit.into_iter().collect(), mode);
+    hit.is_some()
+}
+
+/// Box selection intersects flattened curves and painted interiors, rather than control bounds.
+pub fn select_components_in_rect(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2], mode: ComponentSelectMode) {
+    if !start.iter().chain(&end).all(|v| v.is_finite()) {
+        return;
+    }
+    let (x0, y0, x1, y1) = (start[0].min(end[0]), start[1].min(end[1]), start[0].max(end[0]), start[1].max(end[1]));
+    let hits = app
+        .session
+        .active()
+        .map(|st| {
+            let mut hits = Vec::new();
+            for (path, _, l) in st.doc.walk() {
+                if !visible_shape(&st.doc, &path) {
+                    continue;
+                }
+                let LayerContent::Shape(sh) = &l.content else { continue };
+                let board = path.first().and_then(|i| st.doc.layers.get(*i)).and_then(|l| l.artboard());
+                let bounds = board.map_or((x0, y0, x1, y1), |a| {
+                    (x0.max(f64::from(a.rect.x0)), y0.max(f64::from(a.rect.y0)), x1.min(f64::from(a.rect.x1)), y1.min(f64::from(a.rect.y1)))
+                });
+                let (x0, y0, x1, y1) = bounds;
+                if x0 > x1 || y0 > y1 {
+                    continue;
+                }
+                for range in sh.path.components() {
+                    let p = component_path(sh, range.clone());
+                    let intersects = photocraft_vector::flatten_path(&p, 0.05).iter().any(|line| {
+                        let inside = |p: (f64, f64)| p.0 >= x0 && p.0 <= x1 && p.1 >= y0 && p.1 <= y1;
+                        line.pts.iter().any(|p| inside(*p))
+                            || line.pts.iter().copied().zip(line.pts.iter().copied().skip(1).chain(line.pts.first().copied().filter(|_| line.closed))).any(
+                                |(a, b)| {
+                                    let mut low: f64 = 0.0;
+                                    let mut high: f64 = 1.0;
+                                    for (v, d, min, max) in [(a.0, b.0 - a.0, x0, x1), (a.1, b.1 - a.1, y0, y1)] {
+                                        if d.abs() < 1e-12 {
+                                            if v < min || v > max {
+                                                return false;
+                                            }
+                                        } else {
+                                            let (a, b) = ((min - v) / d, (max - v) / d);
+                                            low = low.max(a.min(b));
+                                            high = high.min(a.max(b));
+                                        }
+                                    }
+                                    low <= high
+                                },
+                            )
+                    }) || (component_has_fill(sh, range.start)
+                        && [[x0, y0], [x1, y0], [x0, y1], [x1, y1], [(x0 + x1) / 2.0, (y0 + y1) / 2.0]].into_iter().any(|at| filled_at(&p, at)));
+                    if intersects {
+                        hits.push(ComponentTarget { layer: l.id, index: range.start });
+                    }
+                }
+            }
+            hits
+        })
+        .unwrap_or_default();
+    apply_component_selection(app, hits, mode);
+}
+
+pub fn pick_shape_at(doc: &Document, at: [f64; 2], tol: f64) -> Option<photocraft_doc::LayerId> {
+    component_at(doc, at, tol).map(|t| t.layer)
 }
 
 pub fn path_selection_finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) {
@@ -1006,11 +1129,19 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         if let Some(wp) = &doc.work_path {
             draw_path(wp, tool == Tool::PathSelection);
         }
-        let st = app.session.active();
-        if let Some(l) = st.and_then(|s| s.active_layer.and_then(|id| s.doc.layer(id)))
-            && let LayerContent::Shape(sh) = &l.content
-        {
-            draw_path(&sh.path, tool == Tool::PathSelection);
+        if let Some(c) = app.ui.shape_components.as_ref().filter(|c| c.doc == doc.id) {
+            for target in &c.targets {
+                let Some(l) = doc.layer(target.layer) else { continue };
+                let LayerContent::Shape(sh) = &l.content else { continue };
+                let Some(range) = sh.path.components().into_iter().find(|r| r.start == target.index) else { continue };
+                let p = component_path(sh, range);
+                draw_path(&p, false);
+                for k in p.subpaths.iter().flat_map(|s| &s.knots) {
+                    draw_anchor(painter, to_scr([k.anchor.x, k.anchor.y]), true, accent);
+                }
+            }
+        } else if let Some((_, p)) = active_shape_path(app) {
+            draw_path(&p, tool == Tool::PathSelection);
         }
         // A targeted vector mask shows its path with any tool (#196).
         if let Some((_, p)) = targeted_vector_mask(app) {
@@ -1104,8 +1235,10 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
     let lbl = |ui: &mut egui::Ui, s: &str| {
         ui.label(egui::RichText::new(s).color(t.text_dim).size(12.0));
     };
+    let component_key = app.ui.shape_components.as_ref().map(|c| c.targets.clone());
+    let target = selected_component_shape(app);
+    let mixed_fill = selected_fills_mixed(app);
     let o = &mut app.ui.tool_options;
-    let target = selected_shape(&app.session);
     if tool == Tool::PathSelection && target.is_none() {
         lbl(ui, if app.ui.vector_mask_target { "Drag to move the targeted vector mask" } else { tl!("Drag to move the active shape's path or the Work Path") });
         return true;
@@ -1184,7 +1317,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
     };
     let mut width = stroke.as_ref().map_or(0.0, |s| s.width);
     let style = stroke.as_ref().map_or_else(|| o.shape_stroke.clone(), crate::shape_stroke_ui::StrokeOptions::from);
-    let key = |k: &str| target.as_ref().map(|s| format!("shape-options-{:?}-{}-{k}", s.doc, s.layer.0));
+    let key = |k: &str| target.as_ref().map(|s| format!("shape-options-{:?}-{}-{:?}-{k}", s.doc, s.layer.0, component_key));
     let mut edit: Option<Value> = None;
     lbl(ui, tl!("Fill:"));
     if crate::widgets::checkbox(ui, &mut has_fill, "").changed() {
@@ -1192,6 +1325,9 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
         edit = Some(json!({"fill": if has_fill { json!(fg) } else { Value::Null }}));
     }
     let fill_color = swatch(ui, fill.as_ref(), fg, tl!("Fill color"));
+    if mixed_fill {
+        lbl(ui, tl!("Mixed"));
+    }
     lbl(ui, tl!("Stroke:"));
     let stroke_color = swatch(ui, stroke.as_ref().map(|s| &s.paint), bg, tl!("Stroke color"));
     if crate::widgets::value_field(ui, &mut width, 0.0..=288.0, "px", 58.0).changed() {
@@ -1273,12 +1409,11 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
             (true, PaintChange::Color(color)) => json!({"stroke": {"color": color, "width": enabled_stroke_width(width)}, "coalesce": key("stroke")}),
         });
     }
-    if let (Some(mut p), Some(s)) = (edit, &target) {
-        p["layer"] = json!(s.layer.0);
-        if let Err(e) = app.run("shape.edit", p) {
-            app.ui.status = e;
-            app.ui.status_error = true;
-        }
+    if let (Some(p), Some(s)) = (edit, &target)
+        && let Err(e) = edit_selected_shape(app, s.layer, p)
+    {
+        app.ui.status = e;
+        app.ui.status_error = true;
     }
     true
 }
@@ -1303,6 +1438,93 @@ fn selected_shape(session: &photocraft_engine::Session) -> Option<SelectedShape>
 
 // ---------------------------------------------------------------------------------------------
 // Properties (shape layers)
+
+/// Component overrides may differ even when they share a layer's default fill.
+fn selected_fills_mixed(app: &PhotocraftApp) -> bool {
+    let Some(st) = app.session.active() else { return false };
+    let Some(c) = app.ui.shape_components.as_ref().filter(|c| c.doc == st.doc.id) else { return false };
+    let mut fills = c.targets.iter().filter_map(|t| {
+        let LayerContent::Shape(sh) = &st.doc.layer(t.layer)?.content else { return None };
+        let sub = sh.path.subpaths.get(t.index)?;
+        Some(sub.style.as_ref().map_or(&sh.fill, |s| &s.fill))
+    });
+    let Some(first) = fills.next() else { return false };
+    fills.any(|fill| fill != first)
+}
+
+/// Explicit empty component selections never widen to a whole-layer edit.
+fn selected_component_shape(app: &PhotocraftApp) -> Option<SelectedShape> {
+    let Some(c) = &app.ui.shape_components else { return selected_shape(&app.session) };
+    let st = app.session.active()?;
+    if c.doc != st.doc.id {
+        return selected_shape(&app.session);
+    }
+    let t = c.targets.last()?;
+    let LayerContent::Shape(sh) = &st.doc.layer(t.layer)?.content else { return None };
+    let sub = sh.path.subpaths.get(t.index)?;
+    Some(SelectedShape {
+        doc: st.doc.id,
+        layer: t.layer,
+        fill: sub.style.as_ref().map_or_else(|| sh.fill.clone(), |s| s.fill.clone()),
+        stroke: sh.stroke.clone(),
+        live: photocraft_vector::shapes::rectangle_from_subpath(sub),
+    })
+}
+
+/// Component fill/radius edits share the existing history coalescing transaction across layers.
+fn edit_selected_shape(app: &mut PhotocraftApp, layer: photocraft_doc::LayerId, mut patch: Value) -> Result<(), String> {
+    let selected = app.ui.shape_components.as_ref().filter(|c| Some(c.doc) == app.session.active().map(|s| s.doc.id));
+    if (patch.get("fill").is_some() || patch.get("radii").is_some())
+        && let Some(c) = selected
+    {
+        let mut groups: Vec<(photocraft_doc::LayerId, Vec<usize>)> = Vec::new();
+        for t in &c.targets {
+            if let Some((_, indices)) = groups.iter_mut().find(|(id, _)| *id == t.layer) {
+                indices.push(t.index);
+            } else {
+                groups.push((t.layer, vec![t.index]));
+            }
+        }
+        // Validate all targets before the first edit so a locked/stale component cannot leave
+        // an earlier layer recoloured while a later one fails.
+        if let Some(st) = app.session.active() {
+            for (id, indices) in &groups {
+                let locks = st.doc.effective_locks(*id);
+                if locks.all || locks.pixels {
+                    return Err(tl!("Layer is locked").to_string());
+                }
+                let Some(l) = st.doc.layer(*id) else { return Err("Shape layer no longer exists".into()) };
+                let LayerContent::Shape(sh) = &l.content else { return Err("Layer is not a shape".into()) };
+                for i in indices {
+                    if !sh.path.components().iter().any(|r| r.start == *i) {
+                        return Err("Shape component no longer exists".into());
+                    }
+                    if patch.get("radii").is_some() && sh.path.subpaths.get(*i).and_then(photocraft_vector::shapes::rectangle_from_subpath).is_none() {
+                        return Err("This component is not a rectangle".into());
+                    }
+                }
+            }
+        }
+        if patch.get("coalesce").and_then(Value::as_str).is_none() {
+            patch["coalesce"] = json!(format!("shape-components-{}", app.ui.alloc_id()));
+        }
+        for (id, indices) in groups {
+            let mut p = patch.clone();
+            p["layer"] = json!(id.0);
+            p["components"] = json!(indices);
+            app.run("shape.edit", p)?;
+        }
+        return Ok(());
+    }
+    // Stroke is layer-wide in the document model. With an explicit empty selection there is
+    // no target, even for a layer-wide property.
+    if selected.is_some_and(|c| c.targets.is_empty()) {
+        return Ok(());
+    }
+    patch["layer"] = json!(layer.0);
+    app.run("shape.edit", patch)?;
+    Ok(())
+}
 
 fn solid_paint(c: [f32; 4]) -> photocraft_doc::Fill {
     photocraft_doc::Fill::Solid(photocraft_doc::Color::rgba(c[0], c[1], c[2], c[3]))
@@ -1483,16 +1705,30 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
     }) {
         ui.disable();
     }
-    let Some(sh) = app.session.active().and_then(|s| s.doc.layer(id)).and_then(|l| match &l.content {
+    let Some(mut sh) = app.session.active().and_then(|s| s.doc.layer(id)).and_then(|l| match &l.content {
         LayerContent::Shape(sh) => Some(sh.clone()),
         _ => None,
     }) else {
         return;
     };
+    let components = app
+        .ui
+        .shape_components
+        .as_ref()
+        .filter(|c| Some(c.doc) == app.session.active().map(|s| s.doc.id))
+        .map(|c| c.targets.iter().filter(|t| t.layer == id).map(|t| t.index).collect::<Vec<_>>());
+    if components.as_ref().is_some_and(Vec::is_empty) {
+        return;
+    }
+    if let Some(sub) = components.as_ref().and_then(|c| c.last()).and_then(|i| sh.path.subpaths.get(*i)) {
+        sh.fill = sub.style.as_ref().map_or_else(|| sh.fill.clone(), |style| style.fill.clone());
+        sh.live = photocraft_vector::shapes::rectangle_from_subpath(sub);
+    }
     let t = Tokens::get(ui.ctx());
+    let mixed_fill = selected_fills_mixed(app);
     let mut edit: Option<Value> = None;
     let doc_id = app.session.active().map(|st| st.doc.id);
-    let key = |k: &str| format!("shape-{doc_id:?}-{}-{k}", id.0);
+    let key = |k: &str| format!("shape-{doc_id:?}-{}-{components:?}-{k}", id.0);
     let gesture_key = ui.id().with(key("paint-gesture"));
     let gesture = paint_gesture(ui, gesture_key);
     let coalesce = |field: &str| format!("{}:{}:{gesture}", key(field), gesture_key.value());
@@ -1507,6 +1743,9 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
                     PaintChange::Color(color) => json!(color),
                 };
                 edit = Some(json!({"fill": fill, "coalesce": coalesce("fill")}));
+            }
+            if mixed_fill {
+                ui.label(egui::RichText::new(tl!("Mixed")).color(t.text_dim));
             }
             ui.add_space(12.0);
             ui.label(egui::RichText::new(tl!("Stroke")).color(t.text_dim).size(12.0));
@@ -1549,20 +1788,22 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
             ui.label(egui::RichText::new(tl!(&label)).color(t.text_dim).size(12.0));
             crate::widgets::value_field(ui, v, range, unit, 64.0).changed()
         };
-        match live {
-            photocraft_doc::vector::LiveShape::Rect { rect, .. }
-            | photocraft_doc::vector::LiveShape::Ellipse { rect }
-            | photocraft_doc::vector::LiveShape::Polygon { rect, .. } => {
-                ui.horizontal(|ui| {
-                    let (mut w, mut h) = (rect[2] as f32, rect[3] as f32);
-                    let cw = num(ui, "W", &mut w, 1.0..=300000.0, "px");
-                    let ch = num(ui, "H", &mut h, 1.0..=300000.0, "px");
-                    if cw || ch {
-                        edit = Some(json!({"rect": [rect[0], rect[1], w.round(), h.round()], "coalesce": key("wh")}));
-                    }
-                });
+        if components.is_none() {
+            match live {
+                photocraft_doc::vector::LiveShape::Rect { rect, .. }
+                | photocraft_doc::vector::LiveShape::Ellipse { rect }
+                | photocraft_doc::vector::LiveShape::Polygon { rect, .. } => {
+                    ui.horizontal(|ui| {
+                        let (mut w, mut h) = (rect[2] as f32, rect[3] as f32);
+                        let cw = num(ui, "W", &mut w, 1.0..=300000.0, "px");
+                        let ch = num(ui, "H", &mut h, 1.0..=300000.0, "px");
+                        if cw || ch {
+                            edit = Some(json!({"rect": [rect[0], rect[1], w.round(), h.round()], "coalesce": key("wh")}));
+                        }
+                    });
+                }
+                photocraft_doc::vector::LiveShape::Line { .. } => {}
             }
-            photocraft_doc::vector::LiveShape::Line { .. } => {}
         }
         ui.vertical(|ui| match live {
             photocraft_doc::vector::LiveShape::Rect { radii, .. } => {
@@ -1611,9 +1852,8 @@ pub fn shape_properties(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: photocra
             _ => {}
         });
     }
-    if let Some(mut p) = edit {
-        p["layer"] = json!(id.0);
-        if let Err(e) = app.run("shape.edit", p) {
+    if let Some(p) = edit {
+        if let Err(e) = edit_selected_shape(app, id, p) {
             app.ui.status = e;
             app.ui.status_error = true;
         }
@@ -1955,7 +2195,7 @@ mod tests {
                 ..Default::default()
             };
             let history = a.session.active().unwrap().history.past_len();
-            finish_shape(&mut a, tool, [20.0, 20.0], [120.0, 100.0], Default::default());
+            finish_shape(&mut a, tool, [20.0, 20.0], [120.0, 100.0], Default::default(), false);
             let info = a.run("shape.info", json!({})).unwrap();
             assert_eq!(info["stroke"]["dashes"], json!([4.0, 2.0, 1.0, 3.0]));
             assert_eq!(info["stroke"]["cap"], "square");
@@ -2049,7 +2289,7 @@ mod tests {
         ]}]});
         app.run("path.set", json!({"path": path})).unwrap();
         assert!(app.session.active().unwrap().doc.work_path.is_some());
-        finish_shape(&mut app, Tool::Rectangle, [100.0, 100.0], [160.0, 150.0], egui::Modifiers::NONE);
+        finish_shape(&mut app, Tool::Rectangle, [100.0, 100.0], [160.0, 150.0], egui::Modifiers::NONE, false);
         let toggle = |app: &mut PhotocraftApp, id: &str| crate::menus::invoke(app, &ctx, id, Value::Null).unwrap();
         for tool in [Tool::Pen, Tool::PathSelection, Tool::DirectSelection, Tool::Rectangle] {
             app.ui.tool = tool;
@@ -2075,15 +2315,15 @@ mod tests {
     #[test]
     fn shape_drag_creates_layers_with_modifiers() {
         let mut app = app();
-        finish_shape(&mut app, Tool::Rectangle, [10.0, 10.0], [60.0, 30.0], egui::Modifiers::SHIFT);
+        finish_shape(&mut app, Tool::Rectangle, [10.0, 10.0], [60.0, 30.0], egui::Modifiers::SHIFT, false);
         let st = app.session.active().unwrap();
         let b = st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds();
         assert_eq!((b.width(), b.height()), (50, 50), "shift = square");
-        finish_shape(&mut app, Tool::EllipseShape, [100.0, 100.0], [120.0, 110.0], egui::Modifiers::ALT);
+        finish_shape(&mut app, Tool::EllipseShape, [100.0, 100.0], [120.0, 110.0], egui::Modifiers::ALT, false);
         let st = app.session.active().unwrap();
         let b = st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds();
         assert!(b.x0.abs_diff(80) <= 1 && b.width().abs_diff(40) <= 1, "alt = from centre: {b:?}");
-        finish_shape(&mut app, Tool::Line, [10.0, 150.0], [90.0, 152.0], egui::Modifiers::SHIFT);
+        finish_shape(&mut app, Tool::Line, [10.0, 150.0], [90.0, 152.0], egui::Modifiers::SHIFT, false);
         assert_eq!(app.session.active().unwrap().doc.layers.len(), 4);
     }
 
@@ -2112,6 +2352,84 @@ mod tests {
     }
 
     #[test]
+    fn control_shape_drag_selects_intersecting_shapes_without_editing_document() {
+        use crate::canvas::{ToolEvent, tool_event};
+        for tool in [Tool::Rectangle, Tool::EllipseShape, Tool::Triangle, Tool::Polygon, Tool::Line, Tool::CustomShape] {
+            let mut app = app();
+            app.run("shape.create", json!({"kind":"rect","rect":[10,10,40,40],"fill":"#ff0000"})).unwrap();
+            let before = app.session.active().unwrap().doc.layers.clone();
+            let history = app.session.active().unwrap().history.past_len();
+            let id = app.session.active().unwrap().active_layer.unwrap();
+            app.ui.tool = tool;
+            app.ui.tool_options.shape_fill = false;
+            tool_event(&mut app, ToolEvent::Down { x: 60.0, y: 60.0, pressure: 1.0 }, egui::Modifiers::CTRL);
+            tool_event(&mut app, ToolEvent::Move { x: 20.0, y: 20.0, pressure: 1.0 }, egui::Modifiers::NONE);
+            tool_event(&mut app, ToolEvent::Up { x: 20.0, y: 20.0 }, egui::Modifiers::NONE);
+            let st = app.session.active().unwrap();
+            assert_eq!(st.doc.layers, before, "{tool:?}: selection must not append geometry");
+            assert_eq!(st.history.past_len(), history, "{tool:?}: selection must not add an edit");
+            assert_eq!(app.ui.shape_components.as_ref().unwrap().targets, vec![ComponentTarget { layer: id, index: 0 }], "{tool:?}");
+            assert_eq!(st.selected_layers(), vec![id]);
+        }
+    }
+
+    #[test]
+    fn shift_shape_drag_appends_to_active_shape_even_after_shift_release() {
+        use crate::canvas::{ToolEvent, tool_event};
+        let mut app = app();
+        app.run("shape.create", json!({"kind":"rect","rect":[10,10,40,40],"fill":"#ff0000"})).unwrap();
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        let layers = app.session.active().unwrap().doc.layers.len();
+        app.ui.tool = Tool::Rectangle;
+        tool_event(&mut app, ToolEvent::Down { x: 60.0, y: 60.0, pressure: 1.0 }, egui::Modifiers::SHIFT);
+        tool_event(&mut app, ToolEvent::Move { x: 95.0, y: 85.0, pressure: 1.0 }, egui::Modifiers::NONE);
+        tool_event(&mut app, ToolEvent::Up { x: 95.0, y: 85.0 }, egui::Modifiers::NONE);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.doc.layers.len(), layers);
+        assert_eq!(st.active_layer, Some(id));
+        let LayerContent::Shape(sh) = &st.doc.layer(id).unwrap().content else { panic!("shape") };
+        assert_eq!(sh.path.components().len(), 2);
+        assert!(app.ui.shape_components.is_none());
+    }
+
+    #[test]
+    fn shape_modifier_clicks_select_or_sample_without_creating() {
+        use crate::canvas::{ToolEvent, tool_event};
+        let mut app = app();
+        app.run("shape.create", json!({"kind":"rect","rect":[10,10,40,40],"fill":"#ff0000"})).unwrap();
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        app.run("shape.create", json!({"kind":"rect","rect":[70,70,20,20]})).unwrap();
+        let other = app.session.active().unwrap().active_layer.unwrap();
+        let count = app.session.active().unwrap().doc.layers.len();
+        app.ui.tool = Tool::Rectangle;
+        for mods in [egui::Modifiers::COMMAND, egui::Modifiers::CTRL] {
+            app.run("layer.select", json!({"layer":id.0})).unwrap();
+            tool_event(&mut app, ToolEvent::Down { x: 80.0, y: 80.0, pressure: 1.0 }, mods);
+            tool_event(&mut app, ToolEvent::Up { x: 80.0, y: 80.0 }, mods);
+            let st = app.session.active().unwrap();
+            assert_eq!(st.active_layer, Some(other));
+            assert_eq!(st.selected_layers(), vec![other], "component selection excludes unrelated Layers-panel selection");
+            tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }, mods);
+            tool_event(&mut app, ToolEvent::Up { x: 20.0, y: 20.0 }, egui::Modifiers::NONE);
+            assert_eq!(app.session.active().unwrap().active_layer, Some(id));
+            assert_eq!(app.session.active().unwrap().doc.layers.len(), count);
+            assert!(app.drag.is_none());
+            assert!(app.ui.corner_radius.is_none());
+            assert_eq!(selected_shape(&app.session).unwrap().layer, id);
+        }
+        app.session.tools.brush.pattern_enabled = true;
+        // Sample inside the fill, away from the Alt-editable corner widgets.
+        tool_event(&mut app, ToolEvent::Down { x: 30.0, y: 30.0, pressure: 1.0 }, egui::Modifiers::ALT);
+        tool_event(&mut app, ToolEvent::Up { x: 30.0, y: 30.0 }, egui::Modifiers::NONE);
+        assert_eq!(app.session.tools.foreground, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(app.session.active().unwrap().doc.layers.len(), count);
+        tool_event(&mut app, ToolEvent::Down { x: 60.0, y: 60.0, pressure: 1.0 }, egui::Modifiers::ALT);
+        tool_event(&mut app, ToolEvent::Move { x: 80.0, y: 80.0, pressure: 1.0 }, egui::Modifiers::ALT);
+        tool_event(&mut app, ToolEvent::Up { x: 80.0, y: 80.0 }, egui::Modifiers::ALT);
+        assert_eq!(app.session.active().unwrap().doc.layers.len(), count + 1);
+    }
+
+    #[test]
     fn shape_preview_is_the_committed_path() {
         let mut app = app();
         app.ui.tool_options.corner_radius = 8.0;
@@ -2121,7 +2439,7 @@ mod tests {
         };
         for tool in [Tool::Rectangle, Tool::EllipseShape, Tool::Triangle, Tool::Polygon, Tool::Line] {
             let shown = preview(&app, tool, [60.0, 30.0]).unwrap();
-            finish_shape(&mut app, tool, [10.0, 10.0], [60.0, 30.0], egui::Modifiers::ALT);
+            finish_shape(&mut app, tool, [10.0, 10.0], [60.0, 30.0], egui::Modifiers::ALT, false);
             let st = app.session.active().unwrap();
             let LayerContent::Shape(sh) = &st.doc.layer(st.active_layer.unwrap()).unwrap().content else { panic!("{tool:?}: no shape layer") };
             assert_eq!(sh.path, shown, "{tool:?}");
@@ -2601,7 +2919,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         let mut app = app();
         app.run("tools.setColors", json!({"foreground": "#ff0000", "background": "#0000ff"})).unwrap();
-        finish_shape(&mut app, Tool::Rectangle, [20.0, 20.0], [120.0, 100.0], Default::default());
+        finish_shape(&mut app, Tool::Rectangle, [20.0, 20.0], [120.0, 100.0], Default::default(), false);
         let shape = |app: &PhotocraftApp| {
             let st = app.session.active().unwrap();
             match &st.doc.layer(st.active_layer.unwrap()).unwrap().content {
@@ -2665,7 +2983,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         let mut app = app();
         app.run("tools.setColors", json!({"foreground": "#ff0000", "background": "#0000ff"})).unwrap();
-        finish_shape(&mut app, Tool::Rectangle, [20.0, 20.0], [120.0, 100.0], Default::default());
+        finish_shape(&mut app, Tool::Rectangle, [20.0, 20.0], [120.0, 100.0], Default::default(), false);
         let shape = |app: &PhotocraftApp| {
             let st = app.session.active().unwrap();
             match &st.doc.layer(st.active_layer.unwrap()).unwrap().content {

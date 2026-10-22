@@ -52,7 +52,7 @@ pub fn is_click(start: [f64; 2], points: &[[f64; 3]], zoom: f32) -> bool {
 
 /// Open the creation dialog of `tool` for a click at `at` (document px). `None` for a tool without
 /// one (Line, Custom Shape).
-pub fn open(app: &mut PhotocraftApp, tool: Tool, at: [f64; 2]) -> Option<u64> {
+pub fn open(app: &mut PhotocraftApp, tool: Tool, at: [f64; 2], combine: bool) -> Option<u64> {
     let (kind, label) = kind_of(tool)?;
     if !(at[0].is_finite() && at[1].is_finite()) {
         return None;
@@ -65,6 +65,14 @@ pub fn open(app: &mut PhotocraftApp, tool: Tool, at: [f64; 2]) -> Option<u64> {
     f.insert("__command".into(), json!("shape.create"));
     f.insert("__label".into(), json!(label));
     f.insert("__at".into(), json!([at[0].round(), at[1].round()]));
+    if combine
+        && let Some(st) = app.session.active()
+        && let Some(layer) = st.active_layer.and_then(|id| st.doc.layer(id))
+        && matches!(layer.content, photocraft_doc::LayerContent::Shape(_))
+    {
+        f.insert("__addTo".into(), json!(layer.id.0));
+        f.insert("__document".into(), json!(st.doc.id.0));
+    }
     f.insert("width".into(), json!(100.0));
     f.insert("height".into(), json!(100.0));
     f.insert("fromCenter".into(), json!(false));
@@ -135,7 +143,22 @@ pub fn geometry(f: &Map<String, Value>) -> Result<Value, String> {
 
 /// OK: create the shape and remember the values for the next click.
 pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value, String> {
-    let result = geometry(f).and_then(|g| crate::vector_ui::create_shape(app, g));
+    let result = geometry(f).and_then(|mut g| {
+        if let Some(target) = f.get("__addTo") {
+            let id = target.as_u64().ok_or("invalid shape target")?;
+            let doc = f.get("__document").and_then(Value::as_u64).ok_or("the dialog has no document target")?;
+            let st = app.session.active().ok_or("no document open")?;
+            if st.doc.id.0 != doc {
+                return Err("the shape's document changed while the dialog was open".into());
+            }
+            if !st.doc.layer(photocraft_doc::LayerId(id)).is_some_and(|l| matches!(l.content, photocraft_doc::LayerContent::Shape(_))) {
+                return Err("the target shape no longer exists".into());
+            }
+            g["addTo"] = json!(id);
+            g["op"] = json!("combine");
+        }
+        crate::vector_ui::create_shape(app, g)
+    });
     match &result {
         Ok(_) => {
             if let Some(kind) = f.get(MARK).and_then(Value::as_str) {

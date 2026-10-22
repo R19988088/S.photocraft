@@ -569,17 +569,17 @@ impl Default for Pose {
     }
 }
 
-/// Stroke smoothing (Photoshop's Smoothing % and its options).
+/// Pulled-string controls; legacy exponential settings remain readable in saved brushes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Smoothing {
     /// Switch smoothing off without discarding its amount or mode. Old presets remain enabled.
     pub enabled: bool,
-    /// 0..1.
+    /// String length, 0..1 of 100 screen pixels.
     pub amount: f32,
     /// Lazy-mouse: paint only when the pointer pulls a string of `amount × 100 px` taut.
     pub pulled_string: bool,
-    /// Keep catching up with the pointer while it pauses (uses point timestamps).
+    /// Legacy exponential catch-up option, retained for preset round-trips and ignored.
     pub catch_up: bool,
     /// Finish the stroke at the last pointer position.
     pub catch_up_on_end: bool,
@@ -820,7 +820,8 @@ impl BrushSettings {
         brush.transfer.mix = Dynamic::default();
         brush.spacing_enabled = true;
         brush.build_up = false;
-        brush.smoothing.enabled = false;
+        // Pulled string is an explicit Motion control; legacy exponential settings stay inert.
+        brush.smoothing.enabled &= brush.smoothing.pulled_string;
         if !brush.erase && !brush.aliased {
             brush.mode = BlendMode::Normal;
         }

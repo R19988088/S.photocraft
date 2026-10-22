@@ -39,6 +39,7 @@ fn circle(cx: f64, cy: f64, r: f64) -> Subpath {
     let k = r * 0.552_284_75;
     let knot = |x: f64, y: f64, ix: f64, iy: f64, ox: f64, oy: f64| Knot::smooth(Point::new(x, y), Point::new(ix, iy), Point::new(ox, oy));
     Subpath {
+        style: None,
         closed: true,
         op: PathOp::Combine,
         knots: vec![
@@ -88,7 +89,7 @@ pub fn parse(src: &str) -> std::result::Result<Path, String> {
             "M" => {
                 finish(&mut cur, &mut subs, true);
                 let (x, y) = (num(&mut i)?, num(&mut i)?);
-                cur = Some(Subpath { closed: true, knots: vec![Knot::corner(x, y)], op });
+                cur = Some(Subpath { style: None, closed: true, knots: vec![Knot::corner(x, y)], op });
                 op = PathOp::Combine;
             }
             "L" => {

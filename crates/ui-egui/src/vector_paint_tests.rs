@@ -117,7 +117,7 @@ fn picking_tool_colours_enables_paint_and_reaches_the_next_shape() {
     assert_eq!(h.state().ui.tool_options.stroke_width, 3.0);
     assert_eq!(h.state().session.tools.foreground, [0.91, 0.17, 0.32, 1.0]);
     assert_eq!(h.state().session.tools.background, [0.12, 0.68, 0.93, 1.0]);
-    finish_shape(h.state_mut(), Tool::Rectangle, [20.0, 20.0], [100.0, 80.0], Modifiers::NONE);
+    finish_shape(h.state_mut(), Tool::Rectangle, [20.0, 20.0], [100.0, 80.0], Modifiers::NONE, false);
     assert_eq!(shape(h.state()).fill, Some(solid_paint([0.91, 0.17, 0.32, 1.0])));
     assert_eq!(shape(h.state()).stroke.as_ref().unwrap().paint, solid_paint([0.12, 0.68, 0.93, 1.0]));
 }
@@ -158,7 +158,7 @@ fn float_paints_match_preview_creation_native_roundtrip_and_document_depth() {
             app.ui.tool_options.shape_stroke.cap = photocraft_doc::LineCap::Round;
             app.ui.tool_options.shape_stroke.dashes = vec![0.0, 2.0];
             let preview = shape_preview(&app, tool, [20.0, 20.0], [100.0, 80.0], Modifiers::NONE).unwrap();
-            finish_shape(&mut app, tool, [20.0, 20.0], [100.0, 80.0], Modifiers::NONE);
+            finish_shape(&mut app, tool, [20.0, 20.0], [100.0, 80.0], Modifiers::NONE, false);
             let committed = shape(&app).clone();
             assert_eq!(preview.fill, committed.fill);
             assert_eq!(preview.stroke, committed.stroke);
@@ -190,13 +190,13 @@ fn transparent_and_absent_paints_remain_distinct_and_open_pen_keeps_foreground()
     let preview = shape_preview(&app, Tool::Rectangle, [20.0, 20.0], [80.0, 70.0], Modifiers::NONE).unwrap();
     assert_eq!(preview.fill, Some(solid_paint(transparent)));
     assert_eq!(preview.stroke.as_ref().unwrap().paint, solid_paint(transparent));
-    finish_shape(&mut app, Tool::Rectangle, [20.0, 20.0], [80.0, 70.0], Modifiers::NONE);
+    finish_shape(&mut app, Tool::Rectangle, [20.0, 20.0], [80.0, 70.0], Modifiers::NONE, false);
     assert_eq!(shape(&app).fill, preview.fill);
     assert_eq!(shape(&app).stroke, preview.stroke);
     assert_eq!(shape(&app).cache.as_ref().unwrap().pixel(40, 40), vec![0.0; 4]);
     set_tool_paint(&mut app, false, PaintChange::None).unwrap();
     set_tool_paint(&mut app, true, PaintChange::None).unwrap();
-    finish_shape(&mut app, Tool::Triangle, [20.0, 20.0], [80.0, 70.0], Modifiers::NONE);
+    finish_shape(&mut app, Tool::Triangle, [20.0, 20.0], [80.0, 70.0], Modifiers::NONE, false);
     assert!(shape(&app).fill.is_none() && shape(&app).stroke.is_none());
     let foreground = [0.836521, 0.125468, 0.745632, 0.438271];
     app.run("tools.setColors", json!({"foreground": foreground, "background": [0.0, 1.0, 0.0, 1.0]})).unwrap();
@@ -293,7 +293,7 @@ fn options_bar_fill_swatch_recolours_the_shape_just_drawn() {
     let mut app = app("rgb", 8);
     app.run("tools.setColors", json!({"foreground": "#ff0000", "background": "#0000ff"})).unwrap();
     app.ui.tool_options.stroke_width = 3.0;
-    finish_shape(&mut app, Tool::Rectangle, [20.0, 20.0], [100.0, 80.0], Modifiers::NONE);
+    finish_shape(&mut app, Tool::Rectangle, [20.0, 20.0], [100.0, 80.0], Modifiers::NONE, false);
     let original = shape(&app).clone();
     let history = app.session.active().unwrap().history.past_len();
     let mut h = harness(app, false);
@@ -315,4 +315,170 @@ fn options_bar_fill_swatch_recolours_the_shape_just_drawn() {
     assert_eq!(h.state().session.active().unwrap().history.past_len(), history + 1);
     h.state_mut().run("edit.undo", json!({})).unwrap();
     assert_eq!(shape(h.state()).fill, original.fill);
+}
+
+#[test]
+fn merged_components_keep_independent_color_radius_through_native_save_and_undo() {
+    let mut a = app("rgb", 16);
+    a.run("shape.create", json!({"kind":"rect", "rect":[5,5,35,70], "fill":[1,0,0,1]})).unwrap();
+    let id = a.session.active().unwrap().active_layer.unwrap();
+    a.run("shape.create", json!({"kind":"rect", "rect":[60,5,35,70], "fill":[1,0,0,1], "addTo":id.0})).unwrap();
+    select_component_at(&mut a, [75.0, 35.0], 2.0, ComponentSelectMode::Replace);
+    assert_eq!(a.ui.shape_components.as_ref().unwrap().targets, vec![ComponentTarget { layer: id, index: 1 }]);
+    let before = shape(&a).clone();
+    a.run("shape.edit", json!({"layer":id.0,"components":[1],"fill":[0,0,1,1],"radii":[8,8,8,8]})).unwrap();
+    let after = shape(&a).clone();
+    assert_eq!(after.path.subpaths[0], before.path.subpaths[0]);
+    assert_ne!(after.path.subpaths[1], before.path.subpaths[1]);
+    let doc = &a.session.active().unwrap().doc;
+    let bytes = photocraft_format::save_to_bytes(doc, &Default::default()).unwrap();
+    let loaded = photocraft_format::load_from_bytes(&bytes).unwrap();
+    let LayerContent::Shape(saved) = &loaded.layer(id).unwrap().content else { panic!("shape") };
+    assert_eq!(saved.path.subpaths[1].style, after.path.subpaths[1].style);
+    assert_saved_path(&saved.path, &after.path);
+    assert_eq!(
+        photocraft_vector::render_shape(saved, doc.pixel_format(), doc.bounds()),
+        photocraft_vector::render_shape(&after, doc.pixel_format(), doc.bounds())
+    );
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(shape(&a), &before);
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(shape(&a), &after);
+}
+
+#[test]
+fn merged_components_options_edit_only_selected_fill_and_radius() {
+    use egui::accesskit::Role;
+    let mut a = app("rgb", 16);
+    a.run("shape.create", json!({"rect":[5,5,35,70],"fill":"#ff0000"})).unwrap();
+    let id = a.session.active().unwrap().active_layer.unwrap();
+    a.run("shape.create", json!({"rect":[60,5,35,70],"addTo":id.0})).unwrap();
+    select_component_at(&mut a, [75.0, 35.0], 2.0, ComponentSelectMode::Replace);
+    let original = shape(&a).path.subpaths[0].clone();
+    let mut h = harness(a, false);
+    h.get_by_label("Fill color").click();
+    h.run_steps(2);
+    h.get_by_label("No Color").click();
+    h.run_steps(2);
+    assert!(shape(h.state()).fill.is_some());
+    assert!(shape(h.state()).path.subpaths[1].style.as_ref().unwrap().fill.is_none());
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    h.get_all_by_role(Role::SpinButton).last().unwrap().click();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("9".into()));
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    assert_eq!(shape(h.state()).path.subpaths[0], original);
+    let photocraft_doc::LiveShape::Rect { radii, .. } = photocraft_vector::shapes::rectangle_from_subpath(&shape(h.state()).path.subpaths[1]).unwrap() else {
+        panic!("rect")
+    };
+    assert_eq!(radii, [9.0; 4]);
+}
+
+#[test]
+fn component_toggle_empty_selection_does_not_recolour_whole_layer() {
+    let mut a = app("rgb", 8);
+    a.run("shape.create", json!({"rect":[5,5,35,70],"fill":"#ff0000"})).unwrap();
+    let id = a.session.active().unwrap().active_layer.unwrap();
+    assert!(!select_component_at(&mut a, [110.0, 90.0], 1.0, ComponentSelectMode::Toggle));
+    assert!(a.ui.shape_components.is_none());
+    assert_eq!(a.session.active().unwrap().selected_layers(), vec![id]);
+    let before = shape(&a).clone();
+    assert!(select_component_at(&mut a, [20.0, 35.0], 1.0, ComponentSelectMode::Toggle));
+    assert!(select_component_at(&mut a, [20.0, 35.0], 1.0, ComponentSelectMode::Toggle));
+    assert!(a.ui.shape_components.as_ref().unwrap().targets.is_empty());
+    assert!(selected_component_shape(&a).is_none());
+    edit_selected_shape(&mut a, id, json!({"fill":"#0000ff"})).unwrap();
+    let st = a.session.active().unwrap();
+    assert!(st.selected_layers().is_empty());
+    assert!(st.active_layer.is_none());
+    let LayerContent::Shape(after) = &st.doc.layer(id).unwrap().content else { panic!("shape") };
+    assert_eq!(after, &before);
+}
+
+#[test]
+fn restored_history_deselects_reused_component_indices_without_widening_fill_edits() {
+    for command in ["edit.undo", "edit.redo", "history.undo", "history.redo", "history.selectState", "history.deleteState", "history.selectSnapshot"] {
+        let mut a = app("rgb", 8);
+        a.run("shape.create", json!({"rect":[5,5,35,70],"fill":"#ff0000"})).unwrap();
+        let id = a.session.active().unwrap().active_layer.unwrap();
+        let original_state = a.session.active().unwrap().history.past_len();
+        let snapshot = a.run("history.newSnapshot", json!({})).unwrap()["snapshot"].clone();
+        let replacement = photocraft_vector::shapes::rect(60.0, 5.0, 35.0, 70.0);
+        a.run("shape.edit", json!({"layer":id.0,"path":replacement})).unwrap();
+        let restoring_redo = matches!(command, "edit.redo" | "history.redo");
+        if restoring_redo {
+            a.run("edit.undo", json!({})).unwrap();
+        }
+        let at = if restoring_redo { [20.0, 35.0] } else { [75.0, 35.0] };
+        assert!(select_component_at(&mut a, at, 1.0, ComponentSelectMode::Replace));
+        assert_eq!(a.ui.shape_components.as_ref().unwrap().targets, vec![ComponentTarget { layer: id, index: 0 }]);
+        let params = match command {
+            "history.selectState" => json!({"state":original_state}),
+            "history.selectSnapshot" => json!({"snapshot":snapshot}),
+            _ => json!({}),
+        };
+        a.run(command, params).unwrap();
+        assert!(shape(&a).path.components().iter().any(|r| r.start == 0), "the old index still exists after {command}");
+        assert!(a.ui.shape_components.as_ref().unwrap().targets.is_empty(), "{command} must deselect restored components");
+        assert!(selected_component_shape(&a).is_none(), "deselection cannot fall back to the whole layer after {command}");
+        let restored = shape(&a).clone();
+        edit_selected_shape(&mut a, id, json!({"fill":"#0000ff"})).unwrap();
+        assert_eq!(shape(&a), &restored, "a fill edit after {command} cannot recolour the restored component");
+    }
+}
+
+#[test]
+fn marquee_crosses_layers_and_fill_is_one_undo_step() {
+    let mut a = app("rgb", 16);
+    a.run("shape.create", json!({"rect":[5,5,35,70],"fill":"#ff0000"})).unwrap();
+    let left = a.session.active().unwrap().active_layer.unwrap();
+    let original_left = a.session.active().unwrap().doc.layer(left).unwrap().content.clone();
+    a.run("shape.create", json!({"rect":[60,5,35,70],"fill":"#00ff00"})).unwrap();
+    let right = a.session.active().unwrap().active_layer.unwrap();
+    let original_right = a.session.active().unwrap().doc.layer(right).unwrap().content.clone();
+    select_components_in_rect(&mut a, [30.0, 25.0], [65.0, 40.0], ComponentSelectMode::Add);
+    assert_eq!(a.ui.shape_components.as_ref().unwrap().targets, vec![ComponentTarget { layer: left, index: 0 }, ComponentTarget { layer: right, index: 0 }]);
+    assert_eq!(a.session.active().unwrap().selected_layers(), vec![left, right]);
+    assert_eq!(a.session.active().unwrap().active_layer, Some(right));
+    assert!(selected_fills_mixed(&a));
+    let history = a.session.active().unwrap().history.past_len();
+    edit_selected_shape(&mut a, right, json!({"fill":"#0000ff"})).unwrap();
+    let st = a.session.active().unwrap();
+    assert_eq!(st.history.past_len(), history + 1);
+    for id in [left, right] {
+        let LayerContent::Shape(sh) = &st.doc.layer(id).unwrap().content else { panic!("shape") };
+        assert_eq!(sh.path.subpaths[0].style.as_ref().unwrap().fill.as_ref().and_then(color_of), Some([0.0, 0.0, 1.0, 1.0]));
+    }
+    assert!(!selected_fills_mixed(&a));
+    select_component_at(&mut a, [75.0, 35.0], 1.0, ComponentSelectMode::Toggle);
+    assert_eq!(a.session.active().unwrap().selected_layers(), vec![left]);
+    assert_eq!(a.session.active().unwrap().active_layer, Some(left));
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(a.session.active().unwrap().doc.layer(left).unwrap().content, original_left);
+    assert_eq!(a.session.active().unwrap().doc.layer(right).unwrap().content, original_right);
+}
+
+#[test]
+fn component_hit_uses_curves_holes_and_no_fill() {
+    let mut a = app("rgb", 8);
+    a.run("shape.create", json!({"kind":"ellipse","rect":[10,10,80,80],"fill":"#ff0000"})).unwrap();
+    let st = a.session.active().unwrap();
+    // The actual ellipse extends beyond the diamond between its four anchors.
+    assert!(component_at(&st.doc, [76.0, 76.0], 0.1).is_some());
+    assert!(component_at(&st.doc, [88.0, 88.0], 0.1).is_none());
+    let id = st.active_layer.unwrap();
+    a.run("shape.edit", json!({"layer":id.0,"fill":null})).unwrap();
+    assert!(component_at(&a.session.active().unwrap().doc, [50.0, 50.0], 0.1).is_none());
+    let mut outer = photocraft_doc::vector::Subpath::polygon(&[(10.0, 10.0), (90.0, 10.0), (90.0, 90.0), (10.0, 90.0)]);
+    let mut hole = photocraft_doc::vector::Subpath::polygon(&[(30.0, 30.0), (70.0, 30.0), (70.0, 70.0), (30.0, 70.0)]);
+    hole.op = photocraft_doc::vector::PathOp::Join;
+    outer.style = None;
+    let path = Path { subpaths: vec![outer, hole], fill_rule: photocraft_doc::vector::FillRule::EvenOdd, inverted: false };
+    a.run("shape.edit", json!({"layer":id.0,"path":path,"fill":"#ff0000"})).unwrap();
+    assert!(component_at(&a.session.active().unwrap().doc, [50.0, 50.0], 0.1).is_none());
+    assert!(component_at(&a.session.active().unwrap().doc, [20.0, 50.0], 0.1).is_some());
+    select_components_in_rect(&mut a, [40.0, 40.0], [60.0, 60.0], ComponentSelectMode::Replace);
+    assert!(a.ui.shape_components.as_ref().unwrap().targets.is_empty());
 }

@@ -537,7 +537,7 @@ fn cmd_released_mid_drag_keeps_moving_until_the_button_comes_up() {
     release(&mut h, 170.0, 150.0, Modifiers::NONE);
     h.run_steps(2);
     assert_eq!(bounds(&h, id), Rect::new(140, 120, 200, 180));
-    assert_eq!(h.state().session.active().unwrap().history.undo_label(), Some("Move"), "nothing erased");
+    assert_eq!(h.state().session.active().unwrap().history.undo_label(), Some("Free Transform"), "nothing erased");
 }
 
 /// ⌘⌥-drag duplicates the layer first and moves the copy, as the Move tool's ⌥-drag does. Off
@@ -581,21 +581,29 @@ fn ctrl_alt_drag_with_the_brush_resizes_it_off_the_mac() {
     assert_ne!(h.state().session.tools.brush.size, size0, "the brush was resized");
 }
 
-/// With a selection, ⌘-drag with the Brush moves the selected pixels (a floating piece), as the
-/// Move tool does, not the whole layer.
+/// With a selection, ⌘-drag with the Brush commits the cached selected pixels, as the Move
+/// tool does, while unselected pixels stay in place.
 #[test]
-fn cmd_drag_with_the_brush_inside_the_selection_floats_the_selected_pixels() {
+fn cmd_drag_with_the_brush_inside_the_selection_moves_only_the_selected_pixels() {
     let mut h = harness(Tool::Brush);
     let id = with_layer(&mut h);
     h.state_mut().run("select.rect", json!({"x": 110, "y": 110, "width": 40, "height": 40})).unwrap();
     h.run_steps(1);
-    let n0 = h.state().session.active().unwrap().doc.layers.len();
+    let st = h.state().session.active().unwrap();
+    let (n0, steps) = (st.doc.layers.len(), st.history.past_len());
     drag_with(&mut h, Modifiers::COMMAND, 130.0, 130.0, 170.0, 150.0);
     let st = h.state().session.active().unwrap();
-    let f = photocraft_engine::float_cmds::floating(st).expect("a floating piece");
-    assert_eq!((f.layer, f.offset), (id, (40, 20)));
+    let surface = st.doc.layer(id).unwrap().surface().unwrap();
+    assert_eq!(surface.rgba(130, 130)[3], 0.0, "selected source pixels were cut");
+    assert_eq!(surface.rgba(170, 150), [1.0, 0.0, 0.0, 1.0], "selected pixels moved by (40, 20)");
+    assert_eq!(surface.rgba(105, 105), [1.0, 0.0, 0.0, 1.0], "unselected pixels stayed");
     assert_eq!(st.doc.layers.len(), n0, "no layer was added");
-    assert_eq!(bounds(&h, id), Rect::new(100, 100, 160, 160), "the layer itself stayed");
+    assert_eq!(st.history.past_len(), steps + 1, "one committed move");
+    assert_eq!(st.history.undo_label(), Some("Free Transform"));
+    assert!(h.state().ui.transform.is_none(), "the temporary tool finished its session");
+    h.state_mut().run("edit.undo", json!({})).unwrap();
+    assert_eq!(bounds(&h, id), Rect::new(100, 100, 160, 160));
+    assert_eq!(h.state().session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().rgba(130, 130), [1.0, 0.0, 0.0, 1.0]);
 }
 
 /// ⌘-click with the Brush picks the layer under the pointer, as a ⌘-click with the Move tool does
@@ -795,4 +803,59 @@ fn a_held_key_keeps_a_pending_crop_and_another_tools_key_commits_it() {
     assert_eq!(h.state().ui.tool, Tool::Move);
     assert_eq!(h.state().session.active().unwrap().doc.size, photocraft_doc::Size::new(200, 150));
     assert_eq!(h.state().ui.crop_rect, None);
+}
+
+#[test]
+fn command_tap_never_latches_move_or_a_later_brush_gesture() {
+    let mut h = harness(Tool::Brush);
+    hold_mods(&mut h, Modifiers::COMMAND);
+    assert_eq!(for_frame(h.state(), &h.ctx, false), Some(Temporary::Move));
+    hold_mods(&mut h, Modifiers::NONE);
+    assert_eq!(for_frame(h.state(), &h.ctx, false), None);
+    press_at(&mut h, 100.0, 100.0);
+    assert_eq!(for_frame(h.state(), &h.ctx, false), None);
+    release(&mut h, 110.0, 110.0, Modifiers::NONE);
+}
+
+#[test]
+fn temporary_gesture_latch_ends_on_focus_loss_tool_switch_and_new_press() {
+    fn frame(app: &PhotocraftApp, ctx: &egui::Context, focused: bool, mods: Modifiers, pressed: Option<bool>) -> Option<Temporary> {
+        let mut raw = egui::RawInput { focused, events: vec![Event::ModifiersChanged(platform(mods))], ..Default::default() };
+        if let Some(pressed) = pressed {
+            raw.events.push(Event::PointerButton { pos: Pos2::new(10.0, 10.0), button: PointerButton::Primary, pressed, modifiers: platform(mods) });
+        }
+        let mut temporary = None;
+        ctx.run_ui(raw, |ui| temporary = for_frame(app, ui.ctx(), false)).textures_delta.clear();
+        temporary
+    }
+    for cancel in ["focus", "tool", "press", "reset"] {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.ui.tool = Tool::Brush;
+        let ctx = egui::Context::default();
+        assert_eq!(frame(&app, &ctx, true, Modifiers::COMMAND, Some(true)), Some(Temporary::Move));
+        assert_eq!(frame(&app, &ctx, true, Modifiers::NONE, None), Some(Temporary::Move), "an actual gesture finishes after modifier release");
+        match cancel {
+            "focus" => {
+                assert_eq!(frame(&app, &ctx, false, Modifiers::NONE, None), None);
+            }
+            "tool" => {
+                app.ui.tool = Tool::Eraser;
+            }
+            "press" => {
+                // A release and another press can arrive together while the canvas was hidden.
+                let raw = egui::RawInput {
+                    events: vec![
+                        Event::PointerButton { pos: Pos2::ZERO, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+                        Event::PointerButton { pos: Pos2::ZERO, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+                    ],
+                    ..Default::default()
+                };
+                ctx.run_ui(raw, |ui| assert_eq!(for_frame(&app, ui.ctx(), false), None)).textures_delta.clear();
+            }
+            _ => reset(&ctx),
+        }
+        assert_eq!(frame(&app, &ctx, true, Modifiers::NONE, None), None, "{cancel}");
+        assert_eq!(frame(&app, &ctx, true, Modifiers::NONE, Some(false)), None, "{cancel}");
+        assert_eq!(frame(&app, &ctx, true, Modifiers::NONE, Some(true)), None, "the next gesture is normal: {cancel}");
+    }
 }

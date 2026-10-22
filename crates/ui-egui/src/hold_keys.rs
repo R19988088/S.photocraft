@@ -115,7 +115,10 @@ pub fn cmd_nudges(app: &PhotocraftApp) -> bool {
 
 /// Is ⌘ alone (no other temporary key) making the Move tool now?
 fn cmd_move_held(app: &PhotocraftApp, i: &InputState) -> bool {
-    i.modifiers.command && cmd_moves(app.ui.tool) && (app.ui.transform.is_none() || crate::transform_tool::is_cached_move(app)) && app.ui.text_edit.is_none()
+    crate::workspace_ui::sticky_mods(app, i.modifiers).command
+        && cmd_moves(app.ui.tool)
+        && (app.ui.transform.is_none() || crate::transform_tool::is_cached_move(app))
+        && app.ui.text_edit.is_none()
 }
 
 /// Is `id` a held temporary tool rather than a command?
@@ -150,7 +153,7 @@ fn held(i: &InputState, sc: &KeyboardShortcut) -> bool {
 /// Space). Never while a text field has the keyboard, or while editing type on the canvas
 /// (Space must insert a space, not grab the Hand tool).
 pub fn held_tool(app: &PhotocraftApp, ctx: &egui::Context) -> Option<Temporary> {
-    if ctx.text_edit_focused() || app.ui.text_edit.is_some() {
+    if !ctx.input(|i| i.focused) || ctx.text_edit_focused() || app.ui.text_edit.is_some() {
         return None;
     }
     let count = |sc: &KeyboardShortcut| {
@@ -207,21 +210,40 @@ fn latch_id() -> egui::Id {
     egui::Id::new("pc-temporary-tool")
 }
 
-/// The temporary tool for this canvas frame: the held one, except while a selection is being
-/// drawn (the key repositions it instead); a temporary tool that was in effect when the button
-/// went down stays until the button comes up, release included (the Move tool's release is
-/// what commits the move).
+/// Discard a temporary gesture when the canvas interaction is cancelled.
+pub(crate) fn reset(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<(Temporary, Tool, Option<photocraft_doc::DocId>)>(latch_id()));
+}
+
+/// The held temporary tool, retained through release only for the same pointer gesture.
 pub fn for_frame(app: &PhotocraftApp, ctx: &egui::Context, drawing: bool) -> Option<Temporary> {
-    let (down, released) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_released()));
-    let latched = ctx.data(|d| d.get_temp::<Option<Temporary>>(latch_id())).flatten();
-    let t = if (down || released) && latched.is_some() {
-        latched
+    let (focused, down, pressed, released) = ctx.input(|i| (i.focused, i.pointer.primary_down(), i.pointer.primary_pressed(), i.pointer.primary_released()));
+    if !focused {
+        reset(ctx);
+        return None;
+    }
+    let doc = app.session.active().map(|d| d.doc.id);
+    let latched = ctx
+        .data(|d| d.get_temp::<(Temporary, Tool, Option<photocraft_doc::DocId>)>(latch_id()))
+        .filter(|(_, tool, origin_doc)| *tool == app.ui.tool && *origin_doc == doc);
+    // A new press always starts a new gesture, even if the previous release was missed.
+    let ongoing = !pressed && (down || released);
+    let t = if ongoing && latched.is_some() {
+        latched.map(|(t, ..)| t)
     } else if drawing {
         None
     } else {
         held_tool(app, ctx)
     };
-    ctx.data_mut(|d| d.insert_temp(latch_id(), if down { t } else { None }));
+    if down && (pressed || latched.is_some()) {
+        if let Some(t) = t {
+            ctx.data_mut(|d| d.insert_temp(latch_id(), (t, app.ui.tool, doc)));
+        } else {
+            reset(ctx);
+        }
+    } else {
+        reset(ctx);
+    }
     t
 }
 

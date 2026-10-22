@@ -37,12 +37,9 @@ pub struct InertiaSettings {
 
 #[derive(Clone, Debug, Default)]
 pub struct Motion {
-    trajectory: Option<Point>,
-    guide: Option<Point>,
     previous: Option<Point>,
     accumulated: Point,
     direction: Option<Point>,
-    offset: Point,
     orientation: Option<f64>,
     last_raw: f64,
     outliers: u32,
@@ -51,9 +48,6 @@ pub struct Motion {
     pending_count: u32,
 }
 
-fn follow(a: Point, b: Point, k: f64) -> Point {
-    Point::new(a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k)
-}
 fn angle_delta(v: f64) -> f64 {
     (v + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
@@ -115,7 +109,6 @@ impl Motion {
         }
         let point = Point::new(p.x, p.y);
         let resolved = if c.guide_mode == GuideMode::Anchor {
-            let smooth = f64::from(c.anchor_smooth.clamp(0., 1.));
             let delay = f64::from(c.anchor_delay.clamp(0., 1.)) * if c.anchor_delay_pressure_enabled { 1. - f64::from(p.pressure.clamp(0., 1.)) } else { 1. };
             let radius = f64::from(diameter.max(0.1)) * 0.5;
             let previous = self.previous.unwrap_or(point);
@@ -128,20 +121,12 @@ impl Motion {
                 self.accumulated = Point::new(0., 0.);
             }
             let target = self.direction.map_or(Point::new(0., 0.), |d| Point::new(-d.x * radius * delay * 1.25, -d.y * radius * delay * 1.25));
-            let alpha = if self.direction.is_some() { (0.42 - smooth * 0.35).max(0.03) } else { ((0.22 - smooth * 0.12) * (1. - delay * 0.9)).max(0.015) };
-            if (target.x - self.offset.x).hypot(target.y - self.offset.y) > radius * (0.012 + smooth * 0.12) {
-                self.offset = follow(self.offset, target, alpha);
-            }
-            let base = follow(self.guide.unwrap_or(point), point, (1. - smooth * 0.85).max(0.02));
-            self.guide = Some(base);
             Point::new(
-                base.x - f64::from(c.anchor_point_x.clamp(-1., 1.)) * radius + self.offset.x,
-                base.y - f64::from(c.anchor_point_y.clamp(-1., 1.)) * radius + self.offset.y,
+                point.x - f64::from(c.anchor_point_x.clamp(-1., 1.)) * radius + target.x,
+                point.y - f64::from(c.anchor_point_y.clamp(-1., 1.)) * radius + target.y,
             )
         } else {
-            let result = follow(self.trajectory.unwrap_or(point), point, (1. - f64::from(c.smoothing.clamp(0., 1.)) * 0.85).max(0.02));
-            self.trajectory = Some(result);
-            result
+            point
         };
         p.x = resolved.x;
         p.y = resolved.y;
@@ -229,6 +214,19 @@ mod tests {
         assert!(moved.x < 70.);
         assert_eq!(b.resolve(q, &MotionSettings::default(), 20.), q);
     }
+    #[test]
+    fn legacy_motion_smoothing_does_not_filter_coordinates() {
+        let mut motion = Motion::default();
+        let settings = MotionSettings { enabled: true, smoothing: 1.0, anchor_smooth: 1.0, ..Default::default() };
+        for (x, y) in [(10.0, 20.0), (150.0, 40.0), (40.0, 200.0)] {
+            let point = StrokePoint::new(x, y, 0.7);
+            assert_eq!(motion.resolve(point, &settings, 20.0), point);
+        }
+        let settings = MotionSettings { guide_mode: GuideMode::Anchor, ..settings };
+        let point = StrokePoint::new(300.0, 100.0, 0.7);
+        assert_eq!(motion.resolve(point, &settings, 20.0), point);
+    }
+
     #[test]
     fn inertia_only_branches_at_turns_and_has_a_distance_cooldown() {
         let c = InertiaSettings { enabled: true, amount: 0.5, ..Default::default() };

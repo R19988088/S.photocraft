@@ -1005,3 +1005,37 @@ fn combine_shapes_fails_gracefully() {
     assert!(s.execute("layer.combineShapes.unite", json!({})).is_err());
     assert_eq!(*doc(&s), before);
 }
+
+#[test]
+fn merged_shape_components_edit_fill_and_radius_independently() {
+    for depth in [8, 16, 32] {
+        let mut s = session(100, 80, depth);
+        let id = s.execute("shape.create", json!({"rect":[5,5,30,30],"fill":"#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("shape.create", json!({"rect":[50,5,30,30],"fill":"#ff0000","addTo":id})).unwrap();
+        let original = shape(&s, id);
+        s.execute("shape.edit", json!({"layer":id,"components":[1],"fill":"#0000ff","radii":[8,8,8,8]})).unwrap();
+        let edited = shape(&s, id);
+        let mut pixels = [[0.0; 4]; 1];
+        edited.cache.as_ref().unwrap().read_rgba_into(photocraft_doc::Rect::from_xywh(15, 15, 1, 1), &mut pixels);
+        assert!(pixels[0][0] > 0.99 && pixels[0][2] < 0.01, "unselected shape kept its red fill: {:?}", pixels[0]);
+        edited.cache.as_ref().unwrap().read_rgba_into(photocraft_doc::Rect::from_xywh(65, 15, 1, 1), &mut pixels);
+        assert!(pixels[0][2] > 0.99 && pixels[0][0] < 0.01);
+        assert_eq!(edited.path.subpaths[0], original.path.subpaths[0]);
+        assert_ne!(edited.path.subpaths[1].knots, original.path.subpaths[1].knots);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(shape(&s, id), original);
+        let before = s.active().unwrap().doc.clone();
+        assert!(s.execute("shape.edit", json!({"layer":id,"components":[99],"fill":"#00ff00"})).is_err());
+        assert_eq!(s.active().unwrap().doc, before);
+    }
+}
+
+#[test]
+fn component_fill_survives_live_rectangle_geometry_edit() {
+    let mut s = session(80, 80, 16);
+    let id = s.execute("shape.create", json!({"rect":[5,5,40,40],"fill":"#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("shape.edit", json!({"layer":id,"components":[0],"fill":"#0000ff"})).unwrap();
+    let style = shape(&s, id).path.subpaths[0].style.clone();
+    s.execute("shape.edit", json!({"layer":id,"radii":5})).unwrap();
+    assert_eq!(shape(&s, id).path.subpaths[0].style, style);
+}

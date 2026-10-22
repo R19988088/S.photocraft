@@ -49,6 +49,7 @@ pub fn path_from_records(p: &PathData, w: u32, h: u32) -> Path {
         .subpaths()
         .into_iter()
         .map(|s| Subpath {
+            style: None,
             closed: s.closed,
             op: op_from_psd(s.operation),
             knots: s.knots.iter().map(|k| Knot { anchor: pt(k.anchor), in_ctrl: pt(k.pre), out_ctrl: pt(k.post), smooth: k.linked }).collect(),
@@ -546,6 +547,7 @@ mod tests {
     fn sample_path() -> Path {
         let mut p = Path::new(vec![
             Subpath {
+                style: None,
                 closed: true,
                 op: PathOp::Combine,
                 knots: vec![

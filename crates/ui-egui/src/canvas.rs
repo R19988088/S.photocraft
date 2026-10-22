@@ -3371,12 +3371,20 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     let shift_navigation = !under_dialog
         && !ctx.text_edit_focused()
         && app.drag.is_none()
-        && ui.input(|i| i.modifiers.shift && !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt);
-    crate::rotate_view::shift_navigation(&ctx, response.id.with("shift-navigation"),
-        &mut view, &xf, shift_navigation && response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()), ppp);
+        && ui.input(|i| i.modifiers.shift && !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt)
+        && !crate::vector_ui::is_shape_tool(app.ui.tool)
+        && !crate::tool_feedback::is_selection_tool(app.ui.tool);
+    crate::rotate_view::shift_navigation(
+        &ctx,
+        response.id.with("shift-navigation"),
+        &mut view,
+        &xf,
+        shift_navigation && response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()),
+        ppp,
+    );
     if nav_hovered && shift_navigation {
-        let (up, down, left, right) = ui.input(|i| (i.key_down(egui::Key::ArrowUp), i.key_down(egui::Key::ArrowDown),
-            i.key_down(egui::Key::ArrowLeft), i.key_down(egui::Key::ArrowRight)));
+        let (up, down, left, right) = ui
+            .input(|i| (i.key_down(egui::Key::ArrowUp), i.key_down(egui::Key::ArrowDown), i.key_down(egui::Key::ArrowLeft), i.key_down(egui::Key::ArrowRight)));
         if up != down {
             let factor = if up { 1.02 } else { 1.0 / 1.02 };
             let zoom = crate::zoom_levels::clamp(view.zoom * factor, view.doc_size);
@@ -3389,8 +3397,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             ctx.request_repaint();
         }
     }
-    let reset_angle = !under_dialog && !ctx.text_edit_focused() && nav_hovered
-        && ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let reset_angle = !under_dialog && !ctx.text_edit_focused() && nav_hovered && ui.input(|i| i.key_pressed(egui::Key::Escape));
     if reset_angle {
         view.rotation = 0.0;
         crate::rotate_view::reset_shift_navigation(&ctx, response.id.with("shift-navigation"));
@@ -3498,6 +3505,32 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         _ => alt || sticky_alt,
     };
 
+    // Cancel the old shape gesture before navigation or modal tools can take the pointer.
+    let transform_owns_pointer = primary && app.ui.transform.is_some() && temporary.is_none() && !middle;
+    let shape_gesture = egui::Id::new(("shape-pointer-gesture", ctx.viewport_id()));
+    let mut shape_origin = ctx.data(|d| d.get_temp::<(Tool, photocraft_doc::DocId)>(shape_gesture));
+    let mut shape_owns = shape_origin.is_some();
+    let shape_context = app.session.active().map(|st| (tool, st.doc.id));
+    let shape_cancelled = shape_gesture.with("cancelled");
+    let shape_tool = crate::vector_ui::is_shape_tool(tool) && !transform_owns_pointer;
+    let cancelled = !ui.input(|i| i.focused)
+        || !shape_tool
+        || (shape_owns && shape_origin != shape_context)
+        || (shape_owns && !ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released()))
+        || ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. })));
+    if primary && shape_owns && cancelled {
+        crate::hold_keys::reset(&ctx);
+        app.ui.corner_radius = None;
+        if app.drag.as_ref().is_some_and(|d| crate::vector_ui::is_shape_tool(d.tool)) {
+            app.drag = None;
+        }
+        shape_owns = false;
+        ctx.data_mut(|d| {
+            d.remove::<(Tool, photocraft_doc::DocId)>(shape_gesture);
+            d.insert_temp(shape_cancelled, true);
+        });
+    }
+
     if under_dialog {
         // With a colour dialog picker armed the image is its eyedropper, whatever the tool; Space
         // and the middle button still pan. Curves and Replace Color use the same merged-composite
@@ -3594,9 +3627,17 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // owns the pointer, so the tool behind it cannot steal the resize drag (#2302). The held Hand
     // (Space) and a middle-button drag still pan, and a secondary window's Hand never stops, as the
     // box is only drawn and driven on the primary canvas.
-    let transform_owns_pointer = primary && app.ui.transform.is_some() && temporary.is_none() && !middle;
     let hand_pan = tool == Tool::Hand && !transform_owns_pointer && !shift_navigation;
-    if primary && app.stylus.native_active && (hand_pan || middle || under_dialog || shift_navigation || stroke_dismissal || !strokes_live(tool)) {
+    if primary
+        && app.stylus.native_active
+        && (hand_pan
+            || middle
+            || under_dialog
+            || shift_navigation
+            || stroke_dismissal
+            || !strokes_live(app.ui.tool)
+            || (!strokes_live(tool) && temporary != Some(crate::hold_keys::Temporary::Move)))
+    {
         // A temporary view tool or dialog can take the release away from the canvas.
         // Finish the contact before handing it the pointer.
         let saved_override = app.tool_override;
@@ -3681,6 +3722,51 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             if tool.is_type() && press_mods.command && app.ui.text_edit.is_some() {
                 let d = xf.to_doc(p);
                 tool_event(app, ToolEvent::Down { x: d[0], y: d[1], pressure: app.stylus.pressure() }, press_mods);
+            }
+        }
+        // Shape gestures start at the real press, so releasing a modifier before pen-up
+        // cannot lose selection intent or replay the same click through the drag fallback.
+        if shape_tool && !cancelled {
+            for event in ui.input(|i| i.events.clone()) {
+                match event {
+                    egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers }
+                        if rect.contains(pos) && ctx.layer_id_at(pos) == Some(response.layer_id) && !egui::Popup::is_any_open(&ctx) =>
+                    {
+                        ctx.data_mut(|d| d.remove::<bool>(shape_cancelled));
+                        shape_owns = true;
+                        shape_origin = shape_context;
+                        let p = xf.to_doc(pos);
+                        tool_event(app, ToolEvent::Down { x: p[0], y: p[1], pressure: app.stylus.pressure() }, modifiers);
+                    }
+                    egui::Event::PointerMoved(pos) if shape_owns => {
+                        let p = xf.to_doc(pos);
+                        tool_event(app, ToolEvent::Move { x: p[0], y: p[1], pressure: app.stylus.pressure() }, mods);
+                    }
+                    egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers } if shape_owns => {
+                        let p = xf.to_doc(pos);
+                        tool_event(app, ToolEvent::Up { x: p[0], y: p[1] }, modifiers);
+                        shape_owns = false;
+                        // The release was already consumed even when egui also reports a click.
+                        (buttons.started, buttons.dragged, buttons.stopped, buttons.clicked) = (false, false, false, false);
+                    }
+                    _ => {}
+                }
+            }
+            ctx.data_mut(|d| {
+                if let Some(origin) = shape_origin.filter(|_| shape_owns) {
+                    d.insert_temp(shape_gesture, origin);
+                } else {
+                    d.remove::<(Tool, photocraft_doc::DocId)>(shape_gesture);
+                }
+            });
+            if shape_owns {
+                (buttons.started, buttons.dragged, buttons.stopped, buttons.clicked) = (false, false, false, false);
+            }
+        }
+        if ctx.data(|d| d.get_temp::<bool>(shape_cancelled)).unwrap_or(false) {
+            (buttons.started, buttons.dragged, buttons.stopped, buttons.clicked) = (false, false, false, false);
+            if ui.input(|i| !i.pointer.primary_down()) {
+                ctx.data_mut(|d| d.remove::<bool>(shape_cancelled));
             }
         }
         // Right-click while transforming: switch the box's mode (Free Transform, Scale, Rotate,
@@ -3768,7 +3854,9 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         // the moves below are spread between the previous point and this frame (`spread_ms`).
         let now_ms = ui.input(|i| i.time) * 1000.0;
         app.stylus.clock_ms = now_ms;
-        let native_replay = strokes_live(tool) && ctx.viewport_id() == egui::ViewportId::ROOT && native_paint_input(app, &response, &xf, mods, now_ms);
+        let native_replay = (strokes_live(app.ui.tool) || app.stylus.native_active)
+            && ctx.viewport_id() == egui::ViewportId::ROOT
+            && native_paint_input(app, &response, &xf, mods, now_ms);
         if native_replay {
             (buttons.started, buttons.dragged, buttons.stopped, buttons.clicked) = (false, false, false, false);
         }
@@ -5113,6 +5201,10 @@ fn draw_drag_preview(app: &mut PhotocraftApp, painter: &egui::Painter, xf: &View
             }
             trail.draw(painter, doc_rect, xf.flip, col);
         }
+        t if crate::vector_ui::is_shape_tool(t) && (d.modifiers.ctrl || d.modifiers.command) => {
+            let points = [[d.start[0], d.start[1]], [last[0], d.start[1]], last, [d.start[0], last[1]]];
+            crate::tool_feedback::draw_ants(painter, &points.map(|p| xf.to_screen(p[0] as f32, p[1] as f32)), true);
+        }
         t if crate::vector_ui::is_shape_tool(t) => crate::vector_ui::draw_shape_preview(app, painter, xf, t, d.start, last, d.live),
         Tool::SingleRowMarquee | Tool::SingleColumnMarquee => {
             // Mapped corner by corner like the other marquees, so a rotated view shows the line
@@ -5305,7 +5397,11 @@ fn tool_move(app: &mut PhotocraftApp, x: f64, y: f64, pressure: f32, mods: egui:
         d.track(mods);
         // ⇧: straight 0/45/90° strokes, 45° gradient angles (stroke_constraint.rs).
         let last = d.points.last().map_or(d.start, |p| [p[0], p[1]]);
-        let [x, y] = crate::stroke_constraint::constrain(d.tool, &mut d.constrain, d.start, last, [x, y], mods.shift, zoom);
+        let [x, y] = if d.sel_move.is_some() && mods.shift {
+            crate::stroke_constraint::snap45(d.start, [x, y])
+        } else {
+            crate::stroke_constraint::constrain(d.tool, &mut d.constrain, d.start, last, [x, y], mods.shift, zoom)
+        };
         let moved = d.points.last().is_none_or(|p| (p[0] - x).abs() + (p[1] - y).abs() > 0.25);
         let pose = app.stylus.sample().unwrap_or_default();
         let pressure_changed = d.points.last().is_some_and(|p| (p[2] - f64::from(pressure)).abs() > 1.0 / 65535.0);
@@ -5338,13 +5434,15 @@ fn native_paint_input(app: &mut PhotocraftApp, response: &egui::Response, xf: &V
     let owns_press = response.is_pointer_button_down_on() || response.clicked() || response.drag_stopped_by(PointerButton::Primary) || canvas_press;
     let mut handled = app.stylus.native_active || app.stylus.native_handled;
     app.defer_live_stroke = true;
+    let frame_override = app.tool_override;
     for event in events {
+        app.tool_override = app.drag.as_ref().map(|d| d.tool);
         let p = egui::pos2(event.position[0], event.position[1]) / response.ctx.zoom_factor();
         let mods = event.modifiers;
         let raw = xf.to_doc(p);
         let pen = event.sample.is_some() && app.stylus.use_pressure;
         match event.phase {
-            NativePenPhase::Down if owns_press && response.rect.contains(p) && app.drag.is_none() => {
+            NativePenPhase::Down if owns_press && response.rect.contains(p) && app.drag.is_none() && strokes_live(event_tool(app, event.modifiers)) => {
                 handled = true;
                 app.stylus.begin_native(event, now_ms);
                 let point = app.stylus.native_point(event, raw);
@@ -5373,6 +5471,7 @@ fn native_paint_input(app: &mut PhotocraftApp, response: &egui::Response, xf: &V
             _ => {}
         }
     }
+    app.tool_override = app.drag.as_ref().map(|d| d.tool);
     if handled && app.stylus.native_active && stroke_wants_time(app) {
         app.stylus.clock_ms = now_ms.max(app.stylus.last_point_ms().unwrap_or(now_ms));
         if let Some(last) = app.drag.as_ref().and_then(|d| d.points.last()).copied() {
@@ -5380,6 +5479,7 @@ fn native_paint_input(app: &mut PhotocraftApp, response: &egui::Response, xf: &V
         }
         response.ctx.request_repaint_after(std::time::Duration::from_millis(HOLD_REPEAT_MS as u64));
     }
+    app.tool_override = frame_override;
     app.defer_live_stroke = false;
     app.stylus.native_handled = handled;
     if handled {
@@ -5405,6 +5505,43 @@ fn finish_native_stroke(app: &mut PhotocraftApp, mods: egui::Modifiers) {
     app.stylus.end_native();
 }
 
+fn shape_selection_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
+    use crate::vector_ui::ComponentSelectMode;
+    let selecting = app.drag.as_ref().is_some_and(|d| crate::vector_ui::is_shape_tool(d.tool) && (d.modifiers.ctrl || d.modifiers.command));
+    if selecting && !matches!(ev, ToolEvent::Down { .. }) {
+        match ev {
+            ToolEvent::Move { x, y, pressure } => {
+                if let Some(d) = app.drag.as_mut() {
+                    d.points.push([x, y, f64::from(pressure)]);
+                }
+            }
+            ToolEvent::Up { x, y } => {
+                if let Some(d) = app.drag.take() {
+                    let mut points = d.points;
+                    points.push([x, y, 1.0]);
+                    if crate::shape_dialog::is_click(d.start, &points, app.point_zoom()) {
+                        crate::vector_ui::select_component_at(app, d.start, 6.0 / f64::from(app.point_zoom().max(0.01)), ComponentSelectMode::Toggle);
+                    } else {
+                        crate::vector_ui::select_components_in_rect(app, d.start, [x, y], ComponentSelectMode::Add);
+                    }
+                }
+            }
+            _ => {}
+        }
+        return true;
+    }
+    if let ToolEvent::Down { x, y, pressure } = ev
+        && crate::vector_ui::is_shape_tool(app.active_tool())
+        && app.ui.transform.is_none()
+        && (mods.command || mods.ctrl)
+    {
+        app.ui.corner_radius = None;
+        app.drag = Some(Drag::new(app.active_tool(), [x, y], vec![[x, y, f64::from(pressure)]], mods, false));
+        return true;
+    }
+    false
+}
+
 /// Tool state machine. Shared by mouse input and automation.
 pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) {
     // A press anywhere but on a guide deselects the selected guide (`guide_select`).
@@ -5422,6 +5559,9 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     let armed = std::mem::take(&mut app.brush_resize_armed);
     crate::transform_tool::end_if_left(app);
     let mods = crate::workspace_ui::sticky_mods(app, mods);
+    if shape_selection_event(app, ev, mods) {
+        return;
+    }
     if app.ui.transform.is_none() && crate::type_transform::pointer(app, ev, mods) {
         return;
     }
@@ -5818,12 +5958,17 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             }
             let zoom = app.point_zoom();
             let Some(mut d) = app.drag.take() else { return };
+            let axis_lock = d.sel_move.is_some() && mods.shift;
             d.track(mods);
             if d.reposition {
                 d.shift_to([x, y]);
             }
             let last = d.points.last().map_or(d.start, |p| [p[0], p[1]]);
-            let [x, y] = crate::stroke_constraint::constrain(d.tool, &mut d.constrain, d.start, last, [x, y], mods.shift, zoom);
+            let [x, y] = if axis_lock {
+                crate::stroke_constraint::snap45(d.start, [x, y])
+            } else {
+                crate::stroke_constraint::constrain(d.tool, &mut d.constrain, d.start, last, [x, y], mods.shift, zoom)
+            };
             // A Move-tool click (released where it was pressed) selects, it never moves: snapping
             // the release point would otherwise nudge the layer onto a nearby edge.
             if d.tool == Tool::Move && d.points.len() < 2 && matches!(raw, ToolEvent::Up { x, y } if [x, y] == d.start) {
@@ -6105,11 +6250,25 @@ pub(crate) fn finish_gesture(app: &mut PhotocraftApp, d: Drag) {
     match d.tool {
         Tool::ObjectSelection => crate::retouch_ui::finish_object_selection(app, d.start, [end[0], end[1]], d.modifiers),
         Tool::FreeformPen => crate::vector_ui::freeform_finish(app, &d.points, d.lasso.as_ref().map_or(&[], |l| l.straight())),
-        // Photoshop: a click without dragging opens Create Rectangle / Ellipse / … instead.
+        t if crate::vector_ui::is_shape_tool(t) && d.modifiers.alt && crate::shape_dialog::is_click(d.start, &d.points, app.point_zoom()) => {
+            if let Some([r, g, b]) = eyedropper_color(app, end[0], end[1]) {
+                let _ = app.run("tools.setColors", json!({"foreground": [r, g, b, 1.0]}));
+            }
+        }
+        t if crate::vector_ui::is_shape_tool(t)
+            && !d.modifiers.shift
+            && crate::shape_dialog::is_click(d.start, &d.points, app.point_zoom())
+            && crate::vector_ui::select_component_at(
+                app,
+                d.start,
+                6.0 / f64::from(app.point_zoom().max(0.01)),
+                crate::vector_ui::ComponentSelectMode::Replace,
+            ) => {}
+        // A click in empty space retains the numeric creation dialog.
         t if crate::vector_ui::is_shape_tool(t)
             && crate::shape_dialog::is_click(d.start, &d.points, app.point_zoom())
-            && crate::shape_dialog::open(app, t, d.start).is_some() => {}
-        t if crate::vector_ui::is_shape_tool(t) => crate::vector_ui::finish_shape(app, t, d.start, [end[0], end[1]], d.live),
+            && crate::shape_dialog::open(app, t, d.start, d.modifiers.shift).is_some() => {}
+        t if crate::vector_ui::is_shape_tool(t) => crate::vector_ui::finish_shape(app, t, d.start, [end[0], end[1]], d.live, d.modifiers.shift),
         Tool::PathSelection => crate::vector_ui::path_selection_finish(app, d.start, [end[0], end[1]]),
         Tool::Type | Tool::VerticalType | Tool::HorizontalTypeMask | Tool::VerticalTypeMask => crate::type_tool::pointer_up(app, d.start, [end[0], end[1]]),
         Tool::Brush | Tool::Pencil | Tool::Eraser => commit_brush_stroke(app, &d),
@@ -6179,7 +6338,7 @@ pub fn extra_windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let Some(st) = app.session.documents().get(w.document) else { continue };
         let title = format!("{} — window {}", st.doc.name, w.id);
         let vid = egui::ViewportId::from_hash_of(("docwin", w.id));
-        let mut builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([800.0, 600.0]);
+        let mut builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([640.0, 480.0]);
         if let Some([x, y]) = w.position {
             builder = builder.with_position([x, y]);
         }
@@ -7961,7 +8120,7 @@ mod tests {
         let ctx = egui::Context::default();
         app.run("file.new", json!({"width": 200, "height": 80, "background": "transparent"})).unwrap();
         app.run("tools.setBrush", json!({"brush": {"size": 16, "hardness": 0.5}})).unwrap();
-        // What the options bar's Smoothing field writes.
+        // A legacy amount loaded from a saved brush.
         app.session.tools.brush.smoothing.amount = smoothing;
         app.ui.tool = Tool::Brush;
         ensure_texture(&mut app, &ctx, 0, None);
@@ -8019,18 +8178,17 @@ mod tests {
     }
 
     #[test]
-    fn smoothed_stroke_shows_its_catch_up_tail_while_drawing() {
-        // #73: with smoothing the brush lags behind the pointer and catches up at the end; the
-        // preview draws that tail live, so no frame after release is missing the end.
+    fn legacy_smoothing_does_not_change_live_or_committed_strokes() {
+        // Old saved smoothing amounts must not add a hidden filter when the UI has none.
         let xs = [30.0, 50.0, 70.0, 90.0, 110.0, 130.0, 150.0, 170.0];
         let (live, done, partial, _) = drag_frames(0.5, &xs);
         assert!(same_pixels(&live, &done), "preview at the last move = committed stroke, tail included");
         assert!(partial);
         let end = |d: &Document| (0..200).rev().find(|&x| (0..80).any(|y| d.layers[0].surface().unwrap().rgba(x, y)[3] > 0.0)).unwrap();
         assert!(end(&live) >= 170, "the end reaches the pointer while drawing ({})", end(&live));
-        // The options-bar value reaches the stroke: 50 % smooths the wiggle, 0 % doesn't.
+        // Legacy 50 % and zero both follow the input points.
         let (_, rough, _, _) = drag_frames(0.0, &xs);
-        assert!(!same_pixels(&rough, &done), "smoothing changes the stroke");
+        assert!(same_pixels(&rough, &done), "legacy smoothing is inert");
         // And the commit is what `paint.stroke` gives with that smoothing.
         let mut s = photocraft_engine::Session::new();
         s.execute("file.new", json!({"width": 200, "height": 80, "background": "transparent"})).unwrap();
@@ -8043,12 +8201,12 @@ mod tests {
     }
 
     #[test]
-    fn smoothing_preview_redraws_the_tail_each_step() {
+    fn pulled_string_preview_redraws_the_tail_each_step() {
         // The tail drawn at one step must not linger once the brush moves on: a sharp turn would
         // leave a stale tail behind if it weren't restored.
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 200, "height": 120, "background": "transparent"})).unwrap();
-        app.run("tools.setBrush", json!({"brush": {"size": 10, "hardness": 1.0, "smoothing": {"amount": 0.6}}})).unwrap();
+        app.run("tools.setBrush", json!({"brush": {"size": 10, "hardness": 1.0, "smoothing": {"amount": 0.6, "pulledString": true}}})).unwrap();
         app.ui.tool = Tool::Brush;
         let m = egui::Modifiers::NONE;
         tool_event(&mut app, ToolEvent::Down { x: 10.0, y: 20.0, pressure: 1.0 }, m);
@@ -8330,15 +8488,15 @@ mod tests {
     }
 
     #[test]
-    fn smoothed_brush_drag_draws_the_string_from_brush_to_pointer() {
+    fn only_explicit_pulled_string_draws_a_brush_tether() {
         // #3479: with smoothing the brush lags behind the pointer; a line joins them while drawing.
         let ctx = egui::Context::default();
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 120, "height": 60})).unwrap();
         app.ui.tool = Tool::Brush;
         let lines = |app: &mut PhotocraftApp| drag_preview_shapes(app, &ctx, 4.0).iter().filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. })).count();
-        for (amount, string) in [(0.0, false), (0.8, true)] {
-            app.run("tools.setBrush", json!({"brush": {"size": 10, "smoothing": {"amount": amount}}})).unwrap();
+        for (amount, rope, string) in [(0.0, false, false), (0.8, false, false), (0.8, true, true)] {
+            app.run("tools.setBrush", json!({"brush": {"size": 10, "smoothing": {"amount": amount, "pulledString": rope}}})).unwrap();
             tool_event(&mut app, ToolEvent::Down { x: 10.0, y: 30.0, pressure: 1.0 }, egui::Modifiers::NONE);
             for x in [30.0, 60.0, 90.0] {
                 tool_event(&mut app, ToolEvent::Move { x, y: 30.0, pressure: 1.0 }, egui::Modifiers::NONE);

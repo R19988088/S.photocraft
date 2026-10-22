@@ -13,8 +13,8 @@ use crate::state::Tool;
 
 /// The brush is a tool option, kept per tool like Photoshop's options bar: switching from the
 /// Brush to the Eraser saves the session brush for the old tool and loads the new tool's, so each
-/// keeps its own size, hardness, mode, opacity, dynamics and smoothing. A tool seen for the
-/// first time takes what the brush already has, at Photoshop's 10 % smoothing. Other tools leave
+/// keeps its own size, hardness, mode, opacity and dynamics. A tool seen for the
+/// first time takes what the brush already has. Other tools leave
 /// the brush alone.
 ///
 /// The foreground and background colours, the erase flag and the stroke seed belong to the
@@ -31,8 +31,8 @@ pub fn sync_tool_brush(app: &mut PhotocraftApp) {
     save_brush(app, app.ui.brush_tool, current.clone());
     app.session.tools.brush = match app.ui.tool_brushes.iter().find(|(t, _)| *t == tool) {
         Some((_, b)) => session_fields(&current, b),
-        // A tool seen for the first time takes what the brush has, at Photoshop's smoothing.
-        None => BrushSettings { smoothing: first_smoothing(), ..current },
+        // A new tool inherits the current brush without injecting independent smoothing.
+        None => current,
     };
     // The picked preset was the outgoing tool's brush: forget it, so Update Brush can't overwrite
     // that preset with this tool's brush.
@@ -63,15 +63,9 @@ fn session_fields(current: &BrushSettings, brush: &BrushSettings) -> BrushSettin
     }
 }
 
-/// A tool's brush as it starts out (Reset Tool, #2825): the default brush at Photoshop's
-/// smoothing, with the session's own fields of `current`.
+/// A tool's default brush with the session's own fields of `current`.
 pub(crate) fn fresh_brush(current: &BrushSettings) -> BrushSettings {
-    session_fields(current, &BrushSettings { smoothing: first_smoothing(), ..BrushSettings::default() })
-}
-
-/// Photoshop's 10 % stroke smoothing, what a tool's brush starts at.
-fn first_smoothing() -> photocraft_engine::paint::brush::Smoothing {
-    photocraft_engine::paint::brush::Smoothing { amount: 0.1, ..Default::default() }
+    session_fields(current, &BrushSettings::default())
 }
 
 /// Does a stroke with `tool` starting now paint in Photoshop's Clear mode, erasing with its own
@@ -556,20 +550,23 @@ mod tests {
         let amount = |app: &PhotocraftApp| app.session.tools.brush.smoothing.amount;
         app.ui.tool = Tool::Brush;
         sync_tool_brush(&mut app);
-        assert_eq!(amount(&app), 0.1, "Photoshop's default");
-        // Picking a preset (whose own smoothing is 0) keeps the tool's smoothing.
+        assert_eq!(amount(&app), 0.0, "switching tools never injects smoothing");
+        let reset = fresh_brush(&app.session.tools.brush);
+        assert_eq!(reset.smoothing.amount, 0.0, "Reset Tool never injects smoothing");
+        assert!(!reset.smoothing.pulled_string);
+        // Picking a preset leaves the tool's explicit rope settings unchanged.
         let preset = app.session.tools.presets.iter().find(|p| p.brush.smoothing.amount == 0.0).map(|p| p.name.clone()).unwrap();
         app.run("tools.setBrush", json!({"preset": preset})).unwrap();
-        assert_eq!(amount(&app), 0.1);
-        // A user value (the options-bar field) survives a preset too, mode included.
+        assert_eq!(amount(&app), 0.0);
+        // Explicit pulled-string settings survive a preset.
         app.session.tools.brush.smoothing.amount = 0.42;
         app.session.tools.brush.smoothing.pulled_string = true;
         app.run("tools.setBrush", json!({"preset": preset})).unwrap();
         assert_eq!((amount(&app), app.session.tools.brush.smoothing.pulled_string), (0.42, true));
-        // The Eraser has its own (10 % at first); switching back restores the Brush's.
+        // A new Eraser inherits the explicit rope; switching back restores the Brush's.
         app.ui.tool = Tool::Eraser;
         sync_tool_brush(&mut app);
-        assert_eq!(amount(&app), 0.1);
+        assert_eq!(amount(&app), 0.42);
         app.session.tools.brush.smoothing.amount = 0.0;
         app.ui.tool = Tool::Brush;
         sync_tool_brush(&mut app);
@@ -602,8 +599,7 @@ mod tests {
         app.run("tools.setBrush", json!({"brush": {"size": 40, "hardness": 0.2, "opacity": 0.7, "mode": "Multiply"}})).unwrap();
         assert_eq!(size(&brush(&app)), 40.0);
 
-        // A tool seen for the first time starts from the brush the old tool left (Photoshop's
-        // 10 % smoothing), so nothing is lost by switching.
+        // A new tool inherits the previous brush, including explicit rope settings.
         app.ui.tool = Tool::Eraser;
         sync_tool_brush(&mut app);
         assert_eq!(size(&brush(&app)), 40.0, "a new tool inherits the current brush");

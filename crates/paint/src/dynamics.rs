@@ -12,8 +12,6 @@ use crate::{Dab, StrokePoint};
 
 /// Maximum pulled-string length at 100 % smoothing, in screen pixels.
 pub const MAX_STRING_PX: f64 = 100.0;
-/// Stroke time over which exponential smoothing moves its fraction of the way to the pointer.
-pub const SMOOTHING_STEP_MS: f64 = 16.0;
 
 /// With Spacing unchecked, one dab per this many milliseconds of stroke time, so faster strokes
 /// space their dabs further apart (Photoshop: "the speed of the cursor determines the spacing").
@@ -78,7 +76,7 @@ fn pull(brush: &StrokePoint, p: &StrokePoint, f: f64) -> StrokePoint {
     }
 }
 
-/// Incremental stroke smoothing: exponential (with optional time-based catch-up) or pulled string.
+/// Incremental pulled-string stroke control.
 #[derive(Clone, Debug)]
 pub struct Smoother {
     cfg: Smoothing,
@@ -94,12 +92,12 @@ impl Smoother {
     }
 
     fn active(&self) -> bool {
-        self.cfg.enabled && self.cfg.amount > 0.0
+        self.cfg.enabled && self.cfg.pulled_string && self.cfg.amount > 0.0
     }
 
     /// Feed one input point; returns the brush positions to paint through.
     pub fn push(&mut self, p: StrokePoint, out: &mut Vec<StrokePoint>) {
-        let prev_input = self.last_input.replace(p);
+        self.last_input = Some(p);
         if !self.active() {
             out.push(p);
             return;
@@ -110,53 +108,16 @@ impl Smoother {
             return;
         };
         let amount = f64::from(self.cfg.amount.clamp(0.0, 1.0));
-        if self.cfg.pulled_string {
-            let mut len = amount * MAX_STRING_PX;
-            if self.cfg.adjust_for_zoom {
-                len /= self.zoom;
-            }
-            let (dx, dy) = (p.x - pos.x, p.y - pos.y);
-            let d = (dx * dx + dy * dy).sqrt();
-            if d > len {
-                let k = (d - len) / d;
-                let np = pull(&pos, &p, k);
-                self.pos = Some(np);
-                out.push(np);
-            }
-            return;
+        let mut len = amount * MAX_STRING_PX;
+        if self.cfg.adjust_for_zoom {
+            len /= self.zoom;
         }
-        // Exponential: every SMOOTHING_STEP_MS of stroke time moves `a` of the way towards the
-        // pointer, so the feel doesn't depend on how often the device reports. Input without
-        // timestamps takes one step per point.
-        let a = 1.0 - amount.min(0.95);
-        let dt = prev_input.map_or(0.0, |q| p.time - q.time);
-        let still = prev_input.is_some_and(|q| q.x == p.x && q.y == p.y);
-        if still && !self.cfg.catch_up {
-            // Without Stroke Catch-Up the brush stops while the pointer pauses (Photoshop).
-            return;
-        }
-        let (iters, step) = if dt > 0.0 && dt.is_finite() {
-            let steps = dt / SMOOTHING_STEP_MS;
-            let iters = steps.ceil().clamp(1.0, 64.0);
-            // Each of `iters` moves covers `steps / iters` steps' worth of pull.
-            (iters as usize, 1.0 - (1.0 - a).powf(steps.min(64.0) / iters))
-        } else {
-            (1, a)
-        };
-        let mut cur = pos;
-        for _ in 0..iters {
-            cur = pull(&cur, &p, step);
-            out.push(cur);
-        }
-        self.pos = Some(cur);
-    }
-
-    /// Is Stroke Catch-Up still pulling the brush towards a pointer that has stopped? Then the
-    /// stroke needs time to keep passing (repeats of the last point) while the pointer is held.
-    pub fn lagging(&self) -> bool {
-        match (self.active() && self.cfg.catch_up && !self.cfg.pulled_string, self.pos, self.last_input) {
-            (true, Some(pos), Some(last)) => (pos.x - last.x).abs() + (pos.y - last.y).abs() > 0.01,
-            _ => false,
+        let (dx, dy) = (p.x - pos.x, p.y - pos.y);
+        let d = (dx * dx + dy * dy).sqrt();
+        if d > len {
+            let np = pull(&pos, &p, (d - len) / d);
+            self.pos = Some(np);
+            out.push(np);
         }
     }
 
@@ -980,10 +941,9 @@ pub struct DabGenerator {
 }
 
 impl DabGenerator {
-    /// Does the stroke change with time while the pointer is held still (airbrush Build-up, or
-    /// smoothing still catching up)? The canvas then keeps feeding it the held point.
+    /// Does airbrush Build-up need time while the pointer is held still?
     pub fn wants_time(&self) -> bool {
-        self.walker.interval.is_some() || self.smoother.lagging() || self.dual_smoother.as_ref().is_some_and(Smoother::lagging)
+        self.walker.interval.is_some()
     }
 
     /// See [`Smoother::string`].

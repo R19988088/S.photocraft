@@ -444,7 +444,7 @@ fn perf_6016() {
             photocraft_geom::Point::new(x + d * t.sin(), y - d * t.cos()),
         ));
     }
-    let mut path = Path::new(vec![Subpath { closed: true, knots, op: PathOp::Combine }]);
+    let mut path = Path::new(vec![Subpath { style: None, closed: true, knots, op: PathOp::Combine }]);
     path.subpaths.push(shapes::ellipse(2000.0, 2000.0, 2016.0, 2016.0).subpaths.remove(0).with_op(PathOp::Exclude));
     let sh = ShapeLayer {
         path: path.clone(),
@@ -535,6 +535,7 @@ fn curved_shape_bounds_are_exact() {
     let p = |x: f64, y: f64| photocraft_geom::Point::new(x, y);
     // An asymmetric Bézier blob whose extremes lie on its anchors (axis-parallel handles).
     let blob = Path::new(vec![Subpath {
+        style: None,
         closed: true,
         knots: vec![
             photocraft_doc::Knot::smooth(p(60.0, 0.0), p(30.0, 0.0), p(80.0, 0.0)),
@@ -569,4 +570,26 @@ fn thin_antialiased_edges_still_count_toward_bounds() {
     let r = fill_rasterizer(&shapes::rect(0.0, 0.0, 100.0001, 10.0), DEFAULT_TOLERANCE);
     let c = r.render(Rect::new(0, 0, 102, 10));
     assert!(c[100] > 5e-5 && c[101] == 0.0, "{} {}", c[100], c[101]);
+}
+
+#[test]
+fn component_fill_regions_preserve_boolean_coverage_and_joined_holes() {
+    for op in [PathOp::Combine, PathOp::Subtract, PathOp::Intersect, PathOp::Exclude] {
+        let mut path = shapes::rect(2.25, 3.5, 20.0, 20.0);
+        let mut hole = shapes::rect(6.0, 7.0, 4.0, 4.0).subpaths.remove(0);
+        hole.op = PathOp::Join;
+        path.fill_rule = FillRule::EvenOdd;
+        path.subpaths.push(hole);
+        let mut other = shapes::rect(14.5, 4.75, 20.0, 20.0).subpaths.remove(0);
+        other.op = op;
+        path.subpaths.push(other);
+        let bounds = Rect::new(0, 0, 40, 30);
+        let expected = path_coverage(&path, bounds);
+        path.subpaths[2].style = Some(photocraft_doc::vector::ComponentStyle { fill: Some(Fill::Solid(Color::rgba(0.0, 0.0, 1.0, 1.0))) });
+        let shape = ShapeLayer { path, fill: Some(Fill::Solid(Color::rgba(1.0, 0.0, 0.0, 1.0))), ..Default::default() };
+        let pixels = CompiledShape::new(&shape, 0.1, bounds).render_rgba(bounds);
+        for (p, c) in pixels.iter().zip(expected) {
+            assert!((p[3] - c).abs() < 1e-5, "{op:?}: {p:?} vs {c}");
+        }
+    }
 }

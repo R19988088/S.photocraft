@@ -1,6 +1,6 @@
 # Shape stroke options
 
-Updated 2026-10-11: direct editing, compact layout, and clickable colour/style controls.
+Updated 2026-10-22: component selection, independent fills, and held modifier keys.
 
 PhotoCraft's Shape tool options bar has a Stroke Options button beside the existing width
 and colour controls. It sets defaults for new Rectangle, Ellipse, Triangle, Polygon, Line
@@ -13,7 +13,25 @@ a colour preserves its alpha; No Color removes the corresponding paint. Tool-bar
 the foreground colour and stroke uses the background colour, as before. Choosing a stroke
 colour or style deliberately enables a 3 px stroke when no stroke is present. The style button
 remains available with no stroke, but opening or dismissing it alone does not enable one.
-Properties edits the selected shape; the options bar continues to set defaults for new shapes.
+Properties and the options bar edit the selected shape; the options bar also sets defaults for new shapes.
+
+## Selecting shapes
+
+Click an existing shape to select only that component. Hold Ctrl or Command and click to
+add or remove one component; releasing the key leaves no temporary mode. Hold Ctrl or Command
+before pressing and drag a box to add intersecting shapes, including components on different
+layers. Hold Shift at the start of a creation drag to append to the active shape.
+Pressing Shift after an ordinary creation drag starts still constrains its proportions.
+
+Fill controls edit only the selected components. Differing fills show Mixed; a colour change
+across selected layers is one undo step. Deselecting the final component clears the object
+editing target. Clicking empty space keeps the numeric creation dialog; ordinary drags create
+shapes even when they start over an existing shape. Alt-click still samples colour.
+
+The Modifier Keys panel's Command button works only while pressed. Saved sticky Command
+state is ignored. Shift and Alt buttons retain their existing toggle behaviour.
+
+## Stroke controls
 
 The editor offers Solid, Dashed (4 widths on, 2 off), Dotted (zero-length dashes with round
 caps, spaced every 2 widths), and custom repeating dash/gap sequences. Dash lengths and
