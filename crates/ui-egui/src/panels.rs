@@ -17,24 +17,32 @@ use crate::{PhotocraftApp, icons, widgets};
 /// shows the group's last-used tool.
 const TOOL_SECTIONS: &[&[&[Tool]]] = &[
     // Core paint tools stay pinned at the top and cannot be hidden or reordered.
-    &[&[Tool::Brush], &[Tool::Eraser], &[Tool::Smudge], &[Tool::Liquify]],
+    &[&[Tool::Brush, Tool::Pencil], &[Tool::Eraser], &[Tool::Smudge], &[Tool::Liquify, Tool::Blur, Tool::Sharpen]],
     &[&[Tool::Move, Tool::Artboard]],
     &[
-        &[Tool::RectMarquee, Tool::EllipseMarquee, Tool::SingleRowMarquee, Tool::SingleColumnMarquee],
-        &[Tool::Lasso, Tool::PolygonLasso, Tool::MagneticLasso],
-        &[Tool::ObjectSelection, Tool::QuickSelection, Tool::MagicWand],
+        &[
+            Tool::RectMarquee,
+            Tool::EllipseMarquee,
+            Tool::SingleRowMarquee,
+            Tool::SingleColumnMarquee,
+            Tool::Lasso,
+            Tool::PolygonLasso,
+            Tool::MagneticLasso,
+            Tool::ObjectSelection,
+            Tool::QuickSelection,
+            Tool::MagicWand,
+        ],
         &[Tool::Crop, Tool::PerspectiveCrop, Tool::Slice, Tool::SliceSelect],
         &[Tool::Frame],
         &[Tool::Eyedropper, Tool::ColorSampler, Tool::Ruler, Tool::Note, Tool::Count],
     ],
     &[
         &[Tool::Remove, Tool::SpotHealing, Tool::Healing, Tool::Patch, Tool::ContentAwareMove, Tool::RedEye],
-        &[Tool::Pencil, Tool::ColorReplacement],
+        &[Tool::ColorReplacement],
         &[Tool::CloneStamp, Tool::PatternStamp],
         &[Tool::HistoryBrush],
         &[Tool::BackgroundEraser, Tool::MagicEraser],
         &[Tool::Gradient, Tool::PaintBucket],
-        &[Tool::Blur, Tool::Sharpen],
         &[Tool::Dodge, Tool::Burn, Tool::Sponge],
     ],
     &[
@@ -67,7 +75,12 @@ fn visible_sections(hidden: &[String]) -> Vec<Vec<(usize, Vec<Tool>)>> {
     for (section_index, section) in TOOL_SECTIONS.iter().enumerate() {
         let mut slots = Vec::new();
         for slot in section.iter() {
-            let tools: Vec<Tool> = slot.iter().copied().filter(|tool| section_index == 0 || !hidden.contains(tool)).collect();
+            let tools: Vec<Tool> = slot
+                .iter()
+                .copied()
+                .filter(|tool| !matches!(tool, Tool::SingleRowMarquee | Tool::SingleColumnMarquee))
+                .filter(|tool| section_index == 0 || !hidden.contains(tool))
+                .collect();
             if !tools.is_empty() {
                 slots.push((index, tools));
             }
@@ -977,27 +990,63 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     crate::chrome_ui::home_button(app, ui);
                     widgets::vline(ui, 22.0);
                 }
-                let tool_icon = icons::button(ui, icons::tool_icon(app.ui.tool), if t.pro { 26.0 } else { 28.0 }, !t.pro, tl!(app.ui.tool.label()));
-                // Photoshop: right-click the tool icon for Reset Tool / Reset All Tools (#2825).
-                let mut reset = None;
-                tool_icon.context_menu(|ui| {
-                    if ui.button(tl!("Reset Tool")).clicked() {
-                        reset = Some("tool.reset");
-                        ui.close();
+                // Secondary tools are always visible here, so choosing Brush/Pencil,
+                // selection modes, retouch modes, liquify modes, or shapes is one click.
+                let direct_group = TOOL_SECTIONS
+                    .iter()
+                    .flat_map(|section| section.iter())
+                    .find(|slot| slot.len() > 1 && slot.contains(&app.ui.tool));
+                if let Some(slot) = direct_group {
+                    for &candidate in *slot {
+                        if matches!(candidate, Tool::SingleRowMarquee | Tool::SingleColumnMarquee) {
+                            continue;
+                        }
+                        let response = icons::button(ui, icons::tool_icon(candidate), if t.pro { 26.0 } else { 28.0 }, candidate == app.ui.tool, tl!(candidate.label()));
+                        if response.clicked() && candidate != app.ui.tool {
+                            crate::tool_memory::select(app, candidate);
+                        }
+                        if candidate == app.ui.tool {
+                            let mut reset = None;
+                            response.context_menu(|ui| {
+                                if ui.button(tl!("Reset Tool")).clicked() {
+                                    reset = Some("tool.reset");
+                                    ui.close();
+                                }
+                                if ui.button(tl!("Reset All Tools")).clicked() {
+                                    reset = Some("tool.resetAll");
+                                    ui.close();
+                                }
+                            });
+                            if let Some(id) = reset
+                                && let Err(e) = crate::menus::invoke(app, ui.ctx(), id, json!({}))
+                            {
+                                app.ui.status = e;
+                            }
+                        }
                     }
-                    if ui.button(tl!("Reset All Tools")).clicked() {
-                        reset = Some("tool.resetAll");
-                        ui.close();
+                } else {
+                    let tool_icon = icons::button(ui, icons::tool_icon(app.ui.tool), if t.pro { 26.0 } else { 28.0 }, !t.pro, tl!(app.ui.tool.label()));
+                    // Photoshop: right-click the tool icon for Reset Tool / Reset All Tools (#2825).
+                    let mut reset = None;
+                    tool_icon.context_menu(|ui| {
+                        if ui.button(tl!("Reset Tool")).clicked() {
+                            reset = Some("tool.reset");
+                            ui.close();
+                        }
+                        if ui.button(tl!("Reset All Tools")).clicked() {
+                            reset = Some("tool.resetAll");
+                            ui.close();
+                        }
+                    });
+                    if let Some(id) = reset
+                        && let Err(e) = crate::menus::invoke(app, ui.ctx(), id, json!({}))
+                    {
+                        app.ui.status = e;
                     }
-                });
-                if let Some(id) = reset
-                    && let Err(e) = crate::menus::invoke(app, ui.ctx(), id, json!({}))
-                {
-                    app.ui.status = e;
-                }
-                if t.pro {
-                    let (r, _) = ui.allocate_exact_size(vec2(10.0, 20.0), Sense::hover());
-                    icons::paint(ui, r, "chevron-down", 10.0, t.text_faint);
+                    if t.pro {
+                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 20.0), Sense::hover());
+                        icons::paint(ui, r, "chevron-down", 10.0, t.text_faint);
+                    }
                 }
                 widgets::vline(ui, 22.0);
                 if app.ui.transform.is_some() {
@@ -5579,7 +5628,7 @@ mod toolbar_hidden_tests {
         let all = tool_buttons(&mut app);
         let slots: usize = TOOL_SECTIONS.iter().map(|section| section.len()).sum();
         hide(&mut app, &Tool::ALL);
-        assert_eq!(tool_buttons(&mut app), all - slots + 4, "the four pinned tools stay when every other tool is hidden");
+        assert_eq!(tool_buttons(&mut app), all - slots + 4, "the four pinned slots stay when every other tool is hidden");
         hide(&mut app, &[Tool::Brush, Tool::Pencil, Tool::ColorReplacement]);
         assert_eq!(tool_buttons(&mut app), all - 1, "a non-pinned slot whose tools are all hidden is gone");
         hide(&mut app, &[Tool::Sponge]);
@@ -5595,8 +5644,17 @@ mod toolbar_hidden_tests {
                 .iter()
                 .skip(1)
                 .flatten()
-                .all(|(_, tools)| !tools.iter().any(|tool| matches!(tool, Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Liquify)))
+                .all(|(_, tools)| !tools.iter().any(|tool| matches!(tool, Tool::Brush | Tool::Eraser | Tool::Smudge)))
         );
+    }
+
+    #[test]
+    fn liquify_blur_and_sharpen_share_one_flyout() {
+        let slot = TOOL_SECTIONS.iter().flat_map(|section| section.iter()).find(|slot| slot.contains(&Tool::Liquify));
+        assert_eq!(slot.copied(), Some(&[Tool::Liquify, Tool::Blur, Tool::Sharpen][..]));
+        assert_eq!(TOOL_SECTIONS.iter().flat_map(|section| section.iter()).position(|slot| slot.contains(&Tool::Liquify)), Some(3));
+        assert_eq!(crate::icons::tool_icon(Tool::Liquify), "droplet");
+        assert_eq!(crate::icons::tool_icon(Tool::Blur), "scan");
     }
 
     #[test]

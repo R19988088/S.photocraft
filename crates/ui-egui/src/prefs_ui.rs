@@ -2336,11 +2336,37 @@ fn save_text(app: &mut PhotocraftApp, suggested: &str, text: String) -> Result<V
 
 fn toolbar_tab(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let mut hidden: Vec<String> = f.get("toolbarHidden").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    const SELECTION_TOOLS: &[crate::state::Tool] = &[
+        crate::state::Tool::RectMarquee,
+        crate::state::Tool::EllipseMarquee,
+        crate::state::Tool::SingleRowMarquee,
+        crate::state::Tool::SingleColumnMarquee,
+        crate::state::Tool::Lasso,
+        crate::state::Tool::PolygonLasso,
+        crate::state::Tool::MagneticLasso,
+        crate::state::Tool::ObjectSelection,
+        crate::state::Tool::QuickSelection,
+        crate::state::Tool::MagicWand,
+    ];
     egui::ScrollArea::vertical().max_height(380.0).id_salt("toolbar-scroll").show(ui, |ui| {
         egui::Grid::new("toolbar-grid").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+            let mut selection_on = SELECTION_TOOLS.iter().all(|tool| !hidden.contains(&format!("{tool:?}")));
+            crate::widgets::checkbox(ui, &mut selection_on, tl!("Selection"));
+            for tool in SELECTION_TOOLS {
+                let name = format!("{tool:?}");
+                if selection_on {
+                    hidden.retain(|h| h != &name);
+                } else if !hidden.contains(&name) {
+                    hidden.push(name);
+                }
+            }
+            ui.label("S");
+            ui.end_row();
             for tool in crate::state::Tool::ALL {
-                // Brush, Eraser, Smudge and Liquify are permanently pinned in the toolbar.
-                if matches!(tool, crate::state::Tool::Brush | crate::state::Tool::Eraser | crate::state::Tool::Smudge | crate::state::Tool::Liquify) {
+                // Brush, Pencil, Eraser and Smudge are permanently pinned in the toolbar.
+                if matches!(tool, crate::state::Tool::Brush | crate::state::Tool::Pencil | crate::state::Tool::Eraser | crate::state::Tool::Smudge | crate::state::Tool::Liquify | crate::state::Tool::Blur | crate::state::Tool::Sharpen)
+                    || SELECTION_TOOLS.contains(&tool)
+                {
                     continue;
                 }
                 let name = format!("{tool:?}");
