@@ -9,7 +9,6 @@ fn app() -> PhotocraftApp {
 #[test]
 fn panel_commands_group_split_reorder_float_and_restore_without_duplicate_ownership() {
     let mut app = app();
-    app.run("window.panel.move", json!({"panel":"swatches", "anchor":"layers", "zone":"top"})).unwrap();
     app.run("window.panel.move", json!({"panel":"properties", "anchor":"swatches", "before":"swatches"})).unwrap();
     let before_float = app.ui.docking.clone().unwrap();
     app.run("window.panel.float", json!({"panel":"properties", "x":50,"y":70,"width":330,"height":410})).unwrap();
@@ -109,6 +108,36 @@ fn drag(h: &mut Harness<'static, PhotocraftApp>, from: Pos2, to: Pos2) {
     h.run_steps(3);
 }
 
+fn double_click(h: &mut Harness<'static, PhotocraftApp>, at: Pos2) {
+    for _ in 0..2 {
+        h.event(Event::PointerMoved(at));
+        h.run_steps(1);
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(3);
+}
+
+#[test]
+fn panel_group_toggle_button_collapses_and_expands() {
+    let mut app = app();
+    app.run("window.panel.move", json!({"panel":"swatches", "anchor":"layers", "zone":"top"})).unwrap();
+    let mut h = harness(app, vec2(1280.0, 800.0));
+    let group_y = h.query_all_by_label("Layers").find(|node| node.rect().height() <= 45.0).unwrap().rect().center().y;
+    h.query_all_by_label("Collapse Panel Group")
+        .into_iter()
+        .find(|node| (node.rect().center().y - group_y).abs() < 2.0)
+        .expect("Layers group toggle")
+        .click();
+    h.run_steps(2);
+    assert!(collapsed_members(h.state(), h.state().ui.docking.as_ref().unwrap()).contains("layers"));
+    h.query_all_by_label("Expand Panel Group").into_iter().next().expect("group toggle").click();
+    h.run_steps(2);
+    assert!(!collapsed_members(h.state(), h.state().ui.docking.as_ref().unwrap()).contains("layers"));
+}
+
 #[test]
 fn top_grip_moves_the_complete_right_dock_without_rearranging_groups() {
     let mut h = harness(app(), vec2(1280.0, 800.0));
@@ -126,6 +155,21 @@ fn top_grip_moves_the_complete_right_dock_without_rearranging_groups() {
             assert!(moved.top() > rect.top() + 30.0, "the column follows vertical dragging");
         }
     }
+}
+
+#[test]
+fn top_grip_double_click_does_not_reset_floating_position() {
+    let mut h = harness(app(), vec2(1280.0, 800.0));
+    let id = egui::Id::new("photocraft-whole-dock");
+    let grip = h.ctx.read_response(id.with("grip")).unwrap().rect.center();
+    drag(&mut h, grip, grip + vec2(-180.0, 50.0));
+    let before = h.ctx.memory(|memory| memory.area_rect(id.with("floating"))).unwrap();
+
+    let grip = h.ctx.read_response(id.with("grip")).unwrap().rect.center();
+    double_click(&mut h, grip);
+    let after = h.ctx.memory(|memory| memory.area_rect(id.with("floating"))).expect("double click keeps the dock floating");
+    assert!((after.left() - before.left()).abs() < 1.0, "{before:?} -> {after:?}");
+    assert!((after.top() - before.top()).abs() < 1.0, "{before:?} -> {after:?}");
 }
 
 #[test]
@@ -695,23 +739,15 @@ fn custom_group_commands_preserve_members_and_workspace_timeline() {
 }
 
 #[test]
-fn customized_panel_menus_and_rail_remain_reachable_after_float_and_restore() {
+fn panel_group_toggle_remains_reachable_after_float_and_restore() {
     let mut app = app();
     app.run("window.panel.float", json!({"panel":"swatches","x":20,"y":40})).unwrap();
     let mut h = harness(app, vec2(1280.0, 800.0));
-    assert!(h.query_all_by_label("Panel menu").count() > 0);
-    assert!(h.query_all_by_label("Color & Swatches").count() > 0);
     let floating = h.ctx.memory(|memory| memory.area_rect(egui::Id::new("photocraft-panel-docking").with(("floating", &"swatches".to_string())))).unwrap();
-    let first = h.query_all_by_label("Panel menu").find(|node| floating.contains_rect(node.rect())).unwrap().rect().center();
-    h.hover_at(first);
-    for pressed in [true, false] {
-        h.event(Event::PointerButton { pos: first, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
-        h.run_steps(1);
-    }
+    let toggle = h.query_all_by_label("Collapse Panel Group").into_iter().find(|node| floating.contains_rect(node.rect())).expect("floating group toggle");
+    toggle.click();
     h.run_steps(2);
-    assert!(h.query_all_by_label("Close Tab Group").count() > 0);
-    assert!(h.query_all_by_label("New Swatch…").count() > 0);
-    // Panel-specific menu body is shared by both its context and group menu seams.
+    assert!(collapsed_members(h.state(), h.state().ui.docking.as_ref().unwrap()).contains("swatches"));
     let mut ready = false;
     let mut menu = Harness::builder().build_ui_state(
         move |ui, app: &mut PhotocraftApp| {

@@ -513,9 +513,9 @@ impl Preview {
             moved_uniform,
         }))
     }
-    fn render_mask(&self, rs: &RenderState, encoder: &mut wgpu::CommandEncoder, layer: &Layer) {
+    fn render_mask(&self, rs: &RenderState, encoder: &mut wgpu::CommandEncoder, layer: &Layer, clip: Option<Rect>) {
         let [first, second] = &layer.mask_scratch;
-        let draw = |encoder: &mut wgpu::CommandEncoder, target: &wgpu::Texture, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup| {
+        let draw = |encoder: &mut wgpu::CommandEncoder, target: &wgpu::Texture, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, clip: Option<Rect>| {
             let view = target.create_view(&Default::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("liquify mask feather"),
@@ -523,7 +523,7 @@ impl Preview {
                     view: &view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations { load: if clip.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) }, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -532,16 +532,20 @@ impl Preview {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
+            if let Some(r) = clip {
+                pass.set_scissor_rect((r.x0 - layer.rect.x0) as u32, (r.y0 - layer.rect.y0) as u32, r.width(), r.height());
+            }
             pass.draw(0..6, 0..1);
         };
         // Raw mask is warped and selection-mixed before the Properties feather is evaluated.
         let sigma = photocraft_compose::masks::feather_sigma(layer.feather);
         if sigma <= 0. {
-            draw(encoder, &layer.mask_value, &self.raw_mask, &layer.mask_pass);
+            draw(encoder, &layer.mask_value, &self.raw_mask, &layer.mask_pass, clip);
             return;
         }
-        draw(encoder, first, &self.raw_mask, &layer.mask_pass);
-        self.feather.encode(&rs.device, encoder, [first, second, &layer.mask_value], sigma);
+        draw(encoder, first, &self.raw_mask, &layer.mask_pass, clip);
+        let local_clip = clip.map(|r| Rect::new(r.x0 - layer.rect.x0, r.y0 - layer.rect.y0, r.x1 - layer.rect.x0, r.y1 - layer.rect.y0));
+        self.feather.encode_clipped(&rs.device, encoder, [first, second, &layer.mask_value], sigma, local_clip);
     }
 
     pub(super) fn render_outputs(&self, rs: &RenderState, damage: Option<Rect>) -> HashMap<LayerId, photocraft_gpu::SourceOverride> {
@@ -569,9 +573,10 @@ impl Preview {
         let revision = self.revision.fetch_add(1, Ordering::Relaxed) + 1;
         let mut out = HashMap::new();
         for layer in &self.layers {
-            let damage = damage.map(|r| r.inflate((layer.feather * 3.).ceil() as i32 + 3).intersect(&self.canvas));
-            if damage.is_none_or(|r| !r.intersect(&layer.rect).is_empty()) {
-                self.render_mask(rs, &mut encoder, layer);
+            let layer_damage = damage.map(|r| r.inflate((layer.feather * 3.).ceil() as i32 + 3).intersect(&self.canvas));
+            if layer_damage.is_none_or(|r| !r.intersect(&layer.rect).is_empty()) {
+                let clipped = layer_damage.map(|r| r.intersect(&layer.rect)).filter(|r| !r.is_empty());
+                self.render_mask(rs, &mut encoder, layer, clipped);
                 for (texture, pipeline) in [(&layer.output, &self.content), (&layer.alpha, &self.alpha)] {
                     let view = texture.create_view(&Default::default());
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -581,7 +586,7 @@ impl Preview {
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
-                                load: if damage.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) },
+                                load: if clipped.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) },
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
@@ -590,10 +595,7 @@ impl Preview {
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
-                    if let Some(damage) = damage.map(|d| d.intersect(&layer.rect)) {
-                        if damage.is_empty() {
-                            continue;
-                        }
+                    if let Some(damage) = clipped {
                         pass.set_scissor_rect((damage.x0 - layer.rect.x0) as u32, (damage.y0 - layer.rect.y0) as u32, damage.width(), damage.height());
                     }
                     pass.set_pipeline(pipeline);

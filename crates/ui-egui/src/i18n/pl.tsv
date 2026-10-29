@@ -3830,7 +3830,7 @@ curves	Smooth	Wygładź
 	Decrease Brush Hardness	Zmniejsz twardość pędzla
 	Increase Brush Hardness	Zwiększ twardość pędzla
 
-	Tablet	数位板
+	Tablet	Tablet
 
 	Tablet pressure	数位板压感
 
@@ -3931,3 +3931,12 @@ curves	Smooth	Wygładź
 	Primary Brush	Pędzel główny
 	Secondary Brush	Pędzel dodatkowy
 	Color Output	Nakładanie koloru
+	Pressure dead zone	Martwa strefa nacisku
+	Elasticity	Elastyczność
+	Stroke stability	Stabilność pociągnięcia
+	Pressure calibration	Kalibracja nacisku
+	Retained peak	Zachowany szczyt
+	Blend Attribute	Atrybut mieszania
+	Color Attribute	Atrybuty koloru
+	Wet Edge	Mokre krawędzie
+	Tip	Końcówka pędzla

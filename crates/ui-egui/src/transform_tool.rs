@@ -212,11 +212,12 @@ fn encode_transform(work: &mut GpuWork, request: &RenderRequest) -> RenderResult
         )
         .map_err(|error| error.to_string())?;
     let submission = work.state.queue.submit([encoder.finish()]);
+    // Preview work is only sampled by later submissions on the same queue.  Waiting here made
+    // every pointer update pay the full GPU latency before the worker could hand the latest
+    // geometry back to the UI.  Queue ordering keeps the texture writes and the compositor
+    // reads ordered, so the preview worker can return as soon as the commands are submitted.
     #[cfg(not(target_arch = "wasm32"))]
-    work.state
-        .device
-        .poll(eframe::wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
-        .map_err(|error| format!("The transform GPU work did not complete: {error}"))?;
+    let _ = submission;
     #[cfg(target_arch = "wasm32")]
     let _ = submission;
     Ok((Arc::new(shown), sources))

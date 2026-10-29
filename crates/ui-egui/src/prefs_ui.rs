@@ -1093,7 +1093,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             info.extend(gpu_memory_lines(app));
             f.insert("__gpuInfo".into(), json!(info));
             let system = system_theme(app, ui.ctx());
-            prefs_body(ui, f, system);
+            prefs_body(ui, f, system, app.stylus.calibration_peak());
         }
         "shortcuts" => shortcuts_body(app, ui, f),
         "presets" => presets_body(app, ui, f),
@@ -1245,7 +1245,7 @@ fn preference_sections(values: &Value, search: &str) -> Vec<(&'static str, &'sta
 }
 
 /// Preferences: section list on the left, the section's settings on the right.
-fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, system: Option<egui::Theme>) {
+fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, system: Option<egui::Theme>, pressure_peak: Option<f32>) {
     let t = Tokens::get(ui.ctx());
     let mut section = f.get("section").and_then(Value::as_str).unwrap_or("general").to_string();
     let mut values = f.get("values").cloned().unwrap_or(Value::Null);
@@ -1317,7 +1317,7 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, system: Option<egui
                     ui.add_space(4.0);
                     ui.label(RichText::new(tl!("These settings aren't available in PhotoCraft yet.")).color(t.text_faint));
                 } else if let Some(obj) = values.get_mut(&section).and_then(Value::as_object_mut) {
-                    section_fields(ui, &section, obj, &order, lang, system, filter);
+                    section_fields(ui, &section, obj, &order, lang, system, filter, pressure_peak);
                     if section == "fileHandling" {
                         ui.label(
                             RichText::new(tl!("0 turns this threshold off; SVG groups nested deeper than 100 levels are always rasterized."))
@@ -1329,7 +1329,7 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, system: Option<egui
                     }
                     ui.add_space(8.0);
                 }
-                if search.trim().is_empty()
+                if section != "tablet" && search.trim().is_empty()
                     && has_visible_fields(&values, &section)
                     && crate::widgets::secondary_button(ui, tl!("Reset Section"), 110.0).clicked()
                     && let Some(def) = if section == "tablet" {
@@ -1622,40 +1622,68 @@ fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, query: &str) 
 
 /// Generic editor for a section's fields: checkboxes, dropdowns for choices, colour swatches,
 /// number fields with the preference's range, text fields.
-fn tablet_fields(ui: &mut egui::Ui, obj: &mut Map<String, Value>, lang: crate::i18n::Lang) {
+fn tablet_fields(ui: &mut egui::Ui, obj: &mut Map<String, Value>, lang: crate::i18n::Lang, pressure_peak: Option<f32>) {
     let t = Tokens::get(ui.ctx());
-    let mut enabled = obj.get("useTabletPressure").and_then(Value::as_bool).unwrap_or(true);
-    crate::widgets::checkbox(ui, &mut enabled, tl!("Use tablet pressure"));
-    obj.insert("useTabletPressure".into(), json!(enabled));
-    {
-        let mut row = |key: &str, label: &str, range: std::ops::RangeInclusive<f64>, speed: f64| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(tl!(label)).color(t.text_dim));
-                let mut value = obj.get(key).and_then(Value::as_f64).unwrap_or(*range.start());
-                let slider_changed = ui.add(egui::Slider::new(&mut value, range.clone()).step_by(speed).show_value(false)).changed();
-                let mut response =
-                    ui.add(egui::DragValue::new(&mut value).range(range.clone()).speed(0.0).max_decimals(2).custom_parser(crate::widgets::parse_num));
-                let rect = response.rect;
-                crate::widgets::numeric_gestures(ui, &mut response, &mut value, Some(range), rect, speed);
-                if slider_changed || response.changed() {
-                    obj.insert(key.into(), json!(value));
-                }
-            });
-        };
-        row("deadZone", "Pressure dead zone", 0.0..=0.3, 0.01);
-        row("maximumPressure", "Pressure limit", 0.001..=1.0, 0.01);
-        row("elasticity", "Elasticity", 0.1..=16.0, 0.1);
-        row("coordinateWindow", "Stroke stability", 1.0..=16.0, 1.0);
-        row("pressureWindow", "Pressure smoothing", 1.0..=16.0, 1.0);
+    ui.set_max_width(320.0);
+    let mut row = |key: &str, label: &str, range: std::ops::RangeInclusive<f64>, scale: f64, suffix: &str| {
+        ui.horizontal(|ui| {
+            ui.add_sized([107.0, 28.0], egui::Label::new(RichText::new(tl!(label)).color(t.text_dim).strong()).halign(egui::Align::Min));
+            let mut value = obj.get(key).and_then(Value::as_f64).unwrap_or(*range.start() / scale) * scale;
+            let widgets = &mut ui.visuals_mut().widgets;
+            for visual in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
+                visual.corner_radius = egui::CornerRadius::same(14);
+                visual.bg_stroke = egui::Stroke::new(1.0, t.accent);
+            }
+            let mut response = ui.add_sized([172.0, 28.0], egui::DragValue::new(&mut value)
+                .range(range.clone()).speed(0.0).max_decimals(0).suffix(suffix).custom_parser(crate::widgets::parse_num));
+            let rect = response.rect;
+            crate::widgets::numeric_gestures(ui, &mut response, &mut value, Some(range), rect, 1.0);
+            if response.changed() {
+                obj.insert(key.into(), json!(value.round() / scale));
+            }
+        });
+    };
+    row("deadZone", "Pressure dead zone", 0.0..=30.0, 100.0, "%");
+    row("elasticity", "Elasticity", 1.0..=100.0, 10.0, "");
+    row("coordinateWindow", "Stroke stability", 1.0..=16.0, 1.0, "");
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(tl!("Pressure calibration")).color(t.text).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let peak = obj.get("maximumPressure").and_then(Value::as_f64).unwrap_or(1.0);
+            ui.label(RichText::new(format!("{} {:.1}%", tl!("Retained peak"), peak * 100.0)).color(t.text_dim).strong());
+        });
+    });
+    let size = vec2(ui.available_width().min(420.0), 112.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    ui.painter().rect_filled(rect, 8.0, t.field);
+    ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+    let peak_id = response.id.with("calibration-peak");
+    let trace_id = response.id.with("calibration-trace");
+    if response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed()) {
+        ui.data_mut(|d| d.insert_temp(peak_id, 0.0_f32));
+        ui.data_mut(|d| d.insert_temp(trace_id, Vec::<egui::Pos2>::new()));
     }
-    ui.add_space(8.0);
-    ui.label(RichText::new(tl!("Pressure curve")).font(crate::theme::semibold(12.5)).color(t.text));
-    if let Some(curve) = obj.get("pressureCurve").cloned()
-        && let Some(next) = crate::pressure_curve_ui::editor(ui, &curve)
+    if (response.is_pointer_button_down_on() || response.drag_stopped() || response.clicked())
+        && let Some(pressure) = pressure_peak
     {
-        obj.insert("pressureCurve".into(), next);
+        let peak = ui.data(|d| d.get_temp::<f32>(peak_id)).unwrap_or(0.0).max(pressure);
+        ui.data_mut(|d| d.insert_temp(peak_id, peak));
+        if let Some(pointer) = response.interact_pointer_pos() {
+            ui.data_mut(|d| d.get_temp_mut_or_default::<Vec<egui::Pos2>>(trace_id).push(pointer));
+        }
+        if peak > 0.0 {
+            obj.insert("maximumPressure".into(), json!(peak));
+        }
     }
-    ui.label(RichText::new(tl!("Draw with the pen in the canvas to calibrate pressure response.")).color(t.text_faint));
+    if response.drag_stopped() {
+        ui.data_mut(|d| d.remove::<f32>(peak_id));
+        ui.data_mut(|d| d.remove::<Vec<egui::Pos2>>(trace_id));
+    }
+    let trace = ui.data(|d| d.get_temp::<Vec<egui::Pos2>>(trace_id).unwrap_or_default());
+    if trace.len() > 1 {
+        ui.painter().add(egui::Shape::line(trace, egui::Stroke::new(2.0, t.accent)));
+    }
     let _ = lang;
 }
 
@@ -1667,10 +1695,11 @@ fn section_fields(
     lang: crate::i18n::Lang,
     system: Option<egui::Theme>,
     search: &str,
+    pressure_peak: Option<f32>,
 ) {
     let query = search.to_lowercase();
     if section == "tablet" {
-        tablet_fields(ui, obj, lang);
+        tablet_fields(ui, obj, lang, pressure_peak);
         return;
     }
     let mut keys: Vec<String> = order.iter().filter(|k| obj.contains_key(*k)).cloned().collect();
@@ -3858,7 +3887,9 @@ mod tests {
         use egui_kittest::{Harness, kittest::Queryable};
         let obj = json!({"showTooltips": true}).as_object().unwrap().clone();
         let mut h = Harness::new_ui_state(
-            |ui, obj: &mut Map<String, Value>| section_fields(ui, "interface", obj, &[], crate::i18n::Lang::from_pref("en"), None, ""),
+            |ui, obj: &mut Map<String, Value>| {
+                section_fields(ui, "interface", obj, &[], crate::i18n::Lang::from_pref("en"), None, "", None)
+            },
             obj,
         );
         h.run_steps(4);

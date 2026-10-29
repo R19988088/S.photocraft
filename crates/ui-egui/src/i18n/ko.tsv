@@ -3412,7 +3412,7 @@ curves	Smooth	매끄럽게
 	Decrease Brush Hardness	브러시 경도 줄이기
 	Increase Brush Hardness	브러시 경도 늘리기
 
-	Tablet	数位板
+	Tablet	태블릿
 
 	Tablet pressure	数位板压感
 
@@ -3513,3 +3513,12 @@ curves	Smooth	매끄럽게
 	Primary Brush	기본 브러시
 	Secondary Brush	보조 브러시
 	Color Output	색상 출력
+	Pressure dead zone	압력 데드존
+	Elasticity	탄성
+	Stroke stability	획 안정성
+	Pressure calibration	압력 보정
+	Retained peak	유지된 최고 압력
+	Blend Attribute	혼합 속성
+	Color Attribute	색상 속성
+	Wet Edge	젖은 가장자리
+	Tip	브러시 끝

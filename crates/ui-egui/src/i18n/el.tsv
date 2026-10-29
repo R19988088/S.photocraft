@@ -676,7 +676,7 @@
 	Shortcuts	Συντομεύσεις
 	Keyboard	Πληκτρολόγιο
 	Mouse	Ποντίκι
-	Tablet	Ταμπλέτα γραφικών
+	Tablet	Ταμπλέτα
 	Display	Οθόνη
 	Panel	Πλαίσιο
 	Hide Grid	Απόκρυψη πλέγματος
@@ -4030,3 +4030,12 @@ curves	Smooth	Εξομάλυνση
 	Primary Brush	Κύριο πινέλο
 	Secondary Brush	Δευτερεύον πινέλο
 	Color Output	Έξοδος χρώματος
+	Pressure dead zone	Νεκρή ζώνη πίεσης
+	Elasticity	Ελαστικότητα
+	Stroke stability	Σταθερότητα πινελιάς
+	Pressure calibration	Βαθμονόμηση πίεσης
+	Retained peak	Διατηρούμενη κορυφή
+	Blend Attribute	Ιδιότητα ανάμειξης
+	Color Attribute	Ιδιότητες χρώματος
+	Wet Edge	Υγρές ακμές
+	Tip	Άκρη πινέλου

@@ -417,6 +417,12 @@ impl Stylus {
         }
     }
 
+    /// Calibration uses raw samples, including peaks between two UI frames.
+    pub(crate) fn calibration_peak(&self) -> Option<f32> {
+        self.frame.iter().copied().chain(self.native_frame.iter().filter_map(|event| event.sample))
+            .chain(self.feed.get()).map(|sample| sample.pressure).reduce(f32::max)
+    }
+
     /// Pressure for the next tool event (1 for a mouse).
     pub fn pressure(&self) -> f32 {
         self.sample().map_or(1.0, |s| s.pressure)
@@ -683,6 +689,19 @@ mod tests {
 
     fn pen(pressure: f32) -> PenSample {
         PenSample { pressure, ..Default::default() }
+    }
+
+    #[test]
+    fn calibration_retains_between_frame_peak_after_pen_lift() {
+        let mut stylus = Stylus::default();
+        for pressure in [0.1, 0.95, 0.2] {
+            stylus.feed.set(Some(pen(pressure)));
+        }
+        stylus.feed.set(None);
+        stylus.update(&[]);
+        assert_eq!(stylus.calibration_peak(), Some(0.95));
+        stylus.update(&[]);
+        assert_eq!(stylus.calibration_peak(), None);
     }
 
     #[test]

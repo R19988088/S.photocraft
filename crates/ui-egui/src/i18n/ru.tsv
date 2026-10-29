@@ -3204,7 +3204,7 @@ curves	Smooth	Сгладить
 	Decrease Brush Hardness	Уменьшить жёсткость кисти
 	Increase Brush Hardness	Увеличить жёсткость кисти
 
-	Tablet	数位板
+	Tablet	Планшет
 
 	Tablet pressure	数位板压感
 
@@ -3311,3 +3311,12 @@ curves	Smooth	Сгладить
 	Primary Brush	Основная кисть
 	Secondary Brush	Дополнительная кисть
 	Color Output	Нанесение цвета
+	Pressure dead zone	Мёртвая зона нажима
+	Elasticity	Упругость
+	Stroke stability	Стабильность штриха
+	Pressure calibration	Калибровка нажима
+	Retained peak	Сохранённый максимум
+	Blend Attribute	Свойство смешивания
+	Color Attribute	Атрибуты цвета
+	Wet Edge	Влажные края
+	Tip	Отпечаток кисти

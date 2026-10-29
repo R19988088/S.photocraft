@@ -3908,7 +3908,7 @@ curves	Smooth	スムーズ
 	Decrease Brush Hardness	ブラシの硬さを下げる
 	Increase Brush Hardness	ブラシの硬さを上げる
 
-	Tablet	数位板
+	Tablet	ペンタブレット
 
 	Tablet pressure	数位板压感
 
@@ -4009,3 +4009,12 @@ curves	Smooth	スムーズ
 	Primary Brush	メインブラシ
 	Secondary Brush	サブブラシ
 	Color Output	色を出力
+	Pressure dead zone	筆圧デッドゾーン
+	Elasticity	弾性
+	Stroke stability	ストロークの安定性
+	Pressure calibration	筆圧のキャリブレーション
+	Retained peak	保持されたピーク
+	Tip	先端
+	Blend Attribute	合成属性
+	Color Attribute	色の属性
+	Wet Edge	ウェットエッジ

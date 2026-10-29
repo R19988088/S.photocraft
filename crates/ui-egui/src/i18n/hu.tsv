@@ -3590,7 +3590,7 @@ cameraRaw	Yellow	Sárga
 	Switch Foreground and Background Colors	Előtér- és háttérszín cseréje
 	Switched to CPU rendering	Átváltás CPU-s megjelenítésre
 	System	Rendszer
-	Tablet	Tablet
+	Tablet	Rajztábla
 	Taper	Elvékonyodás
 	Target	Cél
 	Text file	Szövegfájl
@@ -4249,3 +4249,12 @@ cameraRaw	Yellow	Sárga
 	Primary Brush	Elsődleges ecset
 	Secondary Brush	Másodlagos ecset
 	Color Output	Színkimenet
+	Pressure dead zone	Nyomási holtzóna
+	Elasticity	Rugalmasság
+	Stroke stability	Vonásstabilitás
+	Pressure calibration	Nyomáskalibrálás
+	Retained peak	Megtartott csúcsérték
+	Blend Attribute	Keverési tulajdonság
+	Color Attribute	Színtulajdonságok
+	Wet Edge	Nedves szélek
+	Tip	Ecsethegy

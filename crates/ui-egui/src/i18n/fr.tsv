@@ -3239,7 +3239,7 @@ curves	Smooth	Lisser
 	Decrease Brush Hardness	Réduire la dureté du pinceau
 	Increase Brush Hardness	Augmenter la dureté du pinceau
 
-	Tablet	数位板
+	Tablet	Tablette
 
 	Tablet pressure	数位板压感
 
@@ -3346,3 +3346,12 @@ curves	Smooth	Lisser
 	Primary Brush	Pinceau principal
 	Secondary Brush	Pinceau secondaire
 	Color Output	Dépôt de couleur
+	Pressure dead zone	Zone morte de pression
+	Elasticity	Élasticité
+	Stroke stability	Stabilité du trait
+	Pressure calibration	Étalonnage de la pression
+	Retained peak	Pic conservé
+	Blend Attribute	Attribut de fusion
+	Color Attribute	Attributs de couleur
+	Wet Edge	Bords humides
+	Tip	Pointe du pinceau

@@ -435,7 +435,7 @@ impl Default for DualBrush {
         Self {
             full_parameters: None,
             primary_strength: 1.0,
-            secondary_strength: 1.0,
+            secondary_strength: 0.0,
             grain: None,
             wet_edges: false,
             wet_edge: None,

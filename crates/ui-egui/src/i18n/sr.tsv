@@ -3264,7 +3264,7 @@ layerLabel	No Color	Bez boje
 	Shortcuts	Prečice
 	Keyboard	Tastatura
 	Mouse	Miš
-	Tablet	Tablet
+	Tablet	Таблет
 	Display	Ekran
 	Panel	Panel
 	Hide Grid	Sakrij mrežu
@@ -4403,3 +4403,12 @@ shape	Appearance	Izgled
 	Primary Brush	Главна четкица
 	Secondary Brush	Помоћна четкица
 	Color Output	Наношење боје
+	Pressure dead zone	Mrtva zona pritiska
+	Elasticity	Elastičnost
+	Stroke stability	Stabilnost poteza
+	Pressure calibration	Kalibracija pritiska
+	Retained peak	Zadržani maksimum
+	Blend Attribute	Својство мешања
+	Color Attribute	Svojstva boje
+	Wet Edge	Vlažne ivice
+	Tip	Vrh četkice

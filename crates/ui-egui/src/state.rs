@@ -1098,6 +1098,9 @@ impl Default for ColorPanelState {
 pub struct UiState {
     #[serde(default, skip_deserializing)]
     pub shape_components: Option<crate::vector_ui::ComponentSelection>,
+    /// Last Escape press time, for the canvas double-Escape zoom toggle.
+    #[serde(skip)]
+    pub last_canvas_escape: f64,
     pub tool: Tool,
     /// The last tool used in each shortcut group (the tools sharing a key, [`Tool::key`]), at most
     /// one per group: the group's key brings it back, as in Photoshop (#2608).
@@ -1352,6 +1355,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            last_canvas_escape: f64::NEG_INFINITY,
             tool: Tool::Brush,
             group_tools: Vec::new(),
             spring: None,

@@ -3718,7 +3718,7 @@ curves	Smooth	Làm mượt
 	Decrease Brush Hardness	Giảm độ cứng của cọ
 	Increase Brush Hardness	Tăng độ cứng của cọ
 
-	Tablet	数位板
+	Tablet	Bảng vẽ
 
 	Tablet pressure	数位板压感
 
@@ -3819,3 +3819,12 @@ curves	Smooth	Làm mượt
 	Primary Brush	Cọ chính
 	Secondary Brush	Cọ phụ
 	Color Output	Xuất màu
+	Pressure dead zone	Vùng chết áp lực
+	Elasticity	Độ đàn hồi
+	Stroke stability	Độ ổn định nét vẽ
+	Pressure calibration	Hiệu chỉnh áp lực
+	Retained peak	Mức đỉnh được giữ lại
+	Blend Attribute	Thuộc tính hòa trộn
+	Color Attribute	Thuộc tính màu
+	Wet Edge	Cạnh ướt
+	Tip	Đầu cọ

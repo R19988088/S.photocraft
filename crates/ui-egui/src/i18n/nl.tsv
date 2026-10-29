@@ -2626,7 +2626,7 @@ cameraRaw	Color	Kleur
 	Shortcuts	Sneltoetsen
 	Keyboard	Toetsenbord
 	Mouse	Muis
-	Tablet	Tablet
+	Tablet	Tekentablet
 	Display	Beeldscherm
 	Panel	Paneel
 	Hide Grid	Raster verbergen
@@ -4090,3 +4090,12 @@ curves	Smooth	Vloeiend maken
 	Primary Brush	Hoofdpenseel
 	Secondary Brush	Tweede penseel
 	Color Output	Kleurafgifte
+	Pressure dead zone	Drukdode zone
+	Elasticity	Elasticiteit
+	Stroke stability	Lijnstabiliteit
+	Pressure calibration	Druk kalibreren
+	Retained peak	Behouden piek
+	Blend Attribute	Overvloei-eigenschap
+	Color Attribute	Kleureigenschappen
+	Wet Edge	Natte randen
+	Tip	Penseelpunt

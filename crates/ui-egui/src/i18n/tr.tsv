@@ -2596,7 +2596,7 @@ cameraRaw	Color	Renk
 	Shortcuts	Kısayollar
 	Keyboard	Klavye
 	Mouse	Fare
-	Tablet	tablet
+	Tablet	Tablet
 	Display	Ekran
 	Panel	Paneli
 	Hide Grid	Izgarayı Gizle
@@ -4061,3 +4061,12 @@ cameraData	Lens	Lens
 	Secondary Brush	İkincil fırça
 	Color Output	Renk çıkışı
 	Smudge	Bulaştırma
+	Pressure dead zone	Basınç ölü bölgesi
+	Elasticity	Esneklik
+	Stroke stability	Çizgi kararlılığı
+	Pressure calibration	Basınç kalibrasyonu
+	Retained peak	Korunan tepe
+	Blend Attribute	Karıştırma özelliği
+	Color Attribute	Renk Nitelikleri
+	Wet Edge	Islak Kenarlar
+	Tip	Fırça Ucu

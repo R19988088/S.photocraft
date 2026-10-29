@@ -3939,7 +3939,7 @@ curves	Smooth	Згладити
 	This Smart Object must be rasterized before proceeding. Its contents will no longer be editable. Rasterize the Smart Object?	Щоб продовжити, потрібно растеризувати цей смартоб’єкт. Після цього його вміст більше не можна буде редагувати. Растеризувати смартоб’єкт?
 	This fill layer must be rasterized before proceeding. Its fill content will no longer be editable. Rasterize the layer?	Щоб продовжити, потрібно растеризувати цей шар заливки. Після цього його заливку більше не можна буде редагувати. Растеризувати шар?
 
-	Tablet	数位板
+	Tablet	Планшет
 
 	Tablet pressure	数位板压感
 
@@ -4040,3 +4040,12 @@ curves	Smooth	Згладити
 	Primary Brush	Основний пензель
 	Secondary Brush	Додатковий пензель
 	Color Output	Нанесення кольору
+	Pressure dead zone	Мертва зона натиску
+	Elasticity	Пружність
+	Stroke stability	Стабільність штриха
+	Pressure calibration	Калібрування натиску
+	Retained peak	Збережений максимум
+	Blend Attribute	Властивість змішування
+	Color Attribute	Атрибути кольору
+	Wet Edge	Вологі краї
+	Tip	Кінчик пензля

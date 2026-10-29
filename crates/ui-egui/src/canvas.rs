@@ -2298,7 +2298,7 @@ fn tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
             let ny = r.center().y - name_g.size().y / 2.0;
             ui.painter().galley_with_override_text_color(egui::pos2(r.left() + 10.0, ny), name_g.clone(), color);
             ui.painter().galley(egui::pos2(r.left() + 16.0 + name_g.size().x, r.center().y - meta_g.size().y / 2.0), meta_g, t.text_faint);
-            let xr = Rect::from_center_size(egui::pos2(r.right() - 12.0, r.center().y), egui::vec2(16.0, 16.0));
+            let xr = Rect::from_center_size(egui::pos2(r.right() - 14.0, r.center().y), egui::vec2(24.0, 24.0));
             let xresp = ui.interact(xr, ui.id().with(("dtabx", i)), Sense::click());
             if xresp.hovered() {
                 ui.painter().rect_filled(xr, 4.0, t.hover);
@@ -2337,7 +2337,7 @@ fn tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
             ui.painter().galley_with_override_text_color(egui::pos2(r.left() + 10.0, ny), name_g.clone(), if sel { t.text } else { t.text_dim });
             ui.painter().galley(egui::pos2(r.left() + 16.0 + name_g.size().x, r.center().y - meta_g.size().y / 2.0), meta_g, t.text_faint);
             crate::jobs_ui::tab_underline(ui, r, *frac, &t);
-            let xr = Rect::from_center_size(egui::pos2(r.right() - 12.0, r.center().y), egui::vec2(16.0, 16.0));
+            let xr = Rect::from_center_size(egui::pos2(r.right() - 14.0, r.center().y), egui::vec2(24.0, 24.0));
             let xresp = ui.interact(xr, ui.id().with(("dtabjobx", job.0)), Sense::click());
             if xresp.hovered() {
                 ui.painter().rect_filled(xr, 4.0, t.hover);
@@ -2633,6 +2633,7 @@ fn pro_tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
         }
         ui.painter().line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, t.separator));
         let (xr, at) = pro_tab_layout(r, g.size().y, mac);
+        let xr = Rect::from_center_size(xr.center(), egui::vec2(24.0, 24.0));
         let xresp = ui.interact(xr, ui.id().with(("ptabx", i)), Sense::click());
         // Painted: name the tab and its × for accessibility (and so tests and agents can find them).
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, sel, g.text()));
@@ -6025,14 +6026,15 @@ pub fn selection_drag_kind(app: &PhotocraftApp, tool: Tool, p: [f64; 2], mods: e
         return None;
     }
     // ⌘ cuts, ⌘⌥ copies (`select.float`'s `copy`).
-    let cut = mods.command && !mods.shift;
+    let cut = mods.command;
     if let Some(f) = app.session.active().and_then(photocraft_engine::float_cmds::floating) {
         let on = inside_selection(app, [p[0] - f64::from(f.offset.0), p[1] - f64::from(f.offset.1)]);
-        return (on && !mods.shift && (!mods.alt || mods.command) && (cut || !clicky)).then_some(true);
+        return (on && (!mods.shift || cut) && (!mods.alt || mods.command) && (cut || !clicky)).then_some(true);
     }
     if !inside_selection(app, p) {
         return None;
     }
+    // ⌘⌥⇧ is the selection-copy gesture; Shift still axis-locks it in move_mods.
     if cut {
         return Some(true);
     }
@@ -6057,7 +6059,7 @@ pub(crate) fn event_tool(app: &PhotocraftApp, mods: egui::Modifiers) -> Tool {
 pub(crate) fn command_moves_layer(app: &PhotocraftApp, tool: Tool, p: [f64; 2], mods: egui::Modifiers) -> bool {
     let selection_tool = matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee | Tool::Lasso | Tool::PolygonLasso | Tool::MagicWand);
     let floating = app.session.active().is_some_and(|st| photocraft_engine::float_cmds::floating(st).is_some());
-    selection_tool && mods.command && !mods.shift && !floating && app.ui.polygon.is_empty() && !inside_selection(app, p)
+    selection_tool && mods.command && !floating && app.ui.polygon.is_empty() && !inside_selection(app, p)
 }
 
 /// The guide a ⌘ press with selection tool `tool` at `p` drags (vertical?, index), as the Move
