@@ -164,39 +164,6 @@ pub fn encode_be(v: f32, s: SampleType, out: &mut Vec<u8>) {
 }
 
 /// Decodes a big-endian sample at `index` to a normalized value.
-/// Resolve external pixel storage at the fallible export boundary before legacy CPU encoders.
-pub(crate) fn materialize_document(doc: &photocraft_doc::Document) -> Result<(), crate::IoError> {
-    let read = |surface: &photocraft_raster::Surface| {
-        surface.try_materialize().map_err(|error| crate::IoError::Unsupported(format!("could not read document pixels: {error}")))
-    };
-    for (_, _, layer) in doc.walk() {
-        if let Some(surface) = layer.surface() {
-            read(surface)?;
-        }
-        if let Some(mask) = &layer.mask {
-            read(&mask.surface)?;
-        }
-        if let photocraft_doc::LayerContent::Smart(smart) = &layer.content
-            && let Some(mask) = &smart.filter_mask
-        {
-            read(&mask.surface)?;
-        }
-    }
-    for channel in &doc.channels {
-        read(&channel.surface)?;
-    }
-    if let Some(channel) = &doc.quick_mask {
-        read(&channel.surface)?;
-    }
-    if let Some(selection) = &doc.selection {
-        read(selection)?;
-    }
-    for pattern in &doc.patterns {
-        read(&pattern.surface)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 pub fn decode_be(bytes: &[u8], index: usize, s: SampleType) -> f32 {
     match s {

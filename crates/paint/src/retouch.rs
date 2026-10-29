@@ -127,7 +127,7 @@ pub fn stroke_coverage(stroke: &Stroke) -> (Rect, Vec<f32>) {
     let mut r = crate::StrokeRenderer::new(&stroke.brush, None, 1.0);
     r.push(&stroke.points);
     r.finish();
-    r.dense_cpu_coverage()
+    r.dense_coverage()
 }
 
 /// [`stroke_coverage`] that admits the **rendered** extent before it is made dense: `None` when the
@@ -145,7 +145,7 @@ pub fn stroke_coverage_within(stroke: &Stroke, max_pixels: u64) -> Option<(Rect,
     if u64::from(b.width()).saturating_mul(u64::from(b.height())) > max_pixels {
         return None;
     }
-    Some(r.dense_cpu_coverage())
+    Some(r.dense_coverage())
 }
 
 /// Index of the alpha channel, if the format has one.

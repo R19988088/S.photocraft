@@ -191,19 +191,6 @@ fn run_stroke(
     Ok(dmg)
 }
 
-/// Legacy CPU retouch algorithms require readable pixels before their first mutation.
-fn materialize_retouch_sources(pre: &Document, surf: &Surface, p: &Value) -> Result<()> {
-    let read = |surface: &Surface| surface.try_materialize().map_err(|error| EngineError::Other(format!("could not read retouch pixels: {error}")));
-    read(surf)?;
-    if let Some(selection) = &pre.selection {
-        read(selection)?;
-    }
-    if sample_all_layers(p) || (targets_pixels(p) && string(p, "sampleLayer", "current") != "current") {
-        crate::sample_cmds::materialize_render_sources(pre)?;
-    }
-    Ok(())
-}
-
 fn damage_json(r: Rect) -> Value {
     json!([r.x0, r.y0, r.width(), r.height()])
 }
@@ -337,11 +324,6 @@ pub fn clone_preview_periodic(
     let id = d.active_layer.ok_or_else(|| bad("clone.preview", "no active layer"))?;
     let surf = d.doc.layer(id).and_then(|l| l.surface()).ok_or_else(|| bad("clone.preview", "no pixel surface"))?;
     let which = sample_layers(&json!({"sampleLayer": sample_layer}), "clone.preview")?;
-    if which == SampleLayers::Current {
-        surf.try_materialize().map_err(|error| EngineError::Other(format!("could not read clone source: {error}")))?;
-    } else {
-        crate::sample_cmds::materialize_render_sources(&d.doc)?;
-    }
     let region = clone_sample(&d.doc, Some(id), surf, which, rect, map, wrap, "clone.preview")?;
     let px = region.data.chunks_exact(surf.format().channels()).map(|p| to_rgba(&surf.format(), p)).collect();
     Ok(photocraft_compose::Buffer { rect, px })
@@ -400,7 +382,6 @@ fn clone_stamp(s: &mut Session, p: &Value) -> Result<Value> {
                 *surf = l.surface;
                 return Ok(l.bounds);
             }
-            materialize_retouch_sources(pre, surf, p)?;
             if flag(p, "wrap", false) {
                 let mut renderer = photocraft_paint::StrokeRenderer::new(&stroke.brush, None, 1.0);
                 renderer.push(&stroke.points);
@@ -482,7 +463,6 @@ impl LiveRetouch {
         let mut doc = (*pre).clone();
         let sel = doc.selection.clone();
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
-        materialize_retouch_sources(&pre, surf, p)?;
         let pre_surf = surf.clone();
         // As `stroke_coverage`, which the commit uses.
         let renderer = photocraft_paint::StrokeRenderer::new(&stroke.brush, None, 1.0);
@@ -549,16 +529,7 @@ impl LiveRetouch {
         let bounds = self.bounds();
         let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.id, &self.params)?;
         let surface = surf.clone();
-        Ok(crate::brush_cmds::LiveCommit {
-            cmd: self.cmd,
-            base: self.base,
-            params: self.params,
-            seed: None,
-            points: self.points,
-            surface,
-            bounds,
-            brush_renderers: Vec::new(),
-        })
+        Ok(crate::brush_cmds::LiveCommit { cmd: self.cmd, base: self.base, params: self.params, seed: None, points: self.points, surface, bounds })
     }
 
     /// Render more points; returns the rectangle that changed. Each changed area is redrawn from
@@ -586,11 +557,11 @@ impl LiveRetouch {
             dmg = old;
         }
         let r = self.renderer.take_dirty_rect();
-        let cov = self.renderer.coverage_in(r).map_err(EngineError::Other)?;
+        let cov = self.renderer.coverage_in(r);
         dmg = dmg.union(&self.composite(r, &cov)?);
         if let Some(mut tail) = self.renderer.tail_preview() {
             let r = tail.take_dirty_rect();
-            let cov = tail.coverage_in(r).map_err(EngineError::Other)?;
+            let cov = tail.coverage_in(r);
             self.tail = self.composite(r, &cov)?;
             dmg = dmg.union(&self.tail);
         }
@@ -683,7 +654,6 @@ fn healing_brush(s: &mut Session, p: &Value) -> Result<Value> {
     let map = clone_mapping(s, p, &stroke, CMD)?;
     let off = map.offset();
     let dmg = run_stroke(s, "Healing Brush", id, p, |pre, surf, sel, lock| {
-        materialize_retouch_sources(pre, surf, p)?;
         let (bounds, cov) = coverage(CMD, &stroke)?;
         let (g, cov) = pad_coverage(bounds, &cov, 2);
         let fmt = surf.format();
@@ -708,10 +678,9 @@ fn history_source(s: &Session, id: Option<LayerId>, p: &Value, cmd: &str) -> Res
         Some(i) => st.history.state(i).ok_or_else(|| bad(cmd, format!("no history state {i} (0..={})", st.history.past_len())))?,
         None => st.history.state(0).unwrap_or_else(|| st.doc.clone()),
     };
-    let source = crate::channel_cmds::read_target_surface(source_doc.as_ref(), id, p)
-        .map_err(|_| EngineError::Other("the target did not exist (as pixels, a mask or a channel) in that history state".into()))?;
-    source.try_materialize().map_err(|error| EngineError::Other(format!("could not read history brush pixels: {error}")))?;
-    Ok(source.clone())
+    crate::channel_cmds::read_target_surface(source_doc.as_ref(), id, p)
+        .cloned()
+        .map_err(|_| EngineError::Other("the target did not exist (as pixels, a mask or a channel) in that history state".into()))
 }
 
 fn history_brush(s: &mut Session, p: &Value) -> Result<Value> {
@@ -725,12 +694,11 @@ fn history_brush(s: &mut Session, p: &Value) -> Result<Value> {
     let live = s.live_commit.take().filter(|l| l.matches(s, CMD, p, &stroke.points));
     let from_live = live.is_some();
     let src_surface = history_source(s, id, p, CMD)?;
-    let dmg = run_stroke(s, "History Brush", id, p, |pre, surf, sel, lock| {
+    let dmg = run_stroke(s, "History Brush", id, p, |_, surf, sel, lock| {
         if let Some(l) = live {
             *surf = l.surface;
             return Ok(l.bounds);
         }
-        materialize_retouch_sources(pre, surf, p)?;
         let fmt = surf.format();
         let src = if src_surface.format() == fmt { src_surface } else { src_surface.convert(fmt) };
         let (bounds, cov) = coverage(CMD, &stroke)?;
@@ -870,10 +838,7 @@ fn spot_healing(s: &mut Session, p: &Value) -> Result<Value> {
         o => return Err(bad(CMD, format!("unknown type `{o}` (contentAware|createTexture|proximityMatch)"))),
     };
     let all = sample_all_layers(p);
-    let dmg = run_stroke(s, "Spot Healing Brush", id, p, |pre, surf, sel, lock| {
-        materialize_retouch_sources(pre, surf, p)?;
-        spot_heal_surface(surf, pre, &stroke, kind, all, sel, lock)
-    })?;
+    let dmg = run_stroke(s, "Spot Healing Brush", id, p, |pre, surf, sel, lock| spot_heal_surface(surf, pre, &stroke, kind, all, sel, lock))?;
     Ok(json!({ "damage": damage_json(dmg) }))
 }
 
@@ -1152,9 +1117,6 @@ fn dab_cmd(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
     let (tool, label) = DabTool::parse(s, cmd, p, &stroke)?;
     let all = matches!(tool, DabTool::Focus { .. } | DabTool::Smudge { .. }) && sample_all_layers(p);
     let dmg = run_stroke(s, label, id, p, |pre, surf, sel, lock| {
-        if !shared || all {
-            materialize_retouch_sources(pre, surf, p)?;
-        }
         let fmt = surf.format();
         if shared {
             if all {
@@ -1240,17 +1202,13 @@ impl LiveDab {
         halo: i32,
         effect: impl FnOnce(&Surface) -> DabEffect,
     ) -> Result<Self> {
-        let pre = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
-        let mut doc = (*pre).clone();
+        let mut doc = (*s.active().ok_or(EngineError::NoDocument)?.doc).clone();
         let sel = doc.selection.clone();
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
-        let shared_transport = cmd == "paint.smudge" && stroke.brush.mix_settings.outputs_smudge;
-        if !shared_transport {
-            materialize_retouch_sources(&pre, surf, p)?;
-        }
         let pre_surf = surf.clone();
         let effect = effect(&pre_surf);
         // `apply_dab_stroke` generates the same dabs (`dabs`: zoom 1, no smoothing scale).
+        let shared_transport = cmd == "paint.smudge" && stroke.brush.mix_settings.outputs_smudge;
         let renderer = if shared_transport {
             photocraft_paint::StrokeRenderer::on_surface(&stroke.brush, &pre_surf, 1.0).record_dabs()
         } else {
@@ -1556,100 +1514,3 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod gpu_readback_tests {
-    use super::*;
-    use photocraft_geom::TileCoord;
-    use photocraft_raster::{Tile, TileBackend, TileReadError};
-    use std::sync::Arc;
-
-    #[derive(Debug)]
-    struct Unreadable;
-
-    impl TileBackend for Unreadable {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn read_bytes(&self) -> std::result::Result<Box<[u8]>, TileReadError> {
-            Err(TileReadError("retouch device lost".into()))
-        }
-    }
-
-    fn unreadable(format: PixelFormat) -> Surface {
-        let mut surface = Surface::new(format);
-        surface.set_tile(TileCoord::new(0, 0), Arc::new(Tile::from_backend(format, Arc::new(Unreadable))));
-        surface
-    }
-
-    fn session() -> Session {
-        let mut session = Session::new();
-        session.execute("file.new", json!({"width":32,"height":32})).unwrap();
-        session
-    }
-
-    #[test]
-    fn retouch_readback_failure_does_not_commit_or_panic() {
-        for cmd in ["paint.cloneStamp", "paint.healingBrush", "paint.historyBrush", "paint.spotHealing", "paint.dodge", "paint.blur", "paint.smudge"] {
-            let mut s = session();
-            let st = s.active_mut().unwrap();
-            let id = st.active_layer.unwrap();
-            let surface = Arc::make_mut(&mut st.doc).layer_mut(id).unwrap().surface_mut().unwrap();
-            *surface = unreadable(surface.format());
-            let before = st.doc.clone();
-            let (revision, history) = (st.revision, st.history.past_len());
-            let p = json!({"points":[[8,8]],"size":8,"offset":[0,0],"state":history,"fingerPainting":true});
-            let result = match cmd {
-                "paint.cloneStamp" => clone_stamp(&mut s, &p),
-                "paint.healingBrush" => healing_brush(&mut s, &p),
-                "paint.historyBrush" => history_brush(&mut s, &p),
-                "paint.spotHealing" => spot_healing(&mut s, &p),
-                _ => dab_cmd(&mut s, &p, cmd),
-            };
-            assert!(result.unwrap_err().to_string().contains("retouch device lost"), "{cmd}");
-            let st = s.active().unwrap();
-            assert!(Arc::ptr_eq(&before, &st.doc), "{cmd} must preserve the document");
-            assert_eq!((st.revision, st.history.past_len()), (revision, history), "{cmd}");
-        }
-    }
-
-    #[test]
-    fn retouch_reads_selection_and_composite_before_running_effect() {
-        for composite in [false, true] {
-            let mut s = session();
-            if composite {
-                let st = s.active_mut().unwrap();
-                let id = st.active_layer.unwrap();
-                let surface = Arc::make_mut(&mut st.doc).layer_mut(id).unwrap().surface_mut().unwrap();
-                *surface = unreadable(surface.format());
-                s.execute("layer.new.layer", json!({})).unwrap();
-            } else {
-                Arc::make_mut(&mut s.active_mut().unwrap().doc).selection = Some(unreadable(PixelFormat::GRAY8));
-            }
-            let st = s.active().unwrap();
-            let (before, history) = (st.doc.clone(), st.history.past_len());
-            let result = dab_cmd(&mut s, &json!({"points":[[8,8]],"size":8,"sampleAllLayers":composite}), "paint.blur");
-            assert!(result.unwrap_err().to_string().contains("retouch device lost"));
-            let st = s.active().unwrap();
-            assert!(Arc::ptr_eq(&before, &st.doc));
-            assert_eq!(st.history.past_len(), history);
-        }
-    }
-
-    #[test]
-    fn live_retouch_readback_failure_returns_error_before_rendering() {
-        let mut s = session();
-        let st = s.active_mut().unwrap();
-        let id = st.active_layer.unwrap();
-        let surface = Arc::make_mut(&mut st.doc).layer_mut(id).unwrap().surface_mut().unwrap();
-        *surface = unreadable(surface.format());
-        let p = json!({"points":[[8,8]],"size":8,"offset":[0,0],"state":st.history.past_len(),"fingerPainting":true});
-        for cmd in ["paint.cloneStamp", "paint.healingBrush", "paint.historyBrush"] {
-            assert!(LiveRetouch::begin(&s, cmd, &p).is_err(), "{cmd}");
-        }
-        for cmd in ["paint.dodge", "paint.blur", "paint.smudge"] {
-            assert!(LiveDab::begin(&s, cmd, &p).is_err(), "{cmd}");
-        }
-    }
-}

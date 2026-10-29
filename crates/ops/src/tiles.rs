@@ -52,8 +52,8 @@ impl Tiles {
         surfaces(doc, |surface| {
             for (_, tile) in surface.tiles() {
                 let count = self.refs.entry(Arc::as_ptr(tile) as usize).or_insert_with(|| {
-                    self.bytes += tile.storage_byte_len() as u128;
-                    (0, tile.storage_byte_len())
+                    self.bytes += tile.bytes().len() as u128;
+                    (0, tile.bytes().len())
                 });
                 count.0 += 1;
             }
@@ -89,7 +89,7 @@ impl Tiles {
             for (_, tile) in surface.tiles() {
                 let key = Arc::as_ptr(tile) as usize;
                 if !self.refs.contains_key(&key) && seen.insert(key) {
-                    total += tile.storage_byte_len() as u128;
+                    total += tile.bytes().len() as u128;
                 }
             }
         });

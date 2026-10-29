@@ -229,18 +229,6 @@ pub(crate) fn rect_around(d: &Dab, reach: f32) -> Rect {
 }
 
 impl BrushContext {
-    pub fn secondary_context(&self) -> Option<&BrushContext> {
-        self.secondary.as_deref()
-    }
-
-    pub fn tip_mips(&self, dual: bool) -> Option<&Mips> {
-        if dual { self.dual_tip.as_deref() } else { self.tip.as_deref() }
-    }
-
-    pub fn texture_image(&self) -> Option<&PatternImage> {
-        self.texture.as_deref()
-    }
-
     pub fn new(brush: &BrushSettings) -> Self {
         let brush = brush.bounded_for_render();
         let mips = |t: &TipShape| match t.bitmap() {
@@ -931,7 +919,6 @@ impl CoverageMap {
 #[derive(Clone, Debug, Default)]
 pub struct UnionLive {
     tail_keys: HashSet<(i32, i32)>,
-    gpu_tail_keys: HashSet<photocraft_geom::TileCoord>,
     bounds: Rect,
 }
 
@@ -991,7 +978,6 @@ impl LaneTransport {
 #[derive(Clone, Debug)]
 pub struct StrokeRenderer {
     pub ctx: BrushContext,
-    gpu: Option<Box<dyn crate::gpu_backend::StrokeBackend>>,
     generator: DabGenerator,
     cov: CoverageMap,
     dual: Option<CoverageMap>,
@@ -1011,20 +997,9 @@ pub struct StrokeRenderer {
 }
 
 impl StrokeRenderer {
-    pub fn error(&self) -> Option<String> {
-        self.gpu.as_ref().and_then(|gpu| gpu.error())
-    }
-
     /// Composite the union of this stroke and a mirrored pass as one stroke. This keeps
     /// overlapping dabs on a symmetry axis under one opacity ceiling at every bit depth.
-    pub fn composite_union(
-        &self,
-        other: &Self,
-        pre: &Surface,
-        target: &mut Surface,
-        selection: Option<&Surface>,
-        lock_transparency: bool,
-    ) -> Result<Rect, String> {
+    pub fn composite_union(&self, other: &Self, pre: &Surface, target: &mut Surface, selection: Option<&Surface>, lock_transparency: bool) -> Rect {
         self.composite_union_many(std::iter::once(other), pre, target, selection, lock_transparency)
     }
 
@@ -1064,26 +1039,9 @@ impl StrokeRenderer {
         target: &mut Surface,
         selection: Option<&Surface>,
         lock_transparency: bool,
-    ) -> Result<Rect, String> {
+    ) -> Rect {
         let mut merged = self.clone();
-        if let Some(error) = merged.error() {
-            return Err(error);
-        }
         for other in others {
-            if let Some(error) = other.error() {
-                return Err(error);
-            }
-            match (&mut merged.gpu, &other.gpu) {
-                (Some(to), Some(from)) => {
-                    to.union_max(from.as_ref());
-                    if let Some(error) = to.error() {
-                        return Err(error);
-                    }
-                    continue;
-                }
-                (None, None) => {}
-                _ => return Err("Cannot union CPU and GPU brush passes".into()),
-            }
             Self::union_transport_work(&mut merged.transports[0], &other.transports[0], &merged.cov, &other.cov);
             if let (Some(to), Some(from)) = (&merged.dual, &other.dual) {
                 Self::union_transport_work(&mut merged.transports[1], &other.transports[1], to, from);
@@ -1093,11 +1051,7 @@ impl StrokeRenderer {
                 to.union_max(from);
             }
         }
-        let damage = merged.composite(pre, target, selection, lock_transparency, true);
-        if let Some(error) = merged.error() {
-            return Err(error);
-        }
-        Ok(damage)
+        merged.composite(pre, target, selection, lock_transparency, true)
     }
 
     /// Coverage tiles (stroke and Dual Brush) changed since the last call or composite, into
@@ -1132,77 +1086,6 @@ impl StrokeRenderer {
         selection: Option<&Surface>,
         lock_transparency: bool,
     ) -> Rect {
-        if passes.first().is_some_and(|p| p.gpu.is_some()) {
-            let mut changed = std::mem::take(&mut live.gpu_tail_keys);
-            for pass in passes.iter_mut() {
-                if let Some(gpu) = &mut pass.gpu {
-                    changed.extend(gpu.take_dirty_tiles());
-                    if full {
-                        changed.extend(gpu.bounds().tiles());
-                    }
-                }
-            }
-            let mut tails: Vec<_> = passes.iter().map(|pass| pass.tail_preview()).collect();
-            if let Some(error) = tails.iter().flatten().find_map(|tail| tail.gpu.as_ref().and_then(|gpu| gpu.error())) {
-                if let Some(gpu) = passes[0].gpu.as_mut() {
-                    gpu.set_error(error);
-                }
-                return Rect::EMPTY;
-            }
-            for tail in tails.iter_mut().flatten() {
-                if let Some(gpu) = &mut tail.gpu {
-                    live.gpu_tail_keys.extend(gpu.take_dirty_tiles());
-                }
-            }
-            changed.extend(&live.gpu_tail_keys);
-            if changed.is_empty() {
-                return Rect::EMPTY;
-            }
-            // Wet edges can alter an adjacent page. Restore whole shared tiles, including
-            // every old tail page, then gather enough neighboring coverage for the GPU halo.
-            let output: HashSet<_> = changed.iter().flat_map(|c| c.rect().inflate(photocraft_geom::TILE_SIZE).tiles()).collect();
-            let needed: HashSet<_> = output.iter().flat_map(|c| c.rect().inflate(photocraft_geom::TILE_SIZE * 2).tiles()).collect();
-            let needed: Vec<_> = needed.into_iter().collect();
-            let mut merged: Option<Box<dyn crate::gpu_backend::StrokeBackend>> = None;
-            for (pass, tail) in passes.iter().zip(&tails) {
-                let source = tail.as_ref().unwrap_or(pass);
-                if let Some(gpu) = &source.gpu {
-                    let mut branch = gpu.clone();
-                    if !full {
-                        branch.retain_tiles(&needed);
-                    }
-                    match &mut merged {
-                        Some(to) => to.union_max(branch.as_ref()),
-                        None => merged = Some(branch),
-                    }
-                }
-            }
-            let Some(mut merged) = merged else {
-                return Rect::EMPTY;
-            };
-            if let Some(error) = merged.error() {
-                if let Some(gpu) = passes[0].gpu.as_mut() {
-                    gpu.set_error(error);
-                }
-                return Rect::EMPTY;
-            }
-            // Union marks its whole input dirty; only changed output pages need compositing.
-            merged.take_dirty_tiles();
-            let mut restored = Rect::EMPTY;
-            for coord in output {
-                let rect = target.restore_tiles_from(pre, coord.rect());
-                restored = restored.union(&rect);
-                merged.mark_dirty(rect);
-            }
-            let damage = merged.composite(target, selection, lock_transparency, full);
-            if let Some(error) = merged.error()
-                && let Some(gpu) = passes[0].gpu.as_mut()
-            {
-                gpu.set_error(error);
-            }
-            live.bounds = merged.bounds();
-            return damage.union(&restored);
-        }
         let mut keys = std::mem::take(&mut live.tail_keys);
         for p in passes.iter_mut() {
             p.drain_dirty_into(&mut keys);
@@ -1232,7 +1115,6 @@ impl StrokeRenderer {
                 None => {
                     merged = Some(Self {
                         ctx: p.ctx.clone(),
-                        gpu: None,
                         generator: p.generator.clone(),
                         cov,
                         dual,
@@ -1307,7 +1189,6 @@ impl StrokeRenderer {
         let nc = if per_dab_color { fmt.map_or(0, |f| f.mode.color_channels()) } else { 0 };
         Self {
             ctx: BrushContext::new(brush),
-            gpu: None,
             generator: DabGenerator::new(brush, zoom),
             cov: CoverageMap::new(nc),
             dual: brush
@@ -1332,10 +1213,6 @@ impl StrokeRenderer {
     /// Prepare colour filtering against the immutable pre-stroke pixels.
     pub fn on_surface(brush: &BrushSettings, pre: &Surface, zoom: f32) -> Self {
         let mut renderer = Self::new(brush, Some(pre.format()), zoom);
-        renderer.gpu = crate::gpu_backend::begin(&renderer.ctx, pre);
-        if renderer.gpu.is_some() {
-            return renderer;
-        }
         renderer.transports[0] = LaneTransport::new(&renderer.ctx.brush, pre);
         renderer.transports[1] = renderer.ctx.secondary.as_ref().and_then(|c| LaneTransport::new(&c.brush, pre));
         let needs_base = |b: &BrushSettings| {
@@ -1360,23 +1237,10 @@ impl StrokeRenderer {
     }
     /// Union of the dab rectangles so far.
     pub fn bounds(&self) -> Rect {
-        if let Some(gpu) = &self.gpu {
-            return gpu.bounds();
-        }
         self.dual.as_ref().filter(|_| self.ctx.secondary.is_some()).map_or(self.cov.bounds, |d| self.cov.bounds.union(&d.bounds))
     }
 
     fn raster_pending(&mut self) {
-        if let Some(gpu) = &mut self.gpu {
-            gpu.rasterize(&self.ctx, &self.dab_buf, &self.dual_buf);
-            self.dabs_done += self.dab_buf.len();
-            if let Some(record) = &mut self.all_dabs {
-                record.extend_from_slice(&self.dab_buf);
-            }
-            self.dab_buf.clear();
-            self.dual_buf.clear();
-            return;
-        }
         let mut dabs = std::mem::take(&mut self.dab_buf);
         let mut duals = std::mem::take(&mut self.dual_buf);
         let wet = self.ctx.brush.wet_edges && !self.ctx.brush.erase;
@@ -1656,7 +1520,6 @@ impl StrokeRenderer {
         };
         let mut t = StrokeRenderer {
             ctx: self.ctx.clone(),
-            gpu: self.gpu.clone(),
             generator,
             cov: subset(&self.cov),
             dual: self.dual.as_ref().map(subset),
@@ -1679,20 +1542,8 @@ impl StrokeRenderer {
         Some(t)
     }
 
-    pub fn restore_preview(&self, pre: &Surface, target: &mut Surface, rect: Rect) -> Rect {
-        if self.gpu.is_some() {
-            return target.restore_tiles_from(pre, rect);
-        }
-        target.write_region(rect, &pre.read_region(rect));
-        rect
-    }
-
     /// Mark the coverage tiles over `r` for the next `composite` (e.g. to redraw over a preview).
     pub fn mark_dirty(&mut self, r: Rect) {
-        if let Some(gpu) = &mut self.gpu {
-            gpu.mark_dirty(r);
-            return;
-        }
         if r.is_empty() {
             return;
         }
@@ -1709,9 +1560,6 @@ impl StrokeRenderer {
     /// the stroke bounds, and forget them: what a live preview that composites its own paint has
     /// to redraw.
     pub fn take_dirty_rect(&mut self) -> Rect {
-        if let Some(gpu) = &mut self.gpu {
-            return gpu.take_dirty_rect();
-        }
         let r = self
             .cov
             .take_dirty()
@@ -1725,11 +1573,8 @@ impl StrokeRenderer {
 
     /// Final coverage over `r`, one value per pixel in rows (as [`dense_coverage`](Self::dense_coverage)
     /// over its bounds).
-    pub fn coverage_in(&self, r: Rect) -> Result<Vec<f32>, String> {
-        if let Some(gpu) = &self.gpu {
-            return gpu.coverage_in(r);
-        }
-        Ok((r.y0..r.y1).flat_map(|y| (r.x0..r.x1).map(move |x| (x, y))).map(|(x, y)| self.coverage_at_cpu(x, y)).collect())
+    pub fn coverage_in(&self, r: Rect) -> Vec<f32> {
+        (r.y0..r.y1).flat_map(|y| (r.x0..r.x1).map(move |x| (x, y))).map(|(x, y)| self.coverage_at(x, y)).collect()
     }
 
     fn expand_keys(keys: &mut HashSet<(i32, i32)>) {
@@ -1871,12 +1716,12 @@ impl StrokeRenderer {
             let d = dm.get(x, y) * brush.dual_brush.secondary_strength;
             let weight = (d / (p + d).max(0.0001)).clamp(0.0, 1.0);
             let union = p + d - p * d;
-            let filtered = self.coverage_at_cpu(x, y);
+            let filtered = self.coverage_at(x, y);
             let factor = (filtered / union.max(0.0001)).clamp(0.0, 1.0);
             std::array::from_fn(|i| destination[i] + (primary[i] + (secondary[i] - primary[i]) * weight - destination[i]) * factor)
         } else {
             let base = self.cov.get(x, y);
-            let masked = self.coverage_at_cpu(x, y);
+            let masked = self.coverage_at(x, y);
             let factor = if base > 0.0 { (masked / base).clamp(0.0, 1.0) } else { 0.0 };
             std::array::from_fn(|i| destination[i] + (primary[i] - destination[i]) * factor * brush.opacity)
         };
@@ -1901,7 +1746,7 @@ impl StrokeRenderer {
             s.read_pixel(x, y, &mut selected);
             selected[0]
         });
-        if self.coverage_at_cpu(x, y) * selection_value <= 0.0 {
+        if self.coverage_at(x, y) * selection_value <= 0.0 {
             return normal;
         }
         let bilinear = |point: [f32; 2], read: &dyn Fn(i32, i32) -> [f32; 4]| {
@@ -1929,7 +1774,7 @@ impl StrokeRenderer {
                     selected[0]
                 });
                 let opacity = if self.ctx.secondary.is_some() { 1.0 } else { self.ctx.brush.opacity };
-                let coverage = (self.coverage_at_cpu(xx, yy) * opacity * selection).clamp(0.0, 1.0);
+                let coverage = (self.coverage_at(xx, yy) * opacity * selection).clamp(0.0, 1.0);
                 if raw[3] > 0.0 { raw.map(|v| v * coverage / raw[3]) } else { [0.0, 0.0, 0.0, coverage] }
             };
             crate::pigment_material::shade(
@@ -1954,14 +1799,7 @@ impl StrokeRenderer {
     }
 
     /// Final stroke coverage at a pixel (stroke-level masks applied, before opacity/selection).
-    pub fn coverage_at(&self, x: i32, y: i32) -> Result<f32, String> {
-        if let Some(gpu) = &self.gpu {
-            return Ok(gpu.coverage_in(Rect::new(x, y, x + 1, y + 1))?.first().copied().unwrap_or(0.0));
-        }
-        Ok(self.coverage_at_cpu(x, y))
-    }
-
-    fn coverage_at_cpu(&self, x: i32, y: i32) -> f32 {
+    pub fn coverage_at(&self, x: i32, y: i32) -> f32 {
         let c = self.cov.get(x, y);
         if c <= 0.0 && self.ctx.secondary.is_none() {
             return 0.0;
@@ -1976,14 +1814,9 @@ impl StrokeRenderer {
     }
 
     /// Dense final coverage over the stroke bounds.
-    pub fn dense_coverage(&self) -> Result<(Rect, Vec<f32>), String> {
-        let bounds = self.bounds();
-        Ok((bounds, self.coverage_in(bounds)?))
-    }
-
-    pub(crate) fn dense_cpu_coverage(&self) -> (Rect, Vec<f32>) {
+    pub fn dense_coverage(&self) -> (Rect, Vec<f32>) {
         let b = self.bounds();
-        let out = (b.y0..b.y1).flat_map(|y| (b.x0..b.x1).map(move |x| (x, y))).map(|(x, y)| self.coverage_at_cpu(x, y)).collect();
+        let out = (b.y0..b.y1).flat_map(|y| (b.x0..b.x1).map(move |x| (x, y))).map(|(x, y)| self.coverage_at(x, y)).collect();
         (b, out)
     }
 
@@ -1992,9 +1825,6 @@ impl StrokeRenderer {
     /// `all = false` only tiles touched since the last composite are processed (interactive use).
     /// Returns the damaged rectangle.
     pub fn composite(&mut self, pre: &Surface, target: &mut Surface, selection: Option<&Surface>, lock_transparency: bool, all: bool) -> Rect {
-        if let Some(gpu) = &mut self.gpu {
-            return gpu.composite(target, selection, lock_transparency, all);
-        }
         self.composite_tiles(pre, target, selection, lock_transparency, all, true)
     }
 
@@ -2072,7 +1902,7 @@ impl StrokeRenderer {
                         continue;
                     }
                     let i = (y - tr.y0) as usize * w + (x - tr.x0) as usize;
-                    let m = self.coverage_at_cpu(x, y);
+                    let m = self.coverage_at(x, y);
                     let s = sel.as_ref().map_or(1.0, |(sc, v)| v[i * sc]);
                     let mut k = (m * opacity * s).min(1.0);
                     if k <= 0.0 {
@@ -2199,7 +2029,7 @@ impl StrokeRenderer {
                         s.read_pixel(x, y, &mut selected);
                         selected[0]
                     });
-                    if dither && self.coverage_at_cpu(x, y) * selection_value > 0.0 {
+                    if dither && self.coverage_at(x, y) * selection_value > 0.0 {
                         dither8(&mut native[..n], x, y);
                     }
                     region.extend_from_slice(&native[..n]);
@@ -2355,67 +2185,6 @@ mod material_regression {
     use crate::material::{WetColorMode, WetEdgeSettings};
     use photocraft_geom::Point;
 
-    #[derive(Clone, Debug)]
-    struct FailingUnionBackend {
-        stage: &'static str,
-        error: Option<String>,
-    }
-
-    impl crate::gpu_backend::StrokeBackend for FailingUnionBackend {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-        fn error(&self) -> Option<String> {
-            self.error.clone()
-        }
-        fn set_error(&mut self, error: String) {
-            self.error = Some(error);
-        }
-        fn fork(&self) -> Box<dyn crate::gpu_backend::StrokeBackend> {
-            Box::new(self.clone())
-        }
-        fn rasterize(&mut self, _: &BrushContext, _: &[Dab], _: &[Dab]) {}
-        fn bounds(&self) -> Rect {
-            Rect::EMPTY
-        }
-        fn mark_dirty(&mut self, _: Rect) {}
-        fn take_dirty_rect(&mut self) -> Rect {
-            Rect::EMPTY
-        }
-        fn take_dirty_tiles(&mut self) -> Vec<photocraft_geom::TileCoord> {
-            Vec::new()
-        }
-        fn retain_tiles(&mut self, _: &[photocraft_geom::TileCoord]) {}
-        fn composite(&mut self, _: &mut Surface, _: Option<&Surface>, _: bool, _: bool) -> Rect {
-            if self.stage == "composite" {
-                self.error = Some("composite failed".into());
-            }
-            Rect::EMPTY
-        }
-        fn union_max(&mut self, _: &dyn crate::gpu_backend::StrokeBackend) {
-            if self.stage == "union" {
-                self.error = Some("union failed".into());
-            }
-        }
-        fn coverage_in(&self, _: Rect) -> Result<Vec<f32>, String> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[test]
-    fn symmetry_union_reports_errors_from_its_temporary_gpu_branch() {
-        let pre = Surface::new(PixelFormat::RGBA32F);
-        for stage in ["union", "composite"] {
-            let mut first = StrokeRenderer::new(&BrushSettings::default(), Some(pre.format()), 1.0);
-            first.gpu = Some(Box::new(FailingUnionBackend { stage, error: None }));
-            let second = first.clone();
-            let mut target = pre.clone();
-            assert_eq!(first.composite_union(&second, &pre, &mut target, None, false), Err(format!("{stage} failed")));
-            assert_eq!(first.error(), None);
-            assert_eq!(second.error(), None);
-        }
-    }
-
     #[test]
     fn transported_lanes_filter_their_own_completed_wet_colors_before_merging() {
         let first = WetEdgeSettings { outline: WetOutline::Stroke, color_mode: WetColorMode::Hsl, ..Default::default() };
@@ -2451,7 +2220,7 @@ mod material_regression {
         let p = 0.4 * brush.dual_brush.primary_strength;
         let d = 0.6 * brush.dual_brush.secondary_strength;
         let weight = d / (p + d);
-        let factor = (renderer.coverage_at(0, 0).unwrap() / (p + d - p * d)).clamp(0.0, 1.0);
+        let factor = (renderer.coverage_at(0, 0) / (p + d - p * d)).clamp(0.0, 1.0);
         let expected: [f32; 4] = std::array::from_fn(|i| destination[i] + (a[i] + (b[i] - a[i]) * weight - destination[i]) * factor);
         let actual = renderer.transported_output(destination, [0.0; 4], 0, 0, 1.0);
         for i in 0..4 {

@@ -38,7 +38,6 @@ pub mod distort_cmds;
 pub mod doc_path;
 pub mod document_preset_cmds;
 pub mod edit_cmds;
-pub mod edit_scope;
 pub mod edit_menu_cmds;
 pub mod edit_scope;
 pub mod eraser_cmds;
@@ -121,7 +120,6 @@ pub mod swatch_cmds;
 pub mod symmetry_cmds;
 mod timeline_cmds;
 pub mod transform_cmds;
-pub mod cached_transform;
 mod trap_cmds;
 pub mod type_caret_cmds;
 pub mod type_cmds;
@@ -521,7 +519,6 @@ pub struct Session {
     cached_transform_commit: Option<cached_transform::CachedCommit>,
     /// A finished live stroke offered to the `paint.stroke` / `paint.pencil` that commits it
     /// ([`Session::offer_live_stroke`]).
-    cached_transform_commit: Option<cached_transform::CachedCommit>,
     pub(crate) live_commit: Option<brush_cmds::LiveCommit>,
     /// Documents a background open decoded but held back until the user answers the profile
     /// prompt ([`ColorState::open_question`](color_cmds::ColorState::open_question)): `(id,
@@ -816,7 +813,7 @@ impl Session {
         let mut active = st.active_layer;
         let r = f(&mut doc, &mut active)?;
         if let (Some(k), Some(id)) = (restrict, active) {
-            channel_cmds::restrict_to_color(&before, &mut doc, id, k)?;
+            channel_cmds::restrict_to_color(&before, &mut doc, id, k);
         }
         st.doc = Arc::new(doc);
         st.active_layer = active;

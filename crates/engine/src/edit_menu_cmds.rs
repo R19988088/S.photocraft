@@ -242,7 +242,7 @@ fn history_bytes(s: &Session, all: bool) -> usize {
 }
 
 fn clip_bytes(s: &Session) -> usize {
-    s.clipboard.as_ref().map_or(0, |c| c.surface.tiles().map(|(_, t)| t.storage_byte_len()).sum())
+    s.clipboard.as_ref().map_or(0, |c| c.surface.tiles().map(|(_, t)| t.bytes().len()).sum())
 }
 
 fn purge(s: &mut Session, what: &str) -> Result<Value> {
@@ -557,11 +557,6 @@ pub fn content_aware_plan_with(doc: &Document, id: LayerId, p: &Value, cmd: &str
     use crate::fill_cmds::{read_window, read_window_mask};
     let CafParams { sel, sb, edits, strokes, sampling, custom_mask, custom_rect, opts, output, surf } = caf_params(doc, id, p, cmd)?;
     let canvas = doc.bounds();
-    sel.try_materialize_region(canvas)?;
-    surf.try_materialize_region(canvas)?;
-    if let Some(mask) = custom_mask {
-        mask.try_materialize_region(canvas)?;
-    }
     let cancel = || ctl.cancelled();
     let stop = || if ctl.cancelled() { Err(EngineError::Cancelled) } else { Ok(()) };
     // The fill area: the selection, then the lasso edits, over a rectangle that holds them all.
@@ -631,7 +626,6 @@ pub fn content_aware_plan_with(doc: &Document, id: LayerId, p: &Value, cmd: &str
     let pixels = read_window(surf, rect, &cancel).ok_or(EngineError::Cancelled)?;
     let (img, layer_px) = if sample_all {
         stop()?;
-        crate::sample_cmds::materialize_render_sources(doc)?;
         (crate::retouch_cmds::composite_region(doc, Some(id), crate::retouch_cmds::SampleLayers::All, rect, fmt).data, Some(pixels))
     } else {
         (pixels, None)
@@ -848,7 +842,7 @@ fn apply_content_aware_fill(s: &mut Session, label: &str, id: LayerId, output: &
                 filled[j] = original[o] + (filled[j] - original[o]) * c;
             }
         });
-        surf.try_write_region(window, &filled)?;
+        surf.write_region(window, &filled);
         Ok(target)
     })?;
     Ok(json!({"layer": layer.0, "filled": n_hole, "window": [window.x0, window.y0, window.width(), window.height()]}))
@@ -972,10 +966,7 @@ fn content_aware_scale(s: &mut Session, p: &Value) -> Result<Value> {
         move |ctx| {
             ctx.progress(0.0, label);
             let surf = doc.layer(id).and_then(|l| l.surface()).ok_or(EngineError::NoLayer(id))?;
-            let img = surf.try_read_region(region)?;
-            if let Some(mask) = &protect_mask {
-                mask.try_materialize_region(region)?;
-            }
+            let img = surf.read_region(region);
             let protect: Option<Vec<f32>> =
                 protect_mask.map(|m| (0..w * h).map(|i| m.sample_channel(region.x0 + (i % w) as i32, region.y0 + (i / w) as i32, 0)).collect());
             cas_pixels(ctx, label, &img, (w, h), surf.format(), protect, skin_tones, (nw, nh), amount)
@@ -984,7 +975,7 @@ fn content_aware_scale(s: &mut Session, p: &Value) -> Result<Value> {
             s.edit(label, |doc, _| {
                 let surf = writable_surface(doc, id)?;
                 crate::pixels::try_clear_surface(surf, region, None)?;
-                surf.try_write_region(dst, &out)?;
+                surf.write_region(dst, &out);
                 surf.prune();
                 Ok(())
             })?;
@@ -1043,14 +1034,11 @@ impl ContentAwareScalePreview {
         let mut img = Vec::with_capacity(pw * ph * n);
         for j in 0..ph {
             ctx.check()?;
-            let row = surf.try_read_region(Rect::from_xywh(region.x0, src_y(j), w, 1))?;
+            let row = surf.read_region(Rect::from_xywh(region.x0, src_y(j), w, 1));
             for &x in &src_x {
                 let at = (x - region.x0) as usize * n;
                 img.extend_from_slice(row.get(at..at + n).ok_or_else(|| EngineError::Other("preview read out of bounds".into()))?);
             }
-        }
-        if let Some(mask) = protect {
-            mask.try_materialize_region(*region)?;
         }
         let protect = protect.as_ref().map(|m| (0..pw * ph).map(|i| m.sample_channel(src_x[i % pw], src_y(i / pw), 0)).collect());
         let out = cas_pixels(ctx, "Content-Aware Scale", &img, (pw, ph), fmt, protect, *skin_tones, (pnw, pnh), *amount)?;
@@ -1539,44 +1527,3 @@ pub fn custom_shapes(s: &Session) -> &[CustomShape] {
 #[cfg(test)]
 #[path = "edit_menu_cmds/tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod gpu_readback_tests {
-    use super::*;
-    use photocraft_geom::TileCoord;
-    use photocraft_raster::{Tile, TileBackend, TileReadError};
-    use std::sync::Arc;
-
-    #[derive(Debug)]
-    struct FailedReadback;
-
-    impl TileBackend for FailedReadback {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn read_bytes(&self) -> std::result::Result<Box<[u8]>, TileReadError> {
-            Err(TileReadError("test readback failure".into()))
-        }
-    }
-
-    #[test]
-    fn content_aware_scale_and_preview_report_gpu_readback_failure() {
-        let mut session = Session::new();
-        session.execute("file.new", json!({"width": 2, "height": 2})).unwrap();
-        session
-            .edit("GPU pixels", |doc, active| {
-                let surface = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
-                surface.set_tile(TileCoord { tx: 0, ty: 0 }, Arc::new(Tile::from_backend(surface.format(), Arc::new(FailedReadback))));
-                Ok(())
-            })
-            .unwrap();
-        let before = session.active().unwrap().doc.clone();
-        let params = json!({"width": 1, "height": 1, "amount": 0});
-        let preview = ContentAwareScalePreview::new(&session, &params, 2).unwrap();
-        assert!(preview.run(&crate::jobs::JobCtx::new()).is_err());
-        assert!(content_aware_scale(&mut session, &params).is_err());
-        assert!(Arc::ptr_eq(&before, &session.active().unwrap().doc));
-    }
-}

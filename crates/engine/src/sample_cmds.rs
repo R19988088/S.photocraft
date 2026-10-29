@@ -175,41 +175,6 @@ pub fn sample_color(doc: &Document, active: Option<LayerId>, x: f64, y: f64, siz
     average(&buf.px, averaging_model(doc), doc.depth)
 }
 
-/// Prepare the native pixels consumed by the CPU compositor; successful reads stay cached.
-pub(crate) fn materialize_render_sources(doc: &Document) -> Result<()> {
-    let read =
-        |surface: &photocraft_raster::Surface| surface.try_materialize().map_err(|error| EngineError::Other(format!("could not read sampled pixels: {error}")));
-    for (path, _, layer) in doc.walk() {
-        if !layer.visible || (1..path.len()).any(|depth| doc.layer_at(&path[..depth]).is_some_and(|parent| !parent.visible)) {
-            continue;
-        }
-        if let Some(surface) = layer.surface() {
-            read(surface)?;
-        }
-        if let Some(mask) = &layer.mask {
-            read(&mask.surface)?;
-        }
-        if let LayerContent::Smart(smart) = &layer.content
-            && let Some(mask) = &smart.filter_mask
-        {
-            read(&mask.surface)?;
-        }
-    }
-    for pattern in &doc.patterns {
-        read(&pattern.surface)?;
-    }
-    Ok(())
-}
-
-/// Fallible CPU sampling for command callers that can report GPU readback failures.
-pub fn try_sample_color(doc: &Document, active: Option<LayerId>, x: f64, y: f64, size: u32, which: SampleLayers) -> Result<[f32; 4]> {
-    let Some(rect) = sample_rect(x, y, size, doc.bounds()) else { return Ok([0.0; 4]) };
-    let Some(src) = sampled_document(doc, active, which) else { return Ok([0.0; 4]) };
-    materialize_render_sources(&src)?;
-    let buf = photocraft_compose::render(&src, rect);
-    Ok(if size == 1 { buf.px.first().copied().unwrap_or_default() } else { average(&buf.px, averaging_model(doc), doc.depth) })
-}
-
 /// The colour model the averages are taken in: the document's, except CMYK. CMYK documents are
 /// composited in RGB (see `photocraft_compose`), and the profile's RGB → CMYK → RGB round trip
 /// is not exact (deep shadows move by several levels), so averaging in CMYK would make a 3×3
@@ -268,7 +233,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let size = size_param(CMD, p)?;
             let which = layers_param(CMD, p)?;
             let d = s.active().ok_or(EngineError::NoDocument)?;
-            Ok(json!(try_sample_color(&d.doc, d.active_layer, x, y, size, which)?))
+            Ok(json!(sample_color(&d.doc, d.active_layer, x, y, size, which)))
         },
         journal: false,
     }]

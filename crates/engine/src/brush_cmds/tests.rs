@@ -11,45 +11,6 @@ fn surface(s: &Session) -> Surface {
     d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().clone()
 }
 
-#[test]
-fn cpu_brush_consumers_report_gpu_readback_failure_without_changes() {
-    use photocraft_geom::TileCoord;
-    use photocraft_raster::{Tile, TileBackend, TileReadError};
-    use std::sync::Arc;
-
-    #[derive(Debug)]
-    struct Unreadable;
-    impl TileBackend for Unreadable {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-        fn read_bytes(&self) -> std::result::Result<Box<[u8]>, TileReadError> {
-            Err(TileReadError("device lost".into()))
-        }
-    }
-    for command in ["paint.mixerBrush", "paint.colorReplacement", "brush.defineFromSelection"] {
-        for selection in [false, true] {
-            let mut s = session(32, 32);
-            s.execute("select.rect", json!({"x":0,"y":0,"width":16,"height":16})).unwrap();
-            let st = s.active_mut().unwrap();
-            let id = st.active_layer.unwrap();
-            let doc = Arc::make_mut(&mut st.doc);
-            let surface = if selection { doc.selection.as_mut().unwrap() } else { doc.layer_mut(id).unwrap().surface_mut().unwrap() };
-            surface.set_tile(TileCoord::new(0, 0), Arc::new(Tile::from_backend(surface.format(), Arc::new(Unreadable))));
-            let (before, revision, history) = (st.doc.clone(), st.revision, st.history.past_len());
-            let (brush, mixer, presets) = (s.tools.brush.clone(), s.tools.mixer.clone(), s.tools.presets.len());
-            let result = s.execute(command, json!({"points":[[8,8]],"size":8,"name":"Unreadable"}));
-            assert!(result.is_err_and(|error| error.to_string().contains("could not read")), "{command}, selection={selection}");
-            let st = s.active().unwrap();
-            assert!(Arc::ptr_eq(&before, &st.doc));
-            assert_eq!((st.revision, st.history.past_len()), (revision, history));
-            assert_eq!(s.tools.brush, brush);
-            assert_eq!(s.tools.mixer, mixer);
-            assert_eq!(s.tools.presets.len(), presets);
-        }
-    }
-}
-
 fn rgba(s: &Session, x: i32, y: i32) -> [f32; 4] {
     surface(s).rgba(x, y)
 }

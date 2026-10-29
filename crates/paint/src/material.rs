@@ -191,7 +191,7 @@ impl WetEdgeSettings {
     pub fn color(&self, paint: [f32; 4], base: [f32; 4], edge: f32, wet: ResolvedWet) -> [f32; 4] {
         self.color_with_effect(paint, base, self.color_strength(wet.strength) * edge)
     }
-    pub fn color_strength(&self, strength: f32) -> f32 {
+    pub(crate) fn color_strength(&self, strength: f32) -> f32 {
         if strength <= 0.0001 {
             0.0
         } else if self.style == WetStyle::Photoshop {

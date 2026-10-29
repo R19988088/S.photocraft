@@ -330,7 +330,6 @@ pub fn document_to_image(doc: &Document, warnings: &mut Vec<String>) -> Result<I
 
 /// `cmyk_target` / `lab_target`: the format stores CMYK / Lab pixels.
 fn document_to_image_for(doc: &Document, warnings: &mut Vec<String>, cmyk_target: bool, lab_target: bool) -> Result<Image, IoError> {
-    crate::pixels::materialize_document(doc)?;
     let (w, h) = (doc.size.width, doc.size.height);
     let canvas = doc.bounds();
     let fmt = doc.pixel_format();
@@ -344,7 +343,7 @@ fn document_to_image_for(doc: &Document, warnings: &mut Vec<String>, cmyk_target
         // Native path: keep model and depth. The surface's encoded samples are the codec's raw
         // native-endian samples, copied a band of rows at a time (alpha dropped when opaque).
         let ch = fmt.channels();
-        let opaque = opaque_surface(s, canvas)?;
+        let opaque = opaque_surface(s, canvas);
         let layout = layout_for(fmt.mode, !opaque);
         let bps = fmt.sample.bytes();
         let keep = if opaque { (ch - 1) * bps } else { ch * bps };
@@ -353,7 +352,7 @@ fn document_to_image_for(doc: &Document, warnings: &mut Vec<String>, cmyk_target
         let mut y = 0;
         while y < h as i32 {
             let y1 = y.saturating_add(rows).min(h as i32);
-            let band = s.try_to_interleaved(Rect::new(0, y, w as i32, y1)).map_err(|error| IoError::Unsupported(error.to_string()))?;
+            let band = s.to_interleaved(Rect::new(0, y, w as i32, y1));
             if opaque {
                 for px in band.chunks_exact(ch * bps) {
                     data.extend_from_slice(&px[..keep]);
@@ -493,33 +492,23 @@ fn drop_alpha(data: &mut Vec<u8>, color: usize, alpha: usize) {
 }
 
 /// Whether every pixel of `s` over `r` is fully opaque (read from the tiles, no copy).
-fn opaque_surface(s: &Surface, r: Rect) -> Result<bool, IoError> {
+fn opaque_surface(s: &Surface, r: Rect) -> bool {
     let fmt = s.format();
     let (ch, bps) = (fmt.channels(), fmt.sample.bytes());
     let a = ch - 1;
     let alpha_ok = |px: &[u8]| photocraft_color::read_sample(px, fmt.sample, a) >= 1.0;
     let mut default = vec![0u8; ch * bps];
     photocraft_raster::encode_pixel(&fmt, &s.default_pixel(), &mut default);
-    for tc in r.tiles() {
+    r.tiles().all(|tc| {
         let tr = tc.rect().intersect(&r);
         match s.tile(tc) {
-            None => {
-                if !alpha_ok(&default) {
-                    return Ok(false);
-                }
-            }
-            Some(tile) => {
-                let bytes = tile.try_bytes().map_err(|error| IoError::Unsupported(error.to_string()))?;
-                for y in tr.y0..tr.y1 {
-                    let row = ((y - tc.rect().y0) as usize * TILE_SIZE as usize + (tr.x0 - tc.rect().x0) as usize) * ch * bps;
-                    if !bytes[row..row + tr.width() as usize * ch * bps].chunks_exact(ch * bps).all(alpha_ok) {
-                        return Ok(false);
-                    }
-                }
-            }
+            None => alpha_ok(&default),
+            Some(t) => (tr.y0..tr.y1).all(|y| {
+                let row = ((y - tc.rect().y0) as usize * TILE_SIZE as usize + (tr.x0 - tc.rect().x0) as usize) * ch * bps;
+                t.bytes()[row..row + tr.width() as usize * ch * bps].chunks_exact(ch * bps).all(alpha_ok)
+            }),
         }
-    }
-    Ok(true)
+    })
 }
 
 /// The part of a flat export that rendering the composite takes, the encoder taking the rest.
