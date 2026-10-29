@@ -502,6 +502,9 @@ pub struct DocWindow {
     pub document: usize,
     pub view: View,
     pub open: bool,
+    /// A tab torn off into this window is removed from the main document strip.
+    #[serde(default)]
+    pub detached: bool,
     /// Where the window opens on screen (outer top-left, in points); `None` lets the OS place it.
     /// A tab dragged off the tab strip opens its window where it was dropped (#3733).
     #[serde(default)]
