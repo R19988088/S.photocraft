@@ -809,7 +809,7 @@ pub(crate) fn float_window(app: &mut PhotocraftApp, doc: usize, offset: usize) -
     let wid = app.ui.alloc_id();
     let mut view = app.ui.views.get(doc).cloned().unwrap_or_default();
     view.fit_pending = offset > 0 || view.fit_pending;
-    app.ui.windows.push(crate::state::DocWindow { id: wid, document: doc, view, open: true, position: None });
+    app.ui.windows.push(crate::state::DocWindow { id: wid, document: doc, view, open: true, detached: false, position: None });
     wid
 }
 
