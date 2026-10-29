@@ -3304,7 +3304,7 @@ layerLabel	No Color	Nessun colore
 	Shortcuts	Scorciatoie
 	Keyboard	Tastiera
 	Mouse	Mouse
-	Tablet	Tavoletta grafica
+	Tablet	Tavoletta
 	Display	Monitor
 	Panel	Pannello
 	Hide Grid	Nascondi griglia
@@ -4447,3 +4447,12 @@ shape	Appearance	Aspetto
 	Primary Brush	Pennello principale
 	Secondary Brush	Pennello secondario
 	Color Output	Deposito colore
+	Pressure dead zone	Zona morta della pressione
+	Elasticity	Elasticità
+	Stroke stability	Stabilità del tratto
+	Pressure calibration	Calibrazione della pressione
+	Retained peak	Picco mantenuto
+	Blend Attribute	Attributo di fusione
+	Color Attribute	Attributi del colore
+	Wet Edge	Bordi bagnati
+	Tip	Punta pennello

@@ -710,7 +710,6 @@ pub struct PhotocraftApp {
     thumb_documents: Vec<(DocId, std::sync::Weak<Document>)>,
     /// Content bounds cached per (key, revision): scanning a 36 MP layer every frame cost ~77 ms.
     bounds_cache: HashMap<u64, (u64, photocraft_geom::Rect)>,
-    /// Current frame context, used to resume nonblocking GPU bounds reductions.
     bounds_context: Option<egui::Context>,
     /// Downsampled proxy of the active document for live previews: (doc, revision, k, proxy).
     pub(crate) proxy: Option<(DocId, u64, u32, std::sync::Arc<Document>)>,
@@ -1078,9 +1077,36 @@ impl PhotocraftApp {
         if gate.is_some() {
             self.session.authorize = gate;
         }
+        let replaces_shape_path = id.starts_with("layer.combineShapes.")
+            || matches!(id, "shape.rasterize" | "layer.rasterize.shape")
+            || (id == "shape.edit"
+                && (params.get("path").is_some()
+                    || params.get("op").is_some()
+                    || (params.get("components").is_none()
+                        && ["kind", "rect", "radii", "radius", "sides", "starRatio", "from", "to", "weight"].iter().any(|key| params.get(*key).is_some()))));
         let result = self.run_command(id, params);
         if gate.is_some() {
             self.session.authorize = None;
+        }
+        if result.is_ok() && (replaces_shape_path || matches!(id, "layer.select" | "select.allLayers" | "select.deselectLayers")) {
+            self.ui.shape_components = None;
+        }
+        if result.is_ok()
+            && matches!(
+                id,
+                "edit.undo"
+                    | "edit.redo"
+                    | "history.undo"
+                    | "history.redo"
+                    | "history.selectState"
+                    | "history.deleteState"
+                    | "history.selectSnapshot"
+                    | "file.revert"
+            )
+            && let Some(components) = &mut self.ui.shape_components
+        {
+            // Restored paths can reuse an index for another component; keep explicit deselection.
+            components.targets.clear();
         }
         // An explicit channel target (⌘2, ⌘\, ⌘3…) decides what the Layers panel targets too:
         // ⌘2 after the mask was targeted goes back to the layer's pixels.
@@ -1771,6 +1797,9 @@ impl PhotocraftApp {
     /// [`Self::save_automation`] writing a Targa with `tga_bits` per pixel (`None`: 32 with an
     /// alpha channel or transparency, else 24). Automation saves never prompt.
     pub fn save_automation_with(&mut self, path: Option<String>, tga_bits: Option<photocraft_io::TgaBits>) -> Result<Value, String> {
+        if crate::transform_tool::is_cached_raster(self) {
+            return Err("Press Enter to apply the pending transform before saving or exporting.".into());
+        }
         let target = {
             let state = self.session.active().ok_or("no document")?;
             // As File › Save: without `path` only a layered file is written back (#416).
@@ -1912,6 +1941,16 @@ impl eframe::App for PhotocraftApp {
         }
         self.last_frame_time = now;
         self.sync_views();
+        if self.ui.shape_components.as_ref().is_some_and(|c| Some(c.doc) != self.session.active().map(|s| s.doc.id)) {
+            self.ui.shape_components = None;
+        }
+        if let (Some(c), Some(st)) = (&mut self.ui.shape_components, self.session.active()) {
+            c.targets.retain(|t| {
+                st.doc
+                    .layer(t.layer)
+                    .is_some_and(|l| matches!(&l.content, photocraft_doc::LayerContent::Shape(sh) if sh.path.components().iter().any(|r| r.start == t.index)))
+            });
+        }
         crate::type_font_preview::follow_hover(self, ctx);
         self.check_gpu(ctx);
         #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
@@ -1928,6 +1967,7 @@ impl eframe::App for PhotocraftApp {
             vector_ui::pen_commit(self, false);
         }
         transform_tool::end_if_left(self);
+        workspace_ui::refresh_held_command(self, ctx);
         shape_stroke_ui::sync_editor(self, ctx);
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
@@ -2269,7 +2309,7 @@ impl PhotocraftApp {
         }
         // Check snapshots every sync, but walk the layer tree only after it changes. A Weak
         // tracks replacement (including undo and preserved-ID reopen) without retaining pixels.
-        if !self.thumbs.is_empty() || cfg!(not(target_arch = "wasm32")) && self.gpu.is_some() {
+        if !self.thumbs.is_empty() {
             let mut live = std::collections::HashSet::new();
             let mut pending: Vec<_> = documents.iter().flat_map(|st| &st.doc.layers).collect();
             while let Some(layer) = pending.pop() {
@@ -2286,10 +2326,6 @@ impl PhotocraftApp {
             }
             // Native files can restore IDs: retain the union across all open documents, rather
             // than deleting an ID just because one document containing it was closed.
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(gpu) = &self.gpu {
-                gpu.retain_layer_thumbnails(&live.iter().filter_map(|(id, kind)| (*kind == mask_thumbs_ui::THUMB_LAYER).then_some(*id)).collect());
-            }
             self.thumbs.retain(|key, _| live.contains(key));
             self.thumb_frames.retain(|id, _| live.contains(&(*id, mask_thumbs_ui::THUMB_LAYER)));
         }
@@ -2342,38 +2378,6 @@ impl PhotocraftApp {
         });
         self.thumb_frames.insert(layer.id, frame);
         (self.store_thumb(ctx, key, rev, img), frame)
-    }
-
-    /// GPU thumbnail framing stays on device, alongside its pixels. Its Layers callback
-    /// draws the fitted checker and image without requesting CPU bounding coordinates.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn gpu_layer_thumb(&self, doc: &Document, layer: &photocraft_doc::Layer) -> Option<egui::TextureId> {
-        let gpu = self.gpu.as_ref()?;
-        let surface = layer.surface()?;
-        if !surface.tiles().any(|(_, tile)| tile.backend().is_some()) {
-            return None;
-        }
-        let clip = self.session.prefs().interface.clip_thumbnails_to_layer_bounds;
-        let rev = surface_fingerprint(surface) ^ (doc.size.width as u64) << 40 ^ u64::from(clip) << 63;
-        gpu.layer_thumbnail(doc.id.0, layer.id, rev, surface, doc.bounds(), clip)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn paint_gpu_layer_thumb(&self, painter: &egui::Painter, doc: &Document, layer: &photocraft_doc::Layer, rect: egui::Rect) -> bool {
-        if self.gpu_layer_thumb(doc, layer).is_none() {
-            return false;
-        }
-        self.gpu.as_ref().is_some_and(|gpu| gpu.paint_layer_thumbnail(painter, doc.id.0, layer.id, rect))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn gpu_layer_thumb(&self, _doc: &Document, _layer: &photocraft_doc::Layer) -> Option<egui::TextureId> {
-        None
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn paint_gpu_layer_thumb(&self, _painter: &egui::Painter, _doc: &Document, _layer: &photocraft_doc::Layer, _rect: egui::Rect) -> bool {
-        false
     }
 
     /// The History panel thumbnail of snapshot `snap` of document `doc` (#2966): its composite,
@@ -2523,45 +2527,6 @@ impl PhotocraftApp {
         {
             return *b;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let b = if surface.tiles().any(|(_, tile)| tile.backend().is_some_and(|backend| backend.as_any().is::<photocraft_gpu::tile::GpuTileSnapshot>())) {
-            let mut bounds = photocraft_geom::Rect::EMPTY;
-            let mut pending = false;
-            let mut failed = false;
-            for (coord, tile) in surface.tiles() {
-                let local = if let Some(snapshot) = tile.backend().and_then(|backend| backend.as_any().downcast_ref::<photocraft_gpu::tile::GpuTileSnapshot>())
-                {
-                    match snapshot.poll_content_bounds(surface.default_bytes()) {
-                        Ok(Some(local)) => local,
-                        Ok(None) => {
-                            pending = true;
-                            continue;
-                        }
-                        Err(error) => {
-                            log::error!("GPU content bounds: {error}");
-                            failed = true;
-                            continue;
-                        }
-                    }
-                } else {
-                    tile.content_bounds(surface.default_bytes())
-                };
-                if let Some((x0, y0, x1, y1)) = local {
-                    let origin = coord.rect();
-                    bounds = bounds.union(&photocraft_geom::Rect::new(x0.into(), y0.into(), x1.into(), y1.into()).translate(origin.x0, origin.y0));
-                }
-            }
-            if pending || failed {
-                if pending && let Some(ctx) = &self.bounds_context {
-                    ctx.request_repaint();
-                }
-                return self.bounds_cache.get(&key).map_or(photocraft_geom::Rect::EMPTY, |(_, bounds)| *bounds);
-            }
-            bounds
-        } else {
-            surface.content_bounds()
-        };
-        #[cfg(target_arch = "wasm32")]
         let b = surface.content_bounds();
         if self.bounds_cache.len() > 256 {
             self.bounds_cache.clear();

@@ -279,7 +279,7 @@ fn fit_closed(lp: &[P], tol: f64, window: f64) -> Subpath {
     for i in 0..m {
         knots[(i + 1) % m].in_ctrl = pt(segs[i][2]);
     }
-    Subpath { closed: true, knots, op: PathOp::Combine }
+    Subpath { style: None, closed: true, knots, op: PathOp::Combine }
 }
 
 /// Most pointer samples [`fit_trace`] fits: a longer trace is thinned evenly first, so the work
@@ -363,7 +363,7 @@ fn fit_open(lp: &[P], tol: f64, window: f64) -> Subpath {
     if let Some(s) = segs.last() {
         knots.push(Knot { anchor: pt(s[3]), in_ctrl: pt(s[2]), out_ctrl: pt(s[3]), smooth: false });
     }
-    Subpath { closed: false, knots, op: PathOp::Combine }
+    Subpath { style: None, closed: false, knots, op: PathOp::Combine }
 }
 
 /// Distance from `q` to the segment `a`–`b`.

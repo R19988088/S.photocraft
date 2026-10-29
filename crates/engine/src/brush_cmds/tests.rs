@@ -59,6 +59,26 @@ fn same_pixels(a: &Surface, b: &Surface, r: Rect) -> bool {
 }
 
 #[test]
+fn numeric_smoothing_override_cannot_enable_stroke_filtering() {
+    let mut s = session(80, 40);
+    for pulled_string in [false, true] {
+        s.tools.brush.smoothing = photocraft_paint::Smoothing { enabled: false, amount: 0.2, pulled_string, ..Default::default() };
+        let resolved = resolve_brush(&s, &json!({"smoothing": 0.9}), "paint.stroke").unwrap();
+        assert!(!resolved.smoothing.enabled);
+        assert_eq!(resolved.smoothing.pulled_string, pulled_string);
+        assert_eq!(resolved.smoothing.amount, 0.9);
+    }
+    s.tools.brush.smoothing.enabled = true;
+    s.tools.brush.smoothing.pulled_string = false;
+    let resolved = resolve_brush(&s, &json!({"smoothing": 0.9}), "paint.stroke").unwrap();
+    assert!(!resolved.smoothing.pulled_string);
+    let points = [StrokePoint::new(0.0, 0.0, 1.0), StrokePoint::new(60.0, 20.0, 0.5)];
+    let out = photocraft_paint::dynamics::smooth_points(&resolved.smoothing, 1.0, &points);
+    assert_eq!(out.len(), points.len());
+    assert_eq!((out[1].x, out[1].y, out[1].pressure), (60.0, 20.0, 0.5));
+}
+
+#[test]
 fn stroke_backwards_compatible() {
     let mut s = session(80, 40);
     let r = s.execute("paint.stroke", json!({"points": [[4, 20], [60, 20]], "size": 6, "color": "#0000ff"})).unwrap();

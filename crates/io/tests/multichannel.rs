@@ -81,8 +81,12 @@ fn resources_and_global_blocks_survive_a_save() {
     d.guides.horizontal.push(2.0);
     d.guides.vertical.push(3.0);
     d.global_light.angle = 60.0;
-    let path =
-        Path::new(vec![Subpath { closed: true, op: PathOp::Combine, knots: vec![Knot::corner(1.0, 1.0), Knot::corner(8.0, 1.0), Knot::corner(4.0, 4.0)] }]);
+    let path = Path::new(vec![Subpath {
+        style: None,
+        closed: true,
+        op: PathOp::Combine,
+        knots: vec![Knot::corner(1.0, 1.0), Knot::corner(8.0, 1.0), Knot::corner(4.0, 4.0)],
+    }]);
     d.paths.push(NamedPath { name: "Outline".into(), path, psd_raw: None });
 
     let (back, d2) = roundtrip(&d);

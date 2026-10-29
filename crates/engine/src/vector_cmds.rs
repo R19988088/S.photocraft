@@ -221,7 +221,12 @@ pub fn parse_path(v: &Value) -> std::result::Result<Path, String> {
             Some(o) => op_from(o).ok_or(format!("subpath {i}: unknown op `{o}`"))?,
             None => PathOp::Combine,
         };
-        out.push(Subpath { closed: s.get("closed").and_then(Value::as_bool).unwrap_or(true), knots, op });
+        out.push(Subpath {
+            style: s.get("style").filter(|v| !v.is_null()).map(|v| serde_json::from_value(v.clone()).map_err(|e| format!("subpath {i}: {e}"))).transpose()?,
+            closed: s.get("closed").and_then(Value::as_bool).unwrap_or(true),
+            knots,
+            op,
+        });
     }
     let fill_rule = match v.get("fillRule").or_else(|| v.get("fill_rule")).and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
         Some("evenodd" | "even-odd" | "even_odd") => FillRule::EvenOdd,
@@ -236,6 +241,7 @@ pub fn path_json(p: &Path) -> Value {
     json!({
         "subpaths": p.subpaths.iter().map(|s| json!({
             "closed": s.closed,
+            "style": s.style,
             "op": op_name(s.op),
             "knots": s.knots.iter().map(|k| json!({ "anchor": a(k.anchor), "in": a(k.in_ctrl), "out": a(k.out_ctrl), "smooth": k.smooth })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
@@ -698,6 +704,42 @@ fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
     let fg = s.tools.foreground;
     let fgc = Color::rgba(fg[0], fg[1], fg[2], fg[3]);
     let name = p.get("name").and_then(Value::as_str).map(str::to_string);
+    if let Some(components) = p.get("components") {
+        let indices = components.as_array().ok_or_else(|| bad(CMD, "components must be an array"))?;
+        let indices: Vec<usize> = indices
+            .iter()
+            .map(|v| v.as_u64().and_then(|i| usize::try_from(i).ok()).ok_or_else(|| bad(CMD, "invalid component index")))
+            .collect::<Result<_>>()?;
+        if indices.is_empty() {
+            return Err(bad(CMD, "select a shape component"));
+        }
+        with_shape(s, id, "Edit Shape", |sh, _| {
+            let ranges = sh.path.components();
+            for index in &indices {
+                let range = ranges.iter().find(|r| r.start == *index).ok_or_else(|| bad(CMD, "no such shape component"))?;
+                let sub = &mut sh.path.subpaths[range.start];
+                if let Some(v) = p.get("fill") {
+                    sub.style = Some(photocraft_doc::vector::ComponentStyle { fill: parse_fill(v).map_err(|e| bad(CMD, e))? });
+                }
+                if p.get("radii").is_some() {
+                    if range.len() != 1 {
+                        return Err(bad(CMD, "this component is not a rectangle"));
+                    }
+                    let live = vector::shapes::rectangle_from_subpath(sub).ok_or_else(|| bad(CMD, "this component is not a rectangle"))?;
+                    let next = live_from_params(CMD, "roundedRect", p, Some(&live))?;
+                    let generated = vector::shapes::live_path(&next);
+                    sub.knots = generated.subpaths.first().ok_or_else(|| bad(CMD, "empty rectangle"))?.knots.clone();
+                    if ranges.len() == 1 {
+                        sh.live = Some(next);
+                    }
+                }
+            }
+            vector::flatten::validate_shape(&sh.path, sh.stroke.as_ref()).map_err(|e| bad(CMD, e))?;
+            sh.psd_raw = None;
+            Ok(())
+        })?;
+        return shape_info(s, id);
+    }
     with_shape(s, id, "Edit Shape", |sh, layer| {
         if let Some(v) = p.get("path") {
             sh.path = parse_path(v).map_err(|e| bad(CMD, e))?;
@@ -715,7 +757,11 @@ fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
             // that its scalar radii cannot represent. Re-entering unchanged values
             // must not regenerate the outline and silently discard that geometry.
             if sh.live.as_ref() != Some(&l) {
+                let style = sh.path.subpaths.first().and_then(|sub| sub.style.clone());
                 sh.path = vector::shapes::live_path(&l);
+                if let Some(sub) = sh.path.subpaths.first_mut() {
+                    sub.style = style;
+                }
                 sh.live = Some(l);
                 sh.psd_raw = None;
             }
@@ -740,6 +786,9 @@ fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
         }
         if let Some(v) = p.get("fill") {
             sh.fill = parse_fill(v).map_err(|e| bad(CMD, e))?;
+            for sub in &mut sh.path.subpaths {
+                sub.style = None;
+            }
         }
         if let Some(v) = p.get("stroke") {
             sh.stroke = parse_stroke(v, sh.stroke.clone(), fgc).map_err(|e| bad(CMD, e))?;
@@ -1709,7 +1758,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Shape",
             [],
             leak(format!(
-                r##"{{"layer":id?,"path":{{…}}? (replaces; drops live shape),"kind":str?,"rect":[x,y,w,h]?,"radii":[tl,tr,br,bl]|r?,"sides":n?,"starRatio":r?,"from":[x,y]?,"to":[x,y]?,"weight":px? (live-shape params regenerate the path),"move":[dx,dy]?,"transform":[a,b,c,d,e,f]?,"op":"combine|…"? + "subpath":index? (default all but the first),"fillRule":"nonzero|evenodd"?,{fill}?,{stroke}? (merged into the current stroke),"name":str?}} → shape.info"##
+                r##"{{"layer":id?,"path":{{…}}? (replaces; drops live shape),"kind":str?,"rect":[x,y,w,h]?,"radii":[tl,tr,br,bl]|r?,"sides":n?,"starRatio":r?,"from":[x,y]?,"to":[x,y]?,"weight":px? (live-shape params regenerate the path),"move":[dx,dy]?,"transform":[a,b,c,d,e,f]?,"components":[subpathStartIndex,…]? (fill/radii edit selected shape components),"op":"combine|…"? + "subpath":index? (default all but the first),"fillRule":"nonzero|evenodd"?,{fill}?,{stroke}? (merged into the current stroke),"name":str?}} → shape.info"##
             )),
             has_layer,
             shape_edit

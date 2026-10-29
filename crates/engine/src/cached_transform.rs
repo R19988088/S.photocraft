@@ -29,6 +29,7 @@ mod tests {
     use photocraft_color::PixelFormat;
     use photocraft_geom::Rect;
     use serde_json::json;
+
     #[test]
     fn cached_results_commit_once_through_transform_and_warp_history() {
         for warp in [false, true] {

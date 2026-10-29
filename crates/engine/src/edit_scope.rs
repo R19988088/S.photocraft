@@ -68,7 +68,7 @@ pub(crate) fn explicit(doc: &Document, p: &Value) -> Result<Option<Vec<LayerId>>
 }
 
 fn bad(msg: &str) -> EngineError {
-    EngineError::BadParams { cmd: "edit.transform".into(), msg: msg.into() }
+    EngineError::BadParams { cmd: "filter.liquify".into(), msg: msg.into() }
 }
 
 #[cfg(test)]

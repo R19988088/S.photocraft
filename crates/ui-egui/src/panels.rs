@@ -17,29 +17,32 @@ use crate::{PhotocraftApp, icons, widgets};
 /// shows the group's last-used tool.
 const TOOL_SECTIONS: &[&[&[Tool]]] = &[
     // Core paint tools stay pinned at the top and cannot be hidden or reordered.
-    &[
-        &[Tool::Brush],
-        &[Tool::Eraser],
-        &[Tool::Smudge],
-        &[Tool::Liquify],
-    ],
+    &[&[Tool::Brush, Tool::Pencil], &[Tool::Eraser], &[Tool::Smudge], &[Tool::Liquify, Tool::Blur, Tool::Sharpen]],
     &[&[Tool::Move, Tool::Artboard]],
     &[
-        &[Tool::RectMarquee, Tool::EllipseMarquee, Tool::SingleRowMarquee, Tool::SingleColumnMarquee],
-        &[Tool::Lasso, Tool::PolygonLasso, Tool::MagneticLasso],
-        &[Tool::ObjectSelection, Tool::QuickSelection, Tool::MagicWand],
+        &[
+            Tool::RectMarquee,
+            Tool::EllipseMarquee,
+            Tool::SingleRowMarquee,
+            Tool::SingleColumnMarquee,
+            Tool::Lasso,
+            Tool::PolygonLasso,
+            Tool::MagneticLasso,
+            Tool::ObjectSelection,
+            Tool::QuickSelection,
+            Tool::MagicWand,
+        ],
         &[Tool::Crop, Tool::PerspectiveCrop, Tool::Slice, Tool::SliceSelect],
         &[Tool::Frame],
         &[Tool::Eyedropper, Tool::ColorSampler, Tool::Ruler, Tool::Note, Tool::Count],
     ],
     &[
         &[Tool::Remove, Tool::SpotHealing, Tool::Healing, Tool::Patch, Tool::ContentAwareMove, Tool::RedEye],
-        &[Tool::Pencil, Tool::ColorReplacement],
+        &[Tool::ColorReplacement],
         &[Tool::CloneStamp, Tool::PatternStamp],
         &[Tool::HistoryBrush],
         &[Tool::BackgroundEraser, Tool::MagicEraser],
         &[Tool::Gradient, Tool::PaintBucket],
-        &[Tool::Blur, Tool::Sharpen],
         &[Tool::Dodge, Tool::Burn, Tool::Sponge],
     ],
     &[
@@ -72,7 +75,12 @@ fn visible_sections(hidden: &[String]) -> Vec<Vec<(usize, Vec<Tool>)>> {
     for (section_index, section) in TOOL_SECTIONS.iter().enumerate() {
         let mut slots = Vec::new();
         for slot in section.iter() {
-            let tools: Vec<Tool> = slot.iter().copied().filter(|tool| section_index == 0 || !hidden.contains(tool)).collect();
+            let tools: Vec<Tool> = slot
+                .iter()
+                .copied()
+                .filter(|tool| !matches!(tool, Tool::SingleRowMarquee | Tool::SingleColumnMarquee))
+                .filter(|tool| section_index == 0 || !hidden.contains(tool))
+                .collect();
             if !tools.is_empty() {
                 slots.push((index, tools));
             }
@@ -982,27 +990,63 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     crate::chrome_ui::home_button(app, ui);
                     widgets::vline(ui, 22.0);
                 }
-                let tool_icon = icons::button(ui, icons::tool_icon(app.ui.tool), if t.pro { 26.0 } else { 28.0 }, !t.pro, tl!(app.ui.tool.label()));
-                // Photoshop: right-click the tool icon for Reset Tool / Reset All Tools (#2825).
-                let mut reset = None;
-                tool_icon.context_menu(|ui| {
-                    if ui.button(tl!("Reset Tool")).clicked() {
-                        reset = Some("tool.reset");
-                        ui.close();
+                // Secondary tools are always visible here, so choosing Brush/Pencil,
+                // selection modes, retouch modes, liquify modes, or shapes is one click.
+                let direct_group = TOOL_SECTIONS
+                    .iter()
+                    .flat_map(|section| section.iter())
+                    .find(|slot| slot.len() > 1 && slot.contains(&app.ui.tool));
+                if let Some(slot) = direct_group {
+                    for &candidate in *slot {
+                        if matches!(candidate, Tool::SingleRowMarquee | Tool::SingleColumnMarquee) {
+                            continue;
+                        }
+                        let response = icons::button(ui, icons::tool_icon(candidate), if t.pro { 26.0 } else { 28.0 }, candidate == app.ui.tool, tl!(candidate.label()));
+                        if response.clicked() && candidate != app.ui.tool {
+                            crate::tool_memory::select(app, candidate);
+                        }
+                        if candidate == app.ui.tool {
+                            let mut reset = None;
+                            response.context_menu(|ui| {
+                                if ui.button(tl!("Reset Tool")).clicked() {
+                                    reset = Some("tool.reset");
+                                    ui.close();
+                                }
+                                if ui.button(tl!("Reset All Tools")).clicked() {
+                                    reset = Some("tool.resetAll");
+                                    ui.close();
+                                }
+                            });
+                            if let Some(id) = reset
+                                && let Err(e) = crate::menus::invoke(app, ui.ctx(), id, json!({}))
+                            {
+                                app.ui.status = e;
+                            }
+                        }
                     }
-                    if ui.button(tl!("Reset All Tools")).clicked() {
-                        reset = Some("tool.resetAll");
-                        ui.close();
+                } else {
+                    let tool_icon = icons::button(ui, icons::tool_icon(app.ui.tool), if t.pro { 26.0 } else { 28.0 }, !t.pro, tl!(app.ui.tool.label()));
+                    // Photoshop: right-click the tool icon for Reset Tool / Reset All Tools (#2825).
+                    let mut reset = None;
+                    tool_icon.context_menu(|ui| {
+                        if ui.button(tl!("Reset Tool")).clicked() {
+                            reset = Some("tool.reset");
+                            ui.close();
+                        }
+                        if ui.button(tl!("Reset All Tools")).clicked() {
+                            reset = Some("tool.resetAll");
+                            ui.close();
+                        }
+                    });
+                    if let Some(id) = reset
+                        && let Err(e) = crate::menus::invoke(app, ui.ctx(), id, json!({}))
+                    {
+                        app.ui.status = e;
                     }
-                });
-                if let Some(id) = reset
-                    && let Err(e) = crate::menus::invoke(app, ui.ctx(), id, json!({}))
-                {
-                    app.ui.status = e;
-                }
-                if t.pro {
-                    let (r, _) = ui.allocate_exact_size(vec2(10.0, 20.0), Sense::hover());
-                    icons::paint(ui, r, "chevron-down", 10.0, t.text_faint);
+                    if t.pro {
+                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 20.0), Sense::hover());
+                        icons::paint(ui, r, "chevron-down", 10.0, t.text_faint);
+                    }
                 }
                 widgets::vline(ui, 22.0);
                 if app.ui.transform.is_some() {
@@ -1073,8 +1117,6 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                             pressure_button(ui, &mut b.pressure_flow, tl!("Pressure for Flow"));
 
                         });
-                        opt_label(ui, tl!("Smoothing"));
-                        smoothing_field(ui, b, 58.0);
                     }
                     // Pencil: Photoshop's options (no hardness or flow: the pencil is always hard).
                     Tool::Pencil => {
@@ -1091,8 +1133,6 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         let held = app.held_erase;
                         paint_mode_dropdown(ui, "pencil-mode", b, &mut app.ui.tool_options.pencil_clear, held);
                         percent_field(ui, tl!("Opacity"), &mut b.opacity, 0.0..=100.0, if t.pro { 62.0 } else { 66.0 });
-                        opt_label(ui, tl!("Smoothing"));
-                        smoothing_field(ui, b, if t.pro { 58.0 } else { 66.0 });
                         widgets::vline(ui, 22.0);
                         widgets::checkbox(ui, &mut app.ui.tool_options.pencil_auto_erase, tl!("Auto Erase"));
                     }
@@ -1127,8 +1167,6 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                             percent_field(ui, tl!("Flow"), &mut b.flow, 1.0..=100.0, 66.0);
                             pressure_button(ui, &mut b.pressure_flow, tl!("Pressure for Flow"));
                         });
-                        opt_label(ui, tl!("Smoothing"));
-                        smoothing_field(ui, b, 66.0);
                     }
                     Tool::MixerBrush => {
                         brush_preset_chip(ui, b, &mut app.ui);
@@ -3320,7 +3358,7 @@ fn draw_layer_thumb(app: &mut PhotocraftApp, ctx: &egui::Context, ui: &egui::Ui,
         }
         _ => {
             // Keep row layout and outside thumbnail decorations when the image is clipped.
-            if ui.is_rect_visible(rect) && !app.paint_gpu_layer_thumb(p, doc, l, rect) {
+            if ui.is_rect_visible(rect) {
                 // The texture is a letterboxed square: draw only the part its frame (the document,
                 // or the layer's bounds) fills.
                 let (tex, frame) = app.layer_thumb(ctx, doc, l);
@@ -3369,7 +3407,7 @@ fn history(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if let Some(layer) = doc.layers.first() {
             widgets::checker(ui.painter(), thumb, 4.0);
-            let tex = app.gpu_layer_thumb(&doc, layer).unwrap_or_else(|| app.layer_thumb(&ctx, &doc, layer).0);
+            let (tex, _) = app.layer_thumb(&ctx, &doc, layer);
             ui.painter().image(tex, thumb, Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
         }
         ui.painter().rect_stroke(thumb, 0.0, Stroke::new(1.0, t.separator), StrokeKind::Outside);
@@ -3980,15 +4018,6 @@ fn brush_attribute_controls(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushS
     }
 }
 
-/// Options-bar Smoothing % (the brush's stroke smoothing; the live stroke and the commit use it).
-fn smoothing_field(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings, width: f32) {
-    let mut sm = (b.motion.smoothing * 100.0).round();
-    if widgets::value_field(ui, &mut sm, 0.0..=100.0, "%", width).changed() {
-        b.motion.enabled = true;
-        b.motion.smoothing = (sm / 100.0).clamp(0.0, 1.0);
-    }
-}
-
 /// Options-bar brush size: a logarithmic slider keeps small diameters easy to set.
 fn brush_size_slider(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings) {
     let max = photocraft_engine::paint::MAX_BRUSH_SIZE;
@@ -4002,29 +4031,6 @@ fn brush_size_slider(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings
     if response.changed() {
         b.size = log_size.exp().round().clamp(1.0, max);
     }
-}
-
-/// Options-bar gear beside Smoothing: Photoshop's smoothing options popup, edited on the brush
-/// like the Smoothing % (so they stay per tool and reach the live stroke and the commit).
-#[allow(dead_code)]
-fn smoothing_options(ui: &mut egui::Ui, b: &mut photocraft_engine::BrushSettings) {
-    let resp = icons::button(ui, "settings", 24.0, false, tl!("Set additional smoothing options"));
-    let resp = crate::brush_picker::named(resp, "Set additional smoothing options");
-    egui::Popup::from_toggle_button_response(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-        if b.c3_tip_math {
-            widgets::checkbox(ui, &mut b.motion.enabled, tl!("Enable Stroke Motion"));
-            let mut delay = b.motion.tilt_delay * 100.0;
-            if widgets::slider_row(ui, tl!("Tilt Delay"), &mut delay, 0.0..=100.0, "%", None).changed() {
-                b.motion.tilt_delay = delay / 100.0;
-            }
-            return;
-        }
-        let s = &mut b.smoothing;
-        widgets::checkbox(ui, &mut s.pulled_string, tl!("Pulled String Mode"));
-        widgets::checkbox(ui, &mut s.catch_up, tl!("Stroke Catch-up"));
-        widgets::checkbox(ui, &mut s.catch_up_on_end, tl!("Catch-up on Stroke End"));
-        widgets::checkbox(ui, &mut s.adjust_for_zoom, tl!("Adjust for Zoom"));
-    });
 }
 
 /// Options-bar brush chip: a click shows or hides Photoshop's Brush Preset picker below it (size,
@@ -5584,7 +5590,7 @@ mod toolbar_hidden_tests {
         let all = tool_buttons(&mut app);
         let slots: usize = TOOL_SECTIONS.iter().map(|section| section.len()).sum();
         hide(&mut app, &Tool::ALL);
-        assert_eq!(tool_buttons(&mut app), all - slots + 4, "the four pinned tools stay when every other tool is hidden");
+        assert_eq!(tool_buttons(&mut app), all - slots + 4, "the four pinned slots stay when every other tool is hidden");
         hide(&mut app, &[Tool::Brush, Tool::Pencil, Tool::ColorReplacement]);
         assert_eq!(tool_buttons(&mut app), all - 1, "a non-pinned slot whose tools are all hidden is gone");
         hide(&mut app, &[Tool::Sponge]);
@@ -5595,7 +5601,22 @@ mod toolbar_hidden_tests {
     fn pinned_paint_tools_stay_first_and_cannot_be_hidden() {
         let sections = visible_sections(&["Brush".to_string(), "Eraser".to_string(), "Smudge".to_string(), "Liquify".to_string()]);
         assert_eq!(sections[0].iter().map(|(_, tools)| tools[0]).collect::<Vec<_>>(), [Tool::Brush, Tool::Eraser, Tool::Smudge, Tool::Liquify]);
-        assert!(sections.iter().skip(1).flatten().all(|(_, tools)| !tools.iter().any(|tool| matches!(tool, Tool::Brush | Tool::Eraser | Tool::Smudge | Tool::Liquify))));
+        assert!(
+            sections
+                .iter()
+                .skip(1)
+                .flatten()
+                .all(|(_, tools)| !tools.iter().any(|tool| matches!(tool, Tool::Brush | Tool::Eraser | Tool::Smudge)))
+        );
+    }
+
+    #[test]
+    fn liquify_blur_and_sharpen_share_one_flyout() {
+        let slot = TOOL_SECTIONS.iter().flat_map(|section| section.iter()).find(|slot| slot.contains(&Tool::Liquify));
+        assert_eq!(slot.copied(), Some(&[Tool::Liquify, Tool::Blur, Tool::Sharpen][..]));
+        assert_eq!(TOOL_SECTIONS.iter().flat_map(|section| section.iter()).position(|slot| slot.contains(&Tool::Liquify)), Some(3));
+        assert_eq!(crate::icons::tool_icon(Tool::Liquify), "droplet");
+        assert_eq!(crate::icons::tool_icon(Tool::Blur), "scan");
     }
 
     #[test]
@@ -6419,7 +6440,7 @@ mod compact_visual_regressions {
                     crate::theme::install_fonts(&ctx);
                     crate::theme::apply(&ctx, kind);
                     let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
-                    let (tool, last_label) = if Tokens::get(&ctx).pro { (Tool::Pencil, "Auto Erase") } else { (Tool::Brush, "Smoothing") };
+                    let (tool, last_label) = (Tool::Pencil, "Auto Erase");
                     app.ui.tool = tool;
                     let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 120.0));
                     let mut output = ctx.run_ui(input_at_scale(screen, scale), |ui| options_bar(&mut app, ui));

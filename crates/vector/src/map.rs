@@ -78,7 +78,7 @@ fn map_subpath(s: &Subpath, f: &impl Fn(Point) -> Point, tol: f64, depth: u32) -
             }
         }
     }
-    Subpath { closed: s.closed, knots, op: s.op }
+    Subpath { style: s.style.clone(), closed: s.closed, knots, op: s.op }
 }
 
 fn lerp(a: Point, b: Point, t: f64) -> Point {

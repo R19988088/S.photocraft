@@ -5,7 +5,7 @@ use photocraft_geom::{Point, Rect};
 use photocraft_raster::Surface;
 
 use crate::brush::*;
-use crate::dynamics::{Smoother, smooth_points};
+use crate::dynamics::{DabGenerator, Smoother, smooth_points};
 use crate::render::{BrushContext, StrokeRenderer, mask_combine, render_stroke, texture_combine};
 use crate::tile::GrayTile;
 use crate::{AttributeMode, Dab, Stroke, StrokePoint, dabs};
@@ -782,16 +782,6 @@ fn wet_edges_and_noise() {
 
 #[test]
 fn smoothing_modes() {
-    let zig: Vec<StrokePoint> = (0..40).map(|i| StrokePoint::new(i as f64 * 5.0, if i % 2 == 0 { 0.0 } else { 6.0 }, 1.0)).collect();
-    let dev = |pts: &[StrokePoint]| pts.iter().map(|p| (p.y - 3.0).abs()).sum::<f64>() / pts.len() as f64;
-    // Exponential smoothing reduces the zig-zag.
-    let cfg = Smoothing { amount: 0.8, ..Default::default() };
-    let sm = smooth_points(&cfg, 1.0, &zig);
-    assert!(dev(&sm[5..sm.len() - 1]) < dev(&zig) * 0.5);
-    // Catch-up on end finishes at the last input point; without it, the stroke ends short.
-    assert_eq!(sm.last().map(|p| (p.x, p.y)), zig.last().map(|p| (p.x, p.y)));
-    let no = smooth_points(&Smoothing { catch_up_on_end: false, ..cfg.clone() }, 1.0, &zig);
-    assert!(no.last().unwrap().x < zig.last().unwrap().x - 1.0);
     // Pulled string: jitter smaller than the string moves nothing; the brush trails by the string.
     let ps = Smoothing { amount: 0.2, pulled_string: true, catch_up_on_end: false, ..Default::default() };
     let jitter: Vec<StrokePoint> = (0..20).map(|i| StrokePoint::new(if i % 2 == 0 { 0.0 } else { 5.0 }, 0.0, 1.0)).collect();
@@ -801,23 +791,6 @@ fn smoothing_modes() {
     // Adjust for zoom: at 200 % zoom the string is half as long in image pixels.
     let far = smooth_points(&ps, 2.0, &[StrokePoint::new(0.0, 0.0, 1.0), StrokePoint::new(100.0, 0.0, 1.0)]);
     assert!((far.last().unwrap().x - 90.0).abs() < 1e-4);
-    // Stroke catch-up: a pause (timestamps) lets the brush converge on the pointer.
-    let mut a = StrokePoint::new(0.0, 0.0, 1.0);
-    a.time = 0.0;
-    let b = StrokePoint { x: 100.0, time: 16.0, ..a };
-    let c = StrokePoint { time: 500.0, ..b };
-    let mut s = Smoother::new(&Smoothing { amount: 0.8, catch_up: true, catch_up_on_end: false, ..Default::default() }, 1.0);
-    let mut out = Vec::new();
-    for p in [a, b, c] {
-        s.push(p, &mut out);
-    }
-    assert!(out.last().unwrap().x > 99.0, "{}", out.last().unwrap().x);
-    let mut s = Smoother::new(&Smoothing { amount: 0.8, catch_up: false, catch_up_on_end: false, ..Default::default() }, 1.0);
-    let mut out = Vec::new();
-    for p in [a, b, c] {
-        s.push(p, &mut out);
-    }
-    assert!(out.last().unwrap().x < 70.0, "{}", out.last().unwrap().x);
 }
 
 #[test]
@@ -846,9 +819,9 @@ fn disabled_smoothing_keeps_its_settings_and_paints_unsmoothed_at_every_depth() 
         let mut back: Smoothing = serde_json::from_value(serde_json::to_value(&smoothing).unwrap()).unwrap();
         assert_eq!(back, smoothing);
         back.enabled = true;
-        assert!(smooth_points(&back, 1.0, &pts).iter().zip(&pts).any(|(a, b)| a.x != b.x || a.y != b.y));
+        assert_eq!(smooth_points(&back, 1.0, &pts).iter().zip(&pts).any(|(a, b)| a.x != b.x || a.y != b.y), pulled_string);
     }
-    // Existing brush JSON has no switch and must retain its old smoothing behavior.
+    // Existing pulled-string brush JSON has no switch and retains its rope behavior.
     let legacy: Smoothing = serde_json::from_str(r#"{"amount":0.8,"pulledString":true}"#).unwrap();
     assert!(legacy.enabled && legacy.amount == 0.8 && legacy.pulled_string);
 }
@@ -856,7 +829,7 @@ fn disabled_smoothing_keeps_its_settings_and_paints_unsmoothed_at_every_depth() 
 #[test]
 fn smoothing_string_runs_from_the_lagging_brush_to_the_pointer() {
     // #3479: the canvas draws the line between the brush and the pointer.
-    let cfg = Smoothing { amount: 0.8, ..Default::default() };
+    let cfg = Smoothing { amount: 0.8, pulled_string: true, ..Default::default() };
     let mut s = Smoother::new(&cfg, 1.0);
     let mut out = Vec::new();
     assert_eq!(s.string(), None, "no stroke yet");
@@ -873,36 +846,44 @@ fn smoothing_string_runs_from_the_lagging_brush_to_the_pointer() {
 }
 
 #[test]
-fn smoothing_pulls_by_time_not_by_how_often_the_device_reports() {
-    // The pointer jumps 100 px and is held there for 32 ms, reported at 1000 Hz or about 60 Hz.
-    let cfg = Smoothing { amount: 0.8, catch_up: true, catch_up_on_end: false, ..Default::default() };
-    let run = |interval: f64| {
-        let mut s = Smoother::new(&cfg, 1.0);
-        let mut out = Vec::new();
-        s.push(StrokePoint::new(0.0, 0.0, 1.0), &mut out);
-        let mut t = 0.0;
-        while t < 32.0 {
-            t += interval;
-            s.push(StrokePoint { time: t, ..StrokePoint::new(100.0, 0.0, 1.0) }, &mut out);
+fn legacy_exponential_settings_pass_every_input_point_through_without_a_tail() {
+    let points = [
+        StrokePoint::new(0.0, 0.0, 1.0),
+        StrokePoint { time: 16.0, tilt_x: 40.0, rotation: 330.0, ..StrokePoint::new(100.0, 5.0, 0.2) },
+        StrokePoint { time: 500.0, ..StrokePoint::new(100.0, 5.0, 0.0) },
+    ];
+    for catch_up in [false, true] {
+        for catch_up_on_end in [false, true] {
+            let cfg = Smoothing { enabled: true, amount: 0.95, pulled_string: false, catch_up, catch_up_on_end, ..Default::default() };
+            let mut smoother = Smoother::new(&cfg, 2.0);
+            let mut out = Vec::new();
+            for point in points {
+                smoother.push(point, &mut out);
+                assert!(smoother.string().is_none());
+            }
+            smoother.finish(&mut out);
+            assert_eq!(out.len(), points.len());
+            for (actual, expected) in out.iter().zip(points) {
+                assert_eq!(
+                    (actual.x, actual.y, actual.pressure, actual.tilt_x, actual.rotation, actual.time),
+                    (expected.x, expected.y, expected.pressure, expected.tilt_x, expected.rotation, expected.time)
+                );
+            }
+            let brush = BrushSettings { smoothing: cfg, ..brush() };
+            let mut generator = DabGenerator::new(&brush, 2.0);
+            let mut dabs = Vec::new();
+            generator.push(&points, &mut dabs, &mut Vec::new());
+            assert!(!generator.wants_time());
+            let mut renderer = StrokeRenderer::new(&brush, Some(PixelFormat::RGBA8), 2.0);
+            renderer.push(&points);
+            assert!(renderer.tail_preview().is_none());
         }
-        out.last().map_or(0.0, |p| p.x)
-    };
-    let (fast, slow) = (run(1.0), run(16.0));
-    // Two 16 ms steps of a 0.2 pull: 1 - 0.8² = 36 % of the way.
-    assert!((slow - 36.0).abs() < 1e-4, "{slow}");
-    assert!((fast - slow).abs() < 1e-4, "1000 Hz {fast} vs 60 Hz {slow}");
-    // Without timestamps each point is one step, as before.
-    let mut s = Smoother::new(&cfg, 1.0);
-    let mut out = Vec::new();
-    for x in [0.0, 100.0] {
-        s.push(StrokePoint::new(x, 0.0, 1.0), &mut out);
     }
-    assert!((out.last().map_or(0.0, |p| p.x) - 20.0).abs() < 1e-4);
 }
 
 #[test]
-fn smoothing_without_catch_up_stops_while_the_pointer_pauses() {
-    let cfg = Smoothing { amount: 0.8, catch_up: false, catch_up_on_end: false, ..Default::default() };
+fn pulled_string_never_chases_a_stationary_pointer() {
+    let cfg = Smoothing { amount: 0.8, pulled_string: true, catch_up: true, catch_up_on_end: false, ..Default::default() };
     let mut s = Smoother::new(&cfg, 1.0);
     let mut out = Vec::new();
     s.push(StrokePoint::new(0.0, 0.0, 1.0), &mut out);
@@ -915,13 +896,13 @@ fn smoothing_without_catch_up_stops_while_the_pointer_pauses() {
 }
 
 #[test]
-fn a_smoothed_brush_keeps_the_pressure_of_where_it_is_when_the_pen_lifts() {
+fn a_pulled_string_brush_keeps_the_pressure_of_where_it_is_when_the_pen_lifts() {
     // #5713: a fast stroke at full pressure, lifted in the last sample. The brush trails far
     // behind the pointer; it used to take the lift's pressure there, and the end catch-up drew
     // a hairline from the trailing brush to the pointer.
     let pts: Vec<StrokePoint> =
         (0..=20).map(|i| StrokePoint { time: f64::from(i) * 4.0, ..StrokePoint::new(f64::from(i) * 10.0, 0.0, if i < 20 { 1.0 } else { 0.05 }) }).collect();
-    let out = smooth_points(&Smoothing { amount: 0.8, ..Default::default() }, 1.0, &pts);
+    let out = smooth_points(&Smoothing { amount: 0.8, pulled_string: true, ..Default::default() }, 1.0, &pts);
     let (last, rest) = out.split_last().unwrap();
     assert_eq!((last.x, last.pressure), (200.0, 0.05), "the catch-up still ends at the pen's last sample");
     let lifted = rest.last().unwrap();
@@ -1068,7 +1049,7 @@ fn tail_preview_shows_the_stroke_as_finishing_it_would() {
     // Live previews draw the smoothing catch-up tail before the stroke ends: compositing the
     // tail preview over the incremental composite gives exactly the finished stroke.
     let fmt = PixelFormat::new(ColorMode::Rgb, SampleType::U16, true);
-    let b = BrushSettings { size: 9.0, smoothing: Smoothing { amount: 0.7, ..Default::default() }, ..brush() };
+    let b = BrushSettings { size: 9.0, smoothing: Smoothing { amount: 0.7, pulled_string: true, ..Default::default() }, ..brush() };
     let pts: Vec<StrokePoint> = (0..12).map(|i| StrokePoint::new(5.0 + i as f64 * 9.0, 20.0 + (i % 3) as f64 * 7.0, 1.0)).collect();
     let pre = Surface::new(fmt);
     let mut live = pre.clone();
@@ -1093,7 +1074,7 @@ fn live_union_of_passes_matches_merging_the_finished_passes_after_every_chunk() 
     // every pass and merging them with `composite_union_many` gives (the commit takes these pixels).
     let base = BrushSettings { size: 14.0, hardness: 0.6, opacity: 0.6, ..brush() };
     let mut brushes = vec![base.clone()];
-    brushes.push(BrushSettings { smoothing: Smoothing { amount: 0.7, ..Default::default() }, ..base.clone() });
+    brushes.push(BrushSettings { smoothing: Smoothing { amount: 0.7, pulled_string: true, ..Default::default() }, ..base.clone() });
     let mut b = base.clone();
     b.dual_brush.enabled = true;
     b.dual_brush.size = 6.0;
@@ -1914,7 +1895,7 @@ fn symmetry_transport_keeps_each_pass_and_its_smoothing_tail() {
         let b = BrushSettings {
             size: 8.0,
             hardness: 1.0,
-            smoothing: Smoothing { enabled: true, amount: 0.7, ..Default::default() },
+            smoothing: Smoothing { enabled: true, amount: 0.7, pulled_string: true, ..Default::default() },
             mix_settings: BrushMixSettings { enabled: true, outputs_smudge: true, strength: 0.9, length: 0.8, algorithm, ..Default::default() },
             ..brush()
         };

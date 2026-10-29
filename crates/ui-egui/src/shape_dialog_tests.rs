@@ -241,10 +241,45 @@ fn the_dialog_body_renders_for_every_tool_and_unit() {
     let mut app = app();
     for (tool, unit) in [(Tool::Rectangle, "pixels"), (Tool::EllipseShape, "mm"), (Tool::Polygon, "percent"), (Tool::Triangle, "inches")] {
         app.run("prefs.set", json!({"path": "unitsAndRulers.rulers", "value": unit})).unwrap();
-        let id = open(&mut app, tool, [1.0, 2.0]).unwrap();
+        let id = open(&mut app, tool, [1.0, 2.0], false).unwrap();
         let mut fields = app.ui.dialog_mut(id).unwrap().fields.clone();
         let ctx = egui::Context::default();
         ctx.run_ui(egui::RawInput::default(), |ui| body(&app, ui, &mut fields)).textures_delta.clear();
         app.ui.close_dialog(id);
     }
+}
+
+#[test]
+fn shift_click_size_dialog_appends_to_original_shape_after_active_layer_changes() {
+    let mut app = app();
+    app.run("shape.create", json!({"rect":[10,10,40,40],"fill":"#ff0000"})).unwrap();
+    let target = app.session.active().unwrap().active_layer.unwrap();
+    app.ui.tool = Tool::Rectangle;
+    let mut d = Drag::new(Tool::Rectangle, [100.0, 100.0], vec![[100.0, 100.0, 1.0]], egui::Modifiers::SHIFT, false);
+    d.track(egui::Modifiers::NONE);
+    finish_gesture(&mut app, d);
+    let dialog = only_dialog(&app);
+    assert_eq!(app.session.active().unwrap().active_layer, Some(target));
+    app.run("shape.create", json!({"rect":[200,10,40,40],"fill":"#00ff00"})).unwrap();
+    let other = app.session.active().unwrap().active_layer.unwrap();
+    let before = layers(&app);
+    set(&mut app, dialog, json!({"width":30,"height":20}));
+    crate::dialogs::confirm(&mut app, dialog).unwrap();
+    let st = app.session.active().unwrap();
+    assert_eq!(st.doc.layers.len(), before);
+    for (id, count) in [(target, 2), (other, 1)] {
+        let LayerContent::Shape(sh) = &st.doc.layer(id).unwrap().content else { panic!("shape") };
+        assert_eq!(sh.path.components().len(), count);
+    }
+}
+
+#[test]
+fn shift_click_size_dialog_rejects_a_different_document() {
+    let mut app = app();
+    app.run("shape.create", json!({"rect":[10,10,40,40]})).unwrap();
+    let dialog = open(&mut app, Tool::Rectangle, [100.0, 100.0], true).unwrap();
+    app.run("file.new", json!({"width":400,"height":300})).unwrap();
+    let original = app.session.active().unwrap().doc.clone();
+    assert!(crate::dialogs::confirm(&mut app, dialog).is_err());
+    assert_eq!(app.session.active().unwrap().doc, original);
 }

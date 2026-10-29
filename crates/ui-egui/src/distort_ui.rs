@@ -283,7 +283,7 @@ pub fn drop_foreign(app: &mut PhotocraftApp) {
     }
 }
 
-/// Full-window dialogs (Liquify, Content-Aware Fill, Filter Gallery).
+/// Full-window dialogs and pending on-canvas Liquify scope changes.
 pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     drop_foreign(app);
     if app.distort.caf.is_some() {

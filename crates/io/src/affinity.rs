@@ -345,7 +345,7 @@ impl Builder {
                         first.in_ctrl = l.in_ctrl;
                     }
                 }
-                Subpath { closed: s.closed, knots, op: Default::default() }
+                Subpath { style: None, closed: s.closed, knots, op: Default::default() }
             })
             .collect();
         let mut path = Path::new(subpaths);

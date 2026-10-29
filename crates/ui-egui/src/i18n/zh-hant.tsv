@@ -2839,7 +2839,7 @@ curves	Smooth	平滑
 	Decrease Brush Hardness	降低筆刷硬度
 	Increase Brush Hardness	提高筆刷硬度
 
-	Tablet	数位板
+	Tablet	數位板
 
 	Tablet pressure	数位板压感
 
@@ -2957,3 +2957,12 @@ brushSection	Color Mode	顏色屬性
 brushSection	Wet Edge	濕邊
 brushSection	Mix	混色
 brushSection	Pigment	顏料
+	Pressure dead zone	壓力死區
+	Elasticity	彈性
+	Stroke stability	筆觸穩定
+	Pressure calibration	壓力校準
+	Retained peak	保留峰值
+	Blend Attribute	混合屬性
+	Color Attribute	色彩屬性
+	Tip	基本參數
+	Wet Edge	濕邊

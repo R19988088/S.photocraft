@@ -3231,7 +3231,7 @@ curves	Smooth	Glätten
 	{name} was changed by another app after it was opened or saved here.	{name} wurde von einer anderen App geändert, nachdem es hier geöffnet oder gespeichert wurde.
 	Replace it with this document, or cancel and use File › Save As to keep both.	Ersetze die Datei durch dieses Dokument oder brich ab und nutze Datei › Speichern unter, um beide zu behalten.
 
-	Tablet	数位板
+	Tablet	Grafiktablett
 
 	Tablet pressure	数位板压感
 
@@ -3335,3 +3335,12 @@ curves	Smooth	Glätten
 	Primary Brush	Hauptpinsel
 	Secondary Brush	Zweitpinsel
 	Color Output	Farbausgabe
+	Pressure dead zone	Drucktotzone
+	Elasticity	Elastizität
+	Stroke stability	Strichstabilität
+	Pressure calibration	Druckkalibrierung
+	Retained peak	Beibehaltener Spitzenwert
+	Blend Attribute	Mischattribut
+	Color Attribute	Farbeigenschaften
+	Wet Edge	Feuchte Kanten
+	Tip	Pinselspitze

@@ -38,25 +38,17 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod bounds;
-pub mod brush;
-pub mod brush_composite;
-pub mod brush_format;
-pub mod brush_pigment;
-pub mod brush_raster;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod brush_stroke;
-pub mod brush_wet;
 pub mod cached_feather;
 mod cached_fields;
 pub mod cached_group;
-pub(crate) mod cached_image;
+mod cached_image;
+mod cached_resample;
 pub mod cached_transform;
 mod fx;
 pub mod health;
+pub mod native_format;
 pub mod plan;
 mod prefix;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod tile;
 pub mod timing;
 
 use std::collections::HashMap;
@@ -539,7 +531,7 @@ impl SourceOverride {
 pub struct Compositor {
     source_overrides: HashMap<LayerId, SourceOverride>,
     render_bounds: Option<Rect>,
-    cached_fields: cached_fields::Fields,
+    cached_fields: Option<cached_fields::Fields>,
     kit: Kit,
     pool: Vec<(wgpu::Texture, wgpu::TextureView)>,
     residents: HashMap<ResKey, Resident>,
@@ -582,8 +574,6 @@ pub struct Compositor {
     effect_maps: bool,
     /// `CmykSpace::id` of the document being encoded (0: built-in coated CMYK).
     cmyk: u64,
-    #[cfg(not(target_arch = "wasm32"))]
-    native_formats: brush_format::NativeFormats,
     /// The device's health (see [`Compositor::set_health`]); `None` = assumed healthy.
     health: Option<DeviceHealth>,
     /// Timestamp queries measuring how long the GPU spends on a refresh (see
@@ -801,7 +791,7 @@ impl Compositor {
         Self {
             source_overrides: HashMap::new(),
             render_bounds: None,
-            cached_fields: cached_fields::Fields::new(device),
+            cached_fields: None,
             kit: Kit { pipelines, bgl0, bgl1, dummy },
             pool: Vec::new(),
             residents: HashMap::new(),
@@ -826,8 +816,6 @@ impl Compositor {
             acc_format,
             effect_maps: map_error.is_none(),
             cmyk: 0,
-            #[cfg(not(target_arch = "wasm32"))]
-            native_formats: brush_format::NativeFormats::new(device),
             health: None,
             timer: None,
         }
@@ -1482,9 +1470,7 @@ impl Compositor {
                 .tex
                 .as_ref()
                 .filter(|t| !self.source_overrides.contains_key(&t.layer))
-                .map(|t| self.sync(device, queue, encoder, doc, (t.layer, t.role, cell), t.surface.get(), ta.intersect(&cr), stats))
-                .transpose()?
-                .flatten()
+                .and_then(|t| self.sync(device, queue, encoder, doc, (t.layer, t.role, cell), t.surface.get(), ta.intersect(&cr), stats))
                 .map(|(k, r)| {
                     keys.push(k);
                     (keys.len() - 1, r)
@@ -1493,9 +1479,7 @@ impl Compositor {
                 .mask
                 .as_ref()
                 .filter(|m| !self.source_overrides.contains_key(&m.layer))
-                .map(|m| self.sync(device, queue, encoder, doc, (m.layer, Role::Mask, cell), m.surface.get(), ma.intersect(&cr), stats))
-                .transpose()?
-                .flatten()
+                .and_then(|m| self.sync(device, queue, encoder, doc, (m.layer, Role::Mask, cell), m.surface.get(), ma.intersect(&cr), stats))
                 .map(|(k, r)| {
                     keys.push(k);
                     (keys.len() - 1, r)
@@ -1594,20 +1578,24 @@ impl Compositor {
             }
             let (tex, mask) = bound.views[i];
             let map = bound.maps[i].as_ref().map(|(_, r)| *r);
-            let source = p.tex.as_ref().and_then(|t| override_windows.get(&t.layer).or_else(|| self.source_overrides.get(&t.layer)));
-            let mut pass = p.clone();
-            let mask_source = p.mask.as_ref().and_then(|m| override_windows.get(&m.layer).or_else(|| self.source_overrides.get(&m.layer)));
-            if mask_source.is_some_and(|s| s.mask.is_none()) {
-                pass.mask = None;
-            } else if mask_source.is_some()
-                && let Some(mask) = pass.mask.as_mut()
-            {
-                mask.density = 1.0;
-                mask.default = 1.0;
-            }
-            let mask_rect = mask_source.filter(|s| s.mask.is_some()).map(|s| [s.rect.x0, s.rect.y0, s.rect.width() as i32, s.rect.height() as i32]);
-            let tex_rect = source.map(|s| [s.rect.x0, s.rect.y0, s.rect.width() as i32, s.rect.height() as i32]);
-            let w = op_words(&pass, tex_rect.or_else(|| tex.map(|t| t.1)), mask_rect.or_else(|| mask.map(|m| m.1)), map);
+            let w = if self.source_overrides.is_empty() {
+                op_words(p, tex.map(|t| t.1), mask.map(|m| m.1), map)
+            } else {
+                let source = p.tex.as_ref().and_then(|t| override_windows.get(&t.layer).or_else(|| self.source_overrides.get(&t.layer)));
+                let mut pass = p.clone();
+                let mask_source = p.mask.as_ref().and_then(|m| override_windows.get(&m.layer).or_else(|| self.source_overrides.get(&m.layer)));
+                if mask_source.is_some_and(|s| s.mask.is_none()) {
+                    pass.mask = None;
+                } else if mask_source.is_some()
+                    && let Some(mask) = pass.mask.as_mut()
+                {
+                    mask.density = 1.0;
+                    mask.default = 1.0;
+                }
+                let mask_rect = mask_source.filter(|s| s.mask.is_some()).map(|s| [s.rect.x0, s.rect.y0, s.rect.width() as i32, s.rect.height() as i32]);
+                let tex_rect = source.map(|s| [s.rect.x0, s.rect.y0, s.rect.width() as i32, s.rect.height() as i32]);
+                op_words(&pass, tex_rect.or_else(|| tex.map(|t| t.1)), mask_rect.or_else(|| mask.map(|m| m.1)), map)
+            };
             let off = (op_base + i as u64 * STRIDE) as usize;
             data[off..][..w.len()].copy_from_slice(&w);
         }
@@ -1773,9 +1761,9 @@ impl Compositor {
         surface: &Surface,
         region: Rect,
         stats: &mut Stats,
-    ) -> Result<Option<(ResKey, [i32; 4])>, Unsupported> {
+    ) -> Option<(ResKey, [i32; 4])> {
         if region.is_empty() {
-            return Ok(None);
+            return None;
         }
         let format = surface.format();
         let kind = TexKind::for_surface(key.1, format);
@@ -1861,8 +1849,6 @@ impl Compositor {
                     let bytes = convert_tile(surface, None, kind, TileCoord::new(0, 0));
                     self.staged += put_tiles(device, queue, encoder, &r, &missing, &bytes);
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                copy_backend_tiles(device, encoder, &self.native_formats, &mut r, &mut present, stats)?;
                 let staged = &mut self.staged;
                 convert_tiles(surface, present, kind, |t, cs, bytes| {
                     *staged += put_tiles(device, queue, encoder, &r, cs, bytes);
@@ -1878,9 +1864,7 @@ impl Compositor {
             self.residents.insert(key, r);
         }
         // Present: inserted above when it was missing or stale.
-        let Some(r) = self.residents.get_mut(&key) else {
-            return Ok(None);
-        };
+        let r = self.residents.get_mut(&key)?;
         r.last_used = self.frame;
         r.stamp = self.stamp;
         r.doc = doc;
@@ -1909,8 +1893,6 @@ impl Compositor {
             };
             self.staged += put_tiles(device, queue, encoder, r, &gone, &bytes);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        copy_backend_tiles(device, encoder, &self.native_formats, r, &mut changed, stats)?;
         let staged = &mut self.staged;
         convert_tiles(surface, changed, kind, |t, cs, bytes| {
             *staged += put_tiles(device, queue, encoder, r, cs, bytes);
@@ -1920,7 +1902,7 @@ impl Compositor {
                 r.tiles.insert(c, t.clone());
             }
         });
-        Ok(Some((key, [region.x0, region.y0, region.width() as i32, region.height() as i32])))
+        Some((key, [region.x0, region.y0, region.width() as i32, region.height() as i32]))
     }
 
     /// Premultiplied RGBA32F texture of a pattern as it paints in the document's mode (cached by
@@ -1984,15 +1966,17 @@ impl Compositor {
         v
     }
 
-    /// An offscreen group presentation may need effect pixels past the document's edges.
+    /// Offscreen group presentations can extend beyond the document canvas.
     pub fn set_render_bounds(&mut self, bounds: Option<Rect>) {
         self.render_bounds = bounds;
     }
 
-    /// Bind immutable session sources until the session commits or is cancelled.
+    /// Install resident replacements while a cached canvas edit is active.
     pub fn set_source_overrides(&mut self, sources: HashMap<LayerId, SourceOverride>) {
+        if !self.source_overrides.is_empty() || !sources.is_empty() {
+            self.prefix.clear();
+        }
         self.source_overrides = sources;
-        self.prefix.clear();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2011,7 +1995,7 @@ impl Compositor {
         let changed = self.fx.get(&key).is_none_or(|e| e.override_revision != Some(source.revision) || e.region != region);
         if changed {
             let texture = if source.pages.is_empty() {
-                self.cached_fields.shape_window(
+                self.cached_fields.get_or_insert_with(|| cached_fields::Fields::new(device)).shape_window(
                     device,
                     encoder,
                     &source.shape.create_view(&Default::default()),
@@ -2049,7 +2033,14 @@ impl Compositor {
             if needs {
                 let Some(entry) = self.fx.get(&key) else { return Ok(()) };
                 let shape = entry.shape.view.clone();
-                match self.cached_fields.encode(device, encoder, &shape, [region.width(), region.height()], kind, reach) {
+                match self.cached_fields.get_or_insert_with(|| cached_fields::Fields::new(device)).encode(
+                    device,
+                    encoder,
+                    &shape,
+                    [region.width(), region.height()],
+                    kind,
+                    reach,
+                ) {
                     Ok(texture) => {
                         let view = texture.create_view(&Default::default());
                         if let Some(e) = self.fx.get_mut(&key) {
@@ -2447,62 +2438,6 @@ fn submit_batch(
 /// Distinct tiles converted per parallel batch: bounds the converted bytes held at once (64 tiles
 /// of a 16-bit page are 32 MiB).
 const CONVERT_BATCH: usize = 64;
-
-/// Brush snapshots already hold compositor-native texels. Keep them on the GPU even after
-/// page eviction, duplication or undo; only genuine CPU tiles go through convert_tiles.
-#[cfg(not(target_arch = "wasm32"))]
-fn copy_backend_tiles(
-    device: &wgpu::Device,
-    encoder: &mut wgpu::CommandEncoder,
-    formats: &brush_format::NativeFormats,
-    resident: &mut Resident,
-    tiles: &mut Vec<(TileCoord, Arc<Tile>)>,
-    stats: &mut Stats,
-) -> Result<(), Unsupported> {
-    let mut cpu = Vec::new();
-    for (coord, tile) in std::mem::take(tiles) {
-        let Some(snapshot) = tile.backend().and_then(|b| b.as_any().downcast_ref::<tile::GpuTileSnapshot>()) else {
-            cpu.push((coord, tile));
-            continue;
-        };
-        let target = resident.kind.format();
-        let mut source = if matches!(resident.kind, TexKind::R8Direct | TexKind::R16F | TexKind::R32F) {
-            snapshot.native_mask().unwrap_or(snapshot.native())
-        } else {
-            snapshot.native()
-        };
-        // CMYK display depends on the currently assigned document profile, while snapshots
-        // retain their original inks. Reinterpret those inks without a CPU roundtrip.
-        let converted = if resident.format.mode == photocraft_color::ColorMode::Cmyk || source.format() != target {
-            let format = formats.get(device, resident.format).map_err(Unsupported)?;
-            snapshot.encode_display(device, encoder, &format, target).map_err(|e| Unsupported(e.to_string()))?
-        } else {
-            None
-        };
-        if let Some(texture) = &converted {
-            source = texture;
-        }
-        if source.format() != target {
-            return Err(Unsupported("GPU snapshot format does not match its compositor page".into()));
-        }
-        let rect = coord.rect();
-        encoder.copy_texture_to_texture(
-            source.as_image_copy(),
-            wgpu::TexelCopyTextureInfo {
-                texture: &resident.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: (rect.x0 - resident.region.x0) as u32, y: (rect.y0 - resident.region.y0) as u32, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d { width: TILE_SIZE as u32, height: TILE_SIZE as u32, depth_or_array_layers: 1 },
-        );
-        resident.ordered = true;
-        resident.tiles.insert(coord, tile);
-        stats.tiles_shared += 1;
-    }
-    *tiles = cpu;
-    Ok(())
-}
 
 /// Write the same tile `bytes` at every coordinate in `cs` of resident `r`; returns the bytes
 /// staged. Several coordinates (a solid fill or a cleared area shares one tile) get one upload to
@@ -3096,5 +3031,3 @@ mod tests {
         assert_eq!(tile_grid(Rect::new(0, 0, 300, 256)), Rect::new(0, 0, 512, 256));
     }
 }
-
-mod cached_resample;

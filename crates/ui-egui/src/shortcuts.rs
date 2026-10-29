@@ -666,6 +666,25 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
         }
         return;
     }
+    if !esc_taken && pressed(Key::Escape) {
+        let now = ctx.input(|i| i.time);
+        let double = now - app.ui.last_canvas_escape <= 0.35;
+        app.ui.last_canvas_escape = now;
+        if double {
+            if let Some(i) = app.session.active_index() {
+                app.sync_views();
+                if let Some(v) = app.ui.views.get_mut(i) {
+                    if v.zoom > 1.0 || !v.fit_pending {
+                        v.fit_pending = false;
+                        v.zoom = 1.0;
+                    } else {
+                        v.fit_pending = true;
+                    }
+                }
+            }
+            return;
+        }
+    }
     if !esc_taken && app.session.active().is_some_and(|st| st.doc.selection.is_some()) && pressed(Key::Escape) {
         if let Err(e) = app.run("select.deselect", json!({})) {
             app.ui.status = e;

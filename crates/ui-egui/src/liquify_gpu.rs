@@ -267,7 +267,7 @@ impl Preview {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("liquify sampled sources"), entries: &entries });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("liquify preview"),
-            source: wgpu::ShaderSource::Wgsl((photocraft_gpu::brush_format::NativeFormat::shader(0, 7, 8) + include_str!("liquify_preview.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl((photocraft_gpu::native_format::NativeFormat::shader(0, 7, 8) + include_str!("liquify_preview.wgsl")).into()),
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("liquify source sampling"),
@@ -304,11 +304,10 @@ impl Preview {
         let selection = upload(rs, canvas, selection, 0);
         let mut layers = Vec::new();
         let mut overlay_bind = None;
-        let native_pipelines = Arc::new(photocraft_gpu::brush_format::NativeFormatPipelines::new(device));
         let originals = sources.clone();
         for s in sources {
             let source = upload(rs, canvas, Some(&s.surface), 1);
-            let native = photocraft_gpu::brush_format::NativeFormat::with_pipelines(device, s.surface.format(), native_pipelines.clone())?;
+            let native = photocraft_gpu::native_format::NativeFormat::new(device, s.surface.format())?;
             let native_alpha = upload(rs, canvas, Some(&s.surface), 2);
             let sample = |f: photocraft_color::PixelFormat| match f.sample {
                 photocraft_color::SampleType::U8 => 0u32,
@@ -514,9 +513,9 @@ impl Preview {
             moved_uniform,
         }))
     }
-    fn render_mask(&self, rs: &RenderState, encoder: &mut wgpu::CommandEncoder, layer: &Layer) {
+    fn render_mask(&self, rs: &RenderState, encoder: &mut wgpu::CommandEncoder, layer: &Layer, clip: Option<Rect>) {
         let [first, second] = &layer.mask_scratch;
-        let draw = |encoder: &mut wgpu::CommandEncoder, target: &wgpu::Texture, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup| {
+        let draw = |encoder: &mut wgpu::CommandEncoder, target: &wgpu::Texture, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, clip: Option<Rect>| {
             let view = target.create_view(&Default::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("liquify mask feather"),
@@ -524,7 +523,7 @@ impl Preview {
                     view: &view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations { load: if clip.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) }, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -533,16 +532,20 @@ impl Preview {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
+            if let Some(r) = clip {
+                pass.set_scissor_rect((r.x0 - layer.rect.x0) as u32, (r.y0 - layer.rect.y0) as u32, r.width(), r.height());
+            }
             pass.draw(0..6, 0..1);
         };
         // Raw mask is warped and selection-mixed before the Properties feather is evaluated.
         let sigma = photocraft_compose::masks::feather_sigma(layer.feather);
         if sigma <= 0. {
-            draw(encoder, &layer.mask_value, &self.raw_mask, &layer.mask_pass);
+            draw(encoder, &layer.mask_value, &self.raw_mask, &layer.mask_pass, clip);
             return;
         }
-        draw(encoder, first, &self.raw_mask, &layer.mask_pass);
-        self.feather.encode(&rs.device, encoder, [first, second, &layer.mask_value], sigma);
+        draw(encoder, first, &self.raw_mask, &layer.mask_pass, clip);
+        let local_clip = clip.map(|r| Rect::new(r.x0 - layer.rect.x0, r.y0 - layer.rect.y0, r.x1 - layer.rect.x0, r.y1 - layer.rect.y0));
+        self.feather.encode_clipped(&rs.device, encoder, [first, second, &layer.mask_value], sigma, local_clip);
     }
 
     pub(super) fn render_outputs(&self, rs: &RenderState, damage: Option<Rect>) -> HashMap<LayerId, photocraft_gpu::SourceOverride> {
@@ -570,9 +573,10 @@ impl Preview {
         let revision = self.revision.fetch_add(1, Ordering::Relaxed) + 1;
         let mut out = HashMap::new();
         for layer in &self.layers {
-            let damage = damage.map(|r| r.inflate((layer.feather * 3.).ceil() as i32 + 3).intersect(&self.canvas));
-            if damage.is_none_or(|r| !r.intersect(&layer.rect).is_empty()) {
-                self.render_mask(rs, &mut encoder, layer);
+            let layer_damage = damage.map(|r| r.inflate((layer.feather * 3.).ceil() as i32 + 3).intersect(&self.canvas));
+            if layer_damage.is_none_or(|r| !r.intersect(&layer.rect).is_empty()) {
+                let clipped = layer_damage.map(|r| r.intersect(&layer.rect)).filter(|r| !r.is_empty());
+                self.render_mask(rs, &mut encoder, layer, clipped);
                 for (texture, pipeline) in [(&layer.output, &self.content), (&layer.alpha, &self.alpha)] {
                     let view = texture.create_view(&Default::default());
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -582,7 +586,7 @@ impl Preview {
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
-                                load: if damage.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) },
+                                load: if clipped.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) },
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
@@ -591,10 +595,7 @@ impl Preview {
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
-                    if let Some(damage) = damage.map(|d| d.intersect(&layer.rect)) {
-                        if damage.is_empty() {
-                            continue;
-                        }
+                    if let Some(damage) = clipped {
                         pass.set_scissor_rect((damage.x0 - layer.rect.x0) as u32, (damage.y0 - layer.rect.y0) as u32, damage.width(), damage.height());
                     }
                     pass.set_pipeline(pipeline);
@@ -992,6 +993,55 @@ mod tests {
         assert_eq!(super::super::gpu_key(&app), Some(preview), "changing targets keeps the same dialog-owned display cache");
         super::super::cancel(&mut app);
         assert_eq!(super::super::gpu_key(&app), None);
+    }
+
+    #[test]
+    fn native_liquify_canvas_updates_before_release_and_survives_normal_refresh() {
+        use crate::canvas::ToolEvent;
+        use serde_json::json;
+        let instance = wgpu::Instance::default();
+        let rs = block_on(RenderState::create(&Default::default(), &instance, None, Default::default())).expect("native GPU");
+        rs.device.on_uncaptured_error(Arc::new(|error| panic!("Liquify canvas validation: {error}")));
+        let mut app = crate::PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.session.execute("file.new", json!({"width":64,"height":48,"background":"white"})).unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        app.session
+            .edit("source", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(12, 10, 25, 34), &[1., 0., 0., 1.]);
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        app.gpu = Some(crate::gpu_canvas::GpuCanvas::new(&rs));
+        let ctx = egui::Context::default();
+        super::super::open(&mut app, &ctx).unwrap();
+        super::super::control(&mut app, &json!({"scope":"layer","tool":"forwardWarp","size":30,"pressure":100})).unwrap();
+        let original = app.session.active().unwrap().doc.clone();
+        let revision = app.session.active().unwrap().revision;
+        let history = app.session.active().unwrap().history.past_len();
+        let shown = super::super::canvas_preview(&mut app, &ctx, 0).unwrap();
+        let renderer = app.gpu.clone().unwrap();
+        let before = renderer.read_texels(shown.id.0).unwrap().2;
+        for ev in [ToolEvent::Down { x: 20., y: 22., pressure: 1. }, ToolEvent::Move { x: 34., y: 22., pressure: 1. }] {
+            crate::canvas::tool_event(&mut app, ev, egui::Modifiers::NONE);
+        }
+        super::super::canvas_preview(&mut app, &ctx, 0).unwrap();
+        let during = renderer.read_texels(shown.id.0).unwrap().2;
+        assert_ne!(during, before, "deformation must be visible before mouse up");
+        assert_eq!(app.session.active().unwrap().revision, revision, "preview cannot edit document pixels");
+        assert!(app.drag.is_none() && app.live_stroke.is_none(), "Liquify cannot enter the paint path");
+        renderer.refresh(original.id.0, &original, None, None);
+        super::super::canvas_preview(&mut app, &ctx, 0).unwrap();
+        assert_eq!(renderer.read_texels(shown.id.0).unwrap().2, during, "normal refresh cannot erase the cached preview");
+        crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 34., y: 22. }, egui::Modifiers::NONE);
+        super::super::canvas_preview(&mut app, &ctx, 0).unwrap();
+        assert_eq!(renderer.read_texels(shown.id.0).unwrap().2, during, "mouse up retains the deformation");
+        crate::tool_memory::select(&mut app, crate::state::Tool::Brush);
+        assert!(app.distort.liquify.is_none(), "switching tools commits once");
+        assert_eq!(app.session.active().unwrap().history.past_len(), history + 1);
+        assert_ne!(app.session.active().unwrap().doc.layers, original.layers);
+        app.session.undo();
+        assert_eq!(app.session.active().unwrap().doc.layers, original.layers);
     }
 
     #[test]

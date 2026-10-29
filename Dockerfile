@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+ # syntax=docker/dockerfile:1
 # Community-maintained self-hosting recipe (see packaging/web/README.md#docker); the official
 # web build is the `web` job in .github/workflows/release.yml (packaging/web/package.sh).
 #

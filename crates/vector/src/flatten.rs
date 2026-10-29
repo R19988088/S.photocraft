@@ -215,7 +215,7 @@ mod tests {
                 Knot::smooth(a, Point::new(a.x - 3e7, a.y + 3e7), Point::new(a.x + 3e7, a.y - 3e7))
             })
             .collect();
-        let path = Path::new(vec![Subpath { closed: false, knots, op: Default::default() }]);
+        let path = Path::new(vec![Subpath { style: None, closed: false, knots, op: Default::default() }]);
         let lines = flatten_path(&path, 0.01);
         let points: usize = lines.iter().map(|l| l.pts.len()).sum();
         assert!(points > 1000 && points <= MAX_PATH_POINTS + segments as usize + 1, "{points} points");

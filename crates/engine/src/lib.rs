@@ -22,6 +22,7 @@ pub mod brush_cmds;
 pub mod brush_key_cmds;
 pub mod brush_preset_cmds;
 pub mod build_info;
+pub mod cached_transform;
 mod canvas_geom;
 mod channel_clip;
 pub mod channel_cmds;
@@ -39,6 +40,7 @@ pub mod document_preset_cmds;
 pub mod edit_cmds;
 pub mod edit_scope;
 pub mod edit_menu_cmds;
+pub mod edit_scope;
 pub mod eraser_cmds;
 pub mod export_preset_cmds;
 pub mod exr_cmds;
@@ -399,12 +401,10 @@ impl Default for ToolState {
         Self {
             foreground: [0.0, 0.0, 0.0, 1.0],
             background: [1.0, 1.0, 1.0, 1.0],
-            // Photoshop's Brush tool starts at 10 % Smoothing.
             brush: photocraft_paint::BrushSettings {
                 c3_tip_math: true,
                 mix_settings: photocraft_paint::transport::BrushMixSettings { strength: 0.5, ..Default::default() },
                 texture: photocraft_paint::brush::Texture { c3_math: true, ..Default::default() },
-                smoothing: photocraft_paint::brush::Smoothing { amount: 0.1, ..Default::default() },
                 ..Default::default()
             },
             presets: photocraft_paint::presets::builtin(),
@@ -517,6 +517,8 @@ pub struct Session {
     /// Object Selection's Object Finder results (#4087), shared by the hover preview and the
     /// click that commits it; valid while the pixels are unchanged.
     pub object_finder: smartselect_cmds::ObjectFinderCache,
+    /// Native Liquify output held only until its one engine edit.
+    cached_transform_commit: Option<cached_transform::CachedCommit>,
     /// A finished live stroke offered to the `paint.stroke` / `paint.pencil` that commits it
     /// ([`Session::offer_live_stroke`]).
     cached_transform_commit: Option<cached_transform::CachedCommit>,

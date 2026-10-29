@@ -1,7 +1,7 @@
 //! Window › Brush Settings (F5) and Window › Brushes: Photoshop's floating brush panel.
 //!
 //! Brush Settings: the section list with enable boxes on the left (clicking a controls section
-//! shows and enables it; Build-up, Smoothing and Protect Texture only toggle), the selected section's controls on the right (see [`crate::brush_sections`]),
+//! shows and enables it; Build-up and Protect Texture only toggle), the selected section's controls on the right (see [`crate::brush_sections`]),
 //! and a live stroke preview strip below, rendered with the real brush engine and cached on the
 //! settings (it re-renders only when they change). Brushes: the presets in collapsible groups with
 //! tip thumbnails and stroke previews, a size slider and a search field.
@@ -363,7 +363,7 @@ fn settings_lane(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             ui.set_width(WIDTH - 190.0);
             // No title above the options (#3477): the selected row in the list names them, as
             // in Photoshop, and the line is better spent on the options.
-            let on = !SECTIONS[section].1 || section_enabled(&b, section);
+            let on = section == 2 || !SECTIONS[section].1 || section_enabled(&b, section);
             egui::ScrollArea::vertical().id_salt(("brush-section", section)).max_height(450.0).auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(WIDTH - 204.0);
                 // A section that's off shows its options greyed out (Photoshop). A tip picked in
@@ -408,7 +408,7 @@ fn settings_lane(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 crate::brush_preset_dialog::open(app, Some(&preset));
             }
             if icons::button(ui, "undo-2", 24.0, false, tl!("Reset the brush to the defaults")).clicked() {
-                b = BrushSettings { color: b.color, background: b.background, smoothing: b.smoothing.clone(), locks: b.locks.clone(), ..Default::default() };
+                b = BrushSettings { color: b.color, background: b.background, locks: b.locks.clone(), ..Default::default() };
             }
             // Overwrite the preset the current brush was picked from (Photoshop's "update the
             // selected brush"): no new preset, the brush keeps its place in the list.
@@ -434,8 +434,7 @@ fn settings_lane(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Clear brush controls: turns off every section except Smoothing and resets their options
-/// to the defaults (Photoshop), keeping locked sections intact.
+/// Clear brush controls and reset their options, keeping locked sections intact.
 pub fn clear_brush_controls(current: &BrushSettings) -> BrushSettings {
     let mut b = current.clone();
     let d = BrushSettings::default();
@@ -481,6 +480,7 @@ pub fn clear_brush_controls(current: &BrushSettings) -> BrushSettings {
     b.color_attributes = d.color_attributes;
     b.hardness_dynamic = d.hardness_dynamic;
     b.build_up = false;
+    b.smoothing = d.smoothing;
     b
 }
 

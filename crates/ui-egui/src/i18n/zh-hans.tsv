@@ -2996,3 +2996,12 @@ brushSection	Color Mode	颜色属性
 brushSection	Wet Edge	湿边
 brushSection	Mix	混色
 brushSection	Pigment	颜料
+	Pressure dead zone	压力死区
+	Elasticity	弹性
+	Stroke stability	笔触稳定
+	Pressure calibration	压力校准
+	Retained peak	保留峰值
+	Blend Attribute	混合属性
+	Color Attribute	颜色属性
+	Tip	基本参数
+	Wet Edge	湿边

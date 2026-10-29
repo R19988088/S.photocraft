@@ -263,6 +263,107 @@ fn native_samples_keep_pressure_pose_and_event_time_without_duplicate_moves() {
 }
 
 #[test]
+fn native_stroke_uses_contact_modifiers_before_a_command_press_in_the_same_frame() {
+    use crate::stylus::{NativePenEvent, NativePenPhase};
+    let mut h = harness();
+    let a = screen(&h, 20.0, 50.0);
+    let b = screen(&h, 40.0, 50.0);
+    for (phase, p, time_ms) in [(NativePenPhase::Down, a, 1000.0), (NativePenPhase::Move, b, 1004.0), (NativePenPhase::Up, b, 1008.0)] {
+        h.state().stylus.feed.push_native(NativePenEvent { phase, position: [p.x, p.y], time_ms, sample: None, modifiers: Modifiers::NONE });
+    }
+    h.input_mut().events.extend([
+        egui::Event::PointerMoved(a),
+        egui::Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        egui::Event::PointerMoved(b),
+        egui::Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+        egui::Event::ModifiersChanged(Modifiers::COMMAND),
+    ]);
+    h.run_steps(1);
+    assert_eq!(h.state().session.journal.iter().filter(|(id, _)| id == "paint.stroke").count(), 1);
+    let points = committed_points(&h);
+    assert_eq!(points.len(), 2);
+    assert!((points[0][0] - 20.0).abs() < 0.01);
+    assert!((points[1][0] - 40.0).abs() < 0.01);
+    assert_eq!(points[1][6] - points[0][6], 4.0, "the contact keeps its native event time");
+    assert!(!h.state().stylus.native_active);
+    assert!(h.state().drag.is_none());
+    assert!(h.state().ui.transform.is_none());
+}
+
+#[test]
+fn command_pressed_during_native_stroke_keeps_the_contact_until_pointer_up() {
+    use crate::stylus::{NativePenEvent, NativePenPhase};
+    let mut h = harness();
+    let a = screen(&h, 20.0, 50.0);
+    let b = screen(&h, 40.0, 50.0);
+    let feed = h.state().stylus.feed.clone();
+    feed.push_native(NativePenEvent { phase: NativePenPhase::Down, position: [a.x, a.y], time_ms: 1000.0, sample: None, modifiers: Modifiers::NONE });
+    h.input_mut().events.extend([
+        egui::Event::PointerMoved(a),
+        egui::Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+    ]);
+    h.run_steps(1);
+    assert!(h.state().stylus.native_active);
+
+    feed.push_native(NativePenEvent { phase: NativePenPhase::Move, position: [b.x, b.y], time_ms: 1004.0, sample: None, modifiers: Modifiers::COMMAND });
+    h.input_mut().events.extend([egui::Event::ModifiersChanged(Modifiers::COMMAND), egui::Event::PointerMoved(b)]);
+    h.run_steps(1);
+    assert!(h.state().stylus.native_active, "a modifier press must not finish the contact");
+    let drag = h.state().drag.as_ref().expect("the original contact remains active");
+    assert_eq!(drag.tool, Tool::Brush);
+    assert_eq!(drag.points.len(), 2, "native and winit must not both append movement");
+    assert!(h.state().session.journal.iter().all(|(id, _)| id != "paint.stroke"));
+    assert!(h.state().ui.transform.is_none());
+
+    feed.push_native(NativePenEvent { phase: NativePenPhase::Up, position: [b.x, b.y], time_ms: 1008.0, sample: None, modifiers: Modifiers::COMMAND });
+    h.event(egui::Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::COMMAND });
+    h.run_steps(1);
+    assert_eq!(h.state().session.journal.iter().filter(|(id, _)| id == "paint.stroke").count(), 1);
+    let points = committed_points(&h);
+    assert_eq!(points.len(), 2);
+    assert!((points[1][0] - 40.0).abs() < 0.01);
+    assert!(!h.state().stylus.native_active);
+    assert!(h.state().stylus.native_position.is_none());
+    assert!(h.state().drag.is_none());
+    assert!(h.state().ui.transform.is_none());
+}
+
+#[test]
+fn modifier_taps_leave_no_contact_or_canvas_transform() {
+    use crate::stylus::{NativePenEvent, NativePenPhase};
+    let mut h = harness();
+    let view = h.state().ui.views[0].clone();
+    let journal_len = h.state().session.journal.len();
+    let p = screen(&h, 20.0, 50.0);
+    h.event(egui::Event::PointerMoved(p));
+    h.run_steps(1);
+    for held in [Modifiers::CTRL, Modifiers::COMMAND] {
+        h.event(egui::Event::ModifiersChanged(held));
+        h.run_steps(1);
+        h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(1);
+        assert_eq!(h.state().ui.views[0], view);
+        assert_eq!(h.state().session.journal.len(), journal_len);
+        assert_eq!(h.state().active_tool(), Tool::Brush);
+        assert!(!h.state().stylus.native_active);
+        assert!(h.state().stylus.native_position.is_none());
+        assert!(h.state().drag.is_none());
+        assert!(h.state().ui.transform.is_none());
+    }
+    for phase in [NativePenPhase::Down, NativePenPhase::Up] {
+        h.state().stylus.feed.push_native(NativePenEvent { phase, position: [p.x, p.y], time_ms: 1000.0, sample: None, modifiers: Modifiers::NONE });
+    }
+    h.input_mut().events.extend([
+        egui::Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        egui::Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+    ]);
+    h.run_steps(1);
+    let points = committed_points(&h);
+    assert!((points[0][0] - 20.0).abs() < 0.01);
+    assert!((points[0][1] - 50.0).abs() < 0.01);
+}
+
+#[test]
 fn stroke_points_carry_increasing_times_from_zero() {
     let mut h = harness();
     move_to(&mut h, 20.0, 50.0);

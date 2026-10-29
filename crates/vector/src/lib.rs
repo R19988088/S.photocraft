@@ -461,6 +461,7 @@ fn dither(c: &mut [f32; 4], x: i32, y: i32) {
 /// Everything needed to render a shape layer, compiled once.
 pub struct CompiledShape {
     fill: Option<(Rasterizer, Paint)>,
+    component_fills: Vec<(Rasterizer, Paint)>,
     stroke: Option<(Rasterizer, Paint, f32)>,
     /// Fill area used to clip inside/outside strokes.
     align: Option<(Rasterizer, bool)>,
@@ -475,7 +476,26 @@ impl CompiledShape {
         let cb = (f64::from(canvas.x0), f64::from(canvas.y0), f64::from(canvas.x1), f64::from(canvas.y1));
         let area = fill_rasterizer(&shape.path, tol);
         let mut bounds = None;
-        let fill = shape.fill.as_ref().map(|f| {
+        let styled = !shape.path.inverted && shape.path.subpaths.iter().any(|s| s.style.is_some());
+        let component_fills = if styled {
+            bounds = area.pixel_bounds();
+            shape
+                .path
+                .components()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, range)| {
+                    let fill = match &shape.path.subpaths[range.start].style {
+                        Some(style) => style.fill.as_ref(),
+                        None => shape.fill.as_ref(),
+                    }?;
+                    Some((area.for_component(i), Paint::from_fill(fill, pb, cb)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let fill = shape.fill.as_ref().filter(|_| !styled).map(|f| {
             bounds = area.pixel_bounds();
             (area.clone(), Paint::from_fill(f, pb, cb))
         });
@@ -499,7 +519,7 @@ impl CompiledShape {
         if shape.path.inverted && shape.fill.is_some() {
             bounds = Some(Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4));
         }
-        CompiledShape { fill, stroke, align, bounds }
+        CompiledShape { fill, component_fills, stroke, align, bounds }
     }
 
     /// Pixel bounds of the rendering (`None` = nothing visible).
@@ -520,6 +540,30 @@ impl CompiledShape {
                     let mut p = paint.at(x, y);
                     p[3] *= c;
                     *o = p;
+                }
+            }
+        }
+        // Component regions partition the final area, including boolean cuts and intersections.
+        for (r, paint) in &self.component_fills {
+            let cov = r.render(rect);
+            for (i, (o, c)) in out.iter_mut().zip(&cov).enumerate() {
+                if *c <= 0.0 {
+                    continue;
+                }
+                let p = paint.at(f64::from(rect.x0 + (i % w) as i32) + 0.5, f64::from(rect.y0 + (i / w) as i32) + 0.5);
+                let a = p[3] * c;
+                for k in 0..3 {
+                    o[k] += p[k] * a;
+                }
+                o[3] += a;
+            }
+        }
+        if !self.component_fills.is_empty() {
+            for o in &mut out {
+                if o[3] > 0.0 {
+                    for k in 0..3 {
+                        o[k] /= o[3];
+                    }
                 }
             }
         }

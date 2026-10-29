@@ -1137,3 +1137,172 @@ fn move_tool_controls_rotate_from_just_outside_the_box() {
     let tilt = (end[1][1] - end[0][1]).atan2(end[1][0] - end[0][0]).to_degrees();
     assert!((tilt - 90.0).abs() < 8.0 || (tilt + 270.0).abs() < 8.0, "rotated about a quarter turn, got {tilt}° (zoom {zoom})");
 }
+
+#[test]
+fn merged_components_toggle_on_release_even_when_command_released_before_pen_up() {
+    let mut h = harness();
+    let a = h.state_mut();
+    a.ui.tool = crate::state::Tool::Rectangle;
+    a.run("shape.create", json!({"kind":"rect", "rect":[40,40,80,80], "fill":[1,0,0,1]})).unwrap();
+    let id = a.session.active().unwrap().active_layer.unwrap();
+    a.run("shape.create", json!({"kind":"rect", "rect":[200,40,80,80], "fill":[1,0,0,1], "addTo":id.0})).unwrap();
+    h.run_steps(2);
+    let original = h.state().session.active().unwrap().doc.clone();
+    for (x, expected) in [(80.0, vec![0]), (240.0, vec![0, 1])] {
+        let v = &h.state().ui.views[0];
+        let c = h.state().last_canvas_rect.center();
+        let pos = pos2(c.x + (x - v.center[0]) * v.zoom, c.y + (80.0 - v.center[1]) * v.zoom);
+        h.event(egui::Event::PointerMoved(pos));
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::COMMAND });
+        h.step();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.step();
+        assert_eq!(h.state().ui.shape_components.as_ref().unwrap().targets.iter().map(|t| t.index).collect::<Vec<_>>(), expected);
+        assert_eq!(h.state().session.active().unwrap().doc, original, "selection must not draw or edit");
+    }
+    let screen = |h: &Harness<'static, PhotocraftApp>, x: f32, y: f32| {
+        let v = &h.state().ui.views[0];
+        let c = h.state().last_canvas_rect.center();
+        pos2(c.x + (x - v.center[0]) * v.zoom, c.y + (y - v.center[1]) * v.zoom)
+    };
+    let start = screen(&h, 50.0, 50.0);
+    let end = screen(&h, 60.0, 60.0);
+    h.event(egui::Event::PointerMoved(start));
+    h.event(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    assert_eq!(h.state().ui.shape_components.as_ref().unwrap().targets.iter().map(|t| t.index).collect::<Vec<_>>(), vec![0, 1]);
+    h.event(egui::Event::PointerMoved(end));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    let st = h.state().session.active().unwrap();
+    let photocraft_doc::LayerContent::Shape(sh) = &st.doc.layer(id).unwrap().content else { panic!("shape") };
+    for sub in &sh.path.subpaths {
+        let photocraft_doc::LiveShape::Rect { radii, .. } = photocraft_vector::shapes::rectangle_from_subpath(sub).unwrap() else { panic!("rect") };
+        assert!(radii.iter().all(|r| *r > 0.0), "the selected component handle must edit its radius");
+    }
+}
+
+fn shape_screen(h: &Harness<'static, PhotocraftApp>, x: f32, y: f32) -> Pos2 {
+    let v = &h.state().ui.views[0];
+    let c = h.state().last_canvas_rect.center();
+    pos2(c.x + (x - v.center[0]) * v.zoom, c.y + (y - v.center[1]) * v.zoom)
+}
+
+fn shape_click(h: &mut Harness<'static, PhotocraftApp>, p: Pos2, modifiers: Modifiers) {
+    h.event(egui::Event::PointerMoved(p));
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers });
+    h.step();
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+}
+
+#[test]
+fn shape_clicks_replace_and_control_clicks_toggle_once() {
+    let mut h = harness();
+    h.state_mut().run("shape.create", json!({"kind":"rect", "rect":[40,40,80,80], "fill":"#ff0000"})).unwrap();
+    let first = h.state().session.active().unwrap().active_layer.unwrap();
+    h.state_mut().run("shape.create", json!({"kind":"rect", "rect":[200,40,80,80], "fill":"#00ff00"})).unwrap();
+    let second = h.state().session.active().unwrap().active_layer.unwrap();
+    h.state_mut().ui.tool = crate::state::Tool::Rectangle;
+    h.run_steps(2);
+    let a = shape_screen(&h, 80.0, 80.0);
+    let b = shape_screen(&h, 240.0, 80.0);
+    shape_click(&mut h, a, Modifiers::NONE);
+    assert_eq!(h.state().ui.shape_components.as_ref().unwrap().targets, vec![crate::vector_ui::ComponentTarget { layer: first, index: 0 }]);
+    shape_click(&mut h, b, Modifiers::CTRL);
+    assert_eq!(h.state().ui.shape_components.as_ref().unwrap().targets.len(), 2);
+    shape_click(&mut h, a, Modifiers::COMMAND);
+    assert_eq!(h.state().ui.shape_components.as_ref().unwrap().targets, vec![crate::vector_ui::ComponentTarget { layer: second, index: 0 }]);
+    shape_click(&mut h, b, Modifiers::CTRL);
+    assert!(h.state().ui.shape_components.as_ref().unwrap().targets.is_empty());
+    assert!(h.state().ui.dialogs.is_empty());
+    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), 3);
+    assert!(h.state().drag.is_none());
+}
+
+#[test]
+fn control_shape_box_keeps_press_intent_after_control_release() {
+    let mut h = harness();
+    h.state_mut().run("shape.create", json!({"kind":"rect", "rect":[40,40,80,80], "fill":"#ff0000"})).unwrap();
+    h.state_mut().run("shape.create", json!({"kind":"ellipse", "rect":[200,40,80,80], "fill":"#00ff00"})).unwrap();
+    h.state_mut().ui.tool = crate::state::Tool::Rectangle;
+    h.run_steps(2);
+    let a = shape_screen(&h, 20.0, 20.0);
+    let b = shape_screen(&h, 300.0, 140.0);
+    let original = h.state().session.active().unwrap().doc.clone();
+    h.event(egui::Event::PointerMoved(a));
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::CTRL });
+    h.step();
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    h.event(egui::Event::PointerMoved(b));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    assert_eq!(h.state().ui.shape_components.as_ref().unwrap().targets.len(), 2);
+    assert_eq!(h.state().session.active().unwrap().doc, original);
+    assert!(h.state().ui.dialogs.is_empty());
+    assert!(h.state().drag.is_none());
+}
+
+#[test]
+fn shape_box_complete_in_one_frame_and_tool_switch_cancels_next_box() {
+    let mut h = harness();
+    h.state_mut().run("shape.create", json!({"kind":"rect", "rect":[40,40,80,80], "fill":"#ff0000"})).unwrap();
+    h.state_mut().ui.tool = crate::state::Tool::Rectangle;
+    h.run_steps(2);
+    let a = shape_screen(&h, 20.0, 20.0);
+    let b = shape_screen(&h, 140.0, 140.0);
+    let original = h.state().session.active().unwrap().doc.clone();
+    for event in [
+        egui::Event::PointerMoved(a),
+        egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::CTRL },
+        egui::Event::PointerMoved(b),
+        egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+    ] {
+        h.event(event);
+    }
+    h.step();
+    assert_eq!(h.state().ui.shape_components.as_ref().unwrap().targets.len(), 1);
+    assert!(h.state().drag.is_none());
+    h.event(egui::Event::PointerMoved(a));
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::CTRL });
+    h.step();
+    h.state_mut().ui.tool = crate::state::Tool::EllipseShape;
+    h.event(egui::Event::PointerMoved(b));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    assert!(h.state().drag.is_none());
+    assert_eq!(h.state().session.active().unwrap().doc, original);
+}
+
+#[test]
+fn hand_navigation_cancels_shape_box_before_returning_to_the_shape_tool() {
+    let mut h = harness();
+    h.state_mut().run("shape.create", json!({"kind":"rect", "rect":[40,40,80,80], "fill":"#ff0000"})).unwrap();
+    h.state_mut().ui.tool = crate::state::Tool::Rectangle;
+    h.run_steps(2);
+    let a = shape_screen(&h, 20.0, 20.0);
+    let b = shape_screen(&h, 140.0, 140.0);
+    let original = h.state().session.active().unwrap().doc.clone();
+    h.event(egui::Event::PointerMoved(a));
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::CTRL });
+    h.step();
+    assert!(h.state().drag.is_some());
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    h.event(egui::Event::PointerMoved(b));
+    h.step();
+    h.state_mut().ui.tool = crate::state::Tool::Hand;
+    h.step();
+    assert!(h.state().drag.is_none(), "navigation cancels the old shape gesture immediately");
+    h.state_mut().ui.tool = crate::state::Tool::Rectangle;
+    h.step();
+    h.event(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    assert!(h.state().drag.is_none());
+    assert!(h.state().ui.shape_components.is_none(), "the cancelled box never selects a component");
+    assert!(h.state().ui.dialogs.is_empty(), "release cannot replay an empty-space shape click");
+    assert_eq!(h.state().session.active().unwrap().doc, original);
+}

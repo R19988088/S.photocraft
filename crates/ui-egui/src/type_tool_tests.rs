@@ -819,7 +819,7 @@ fn temporary_type_transform_visibility_and_cursors() {
     assert!(!crate::type_transform::visible(h.state(), Modifiers { ctrl: true, command: false, ..Modifiers::NONE }));
     h.state_mut().ui.shell.sticky_command = true;
     let sticky = crate::workspace_ui::sticky_mods(h.state(), Modifiers::NONE);
-    assert!(crate::type_transform::visible(h.state(), sticky));
+    assert!(!crate::type_transform::visible(h.state(), sticky), "legacy Command state must not latch a temporary transform");
 }
 
 #[test]

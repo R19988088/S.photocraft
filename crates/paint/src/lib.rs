@@ -70,7 +70,7 @@ pub struct StrokePoint {
     pub rotation: f32,
     /// Airbrush stylus wheel 0..1.
     pub wheel: f32,
-    /// Timestamp in milliseconds (airbrush build-up and smoothing catch-up).
+    /// Timestamp in milliseconds (airbrush build-up).
     pub time: f64,
 }
 
@@ -247,25 +247,6 @@ pub fn apply_stroke(target: &mut Surface, stroke: &Stroke, selection: Option<&Su
     render_stroke(target, &stroke.brush, &stroke.points, selection, lock_transparency, 1.0)
 }
 
-/// Exponential moving-average smoothing of input points (Photoshop's "Smoothing" %, simplified).
-pub fn smooth(points: &[StrokePoint], amount: f32) -> Vec<StrokePoint> {
-    let a = (1.0 - amount.clamp(0.0, 0.95)) as f64;
-    let mut out = Vec::with_capacity(points.len());
-    let mut cur: Option<StrokePoint> = None;
-    for p in points {
-        let n = match cur {
-            None => *p,
-            Some(c) => StrokePoint { x: c.x + (p.x - c.x) * a, y: c.y + (p.y - c.y) * a, ..*p },
-        };
-        out.push(n);
-        cur = Some(n);
-    }
-    if let (Some(last), Some(end)) = (out.last_mut(), points.last()) {
-        *last = *end;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,17 +379,6 @@ mod tests {
         st.points[1].pressure = 1.0;
         let d = dabs(&st);
         assert!(d.first().unwrap().radius < d.last().unwrap().radius);
-    }
-
-    #[test]
-    fn smoothing_keeps_endpoints() {
-        let pts: Vec<StrokePoint> = (0..20).map(|i| StrokePoint::new(i as f64, if i % 2 == 0 { 0.0 } else { 10.0 }, 1.0)).collect();
-        let s = smooth(&pts, 0.8);
-        assert_eq!(s.first(), pts.first());
-        assert_eq!(s.last(), pts.last());
-        let jitter: f64 = s[1..19].iter().map(|p| (p.y - 5.0).abs()).sum();
-        let orig: f64 = pts[1..19].iter().map(|p| (p.y - 5.0).abs()).sum();
-        assert!(jitter < orig);
     }
 
     #[test]

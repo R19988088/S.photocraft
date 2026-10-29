@@ -106,7 +106,10 @@ impl PhotocraftApp {
     /// Whether closing now would lose work: a document has unsaved changes and closing wasn't
     /// confirmed. The web build has the browser ask before leaving the page while this holds (#1380).
     pub fn has_unsaved_work(&self) -> bool {
-        !self.allow_close && (self.session.documents().iter().any(|d| d.is_dirty()) || crate::transform_tool::is_cached_raster(self) || crate::liquify_ui::has_pending_edits(self))
+        !self.allow_close
+            && (self.session.documents().iter().any(|d| d.is_dirty())
+                || crate::transform_tool::is_cached_raster(self)
+                || crate::liquify_ui::has_pending_edits(self))
     }
 }
 

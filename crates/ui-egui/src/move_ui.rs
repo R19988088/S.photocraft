@@ -127,6 +127,10 @@ pub(crate) fn cached_pointer(app: &mut PhotocraftApp, ev: crate::canvas::ToolEve
             crate::transform_tool::track_steps(app, &ctx);
         }
         crate::move_mods::finish(app);
+        // A temporary Command-drag returns to the original tool on release.
+        if app.ui.tool != Tool::Move {
+            crate::transform_tool::commit(app);
+        }
     }
     true
 }

@@ -1,5 +1,5 @@
 //! Shell-only Window and View items: Window › Workspace › New / Delete / Lock Workspace (saved
-//! in the preferences), Window › Modifier Keys (sticky Shift/⌘/⌥ for touch and pen users),
+//! in the preferences), Window › Modifier Keys (sticky Shift/⌥ and held ⌘ for touch and pen users),
 //! View › Pixel Aspect Ratio › Custom Pixel Aspect Ratio…, View › Show › Show Extras Options…
 //! and the View › 32-bit Preview Options dialog.
 //!
@@ -23,10 +23,14 @@ pub struct CustomPar {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellUi {
-    /// Window › Modifier Keys panel open, and its latched keys.
+    /// Window › Modifier Keys panel open, and its modifier buttons.
     pub modifier_keys: bool,
     pub sticky_shift: bool,
+    /// Legacy saved state; Command is never latched.
+    #[serde(skip_serializing)]
     pub sticky_command: bool,
+    #[serde(skip)]
+    pub command_held: bool,
     pub sticky_alt: bool,
     /// Custom pixel aspect ratios (the active one is `ViewOptions::pixel_aspect` = `custom:<ratio>:<name>`).
     pub custom_pars: Vec<CustomPar>,
@@ -68,12 +72,12 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> Option<bool> {
     })
 }
 
-/// Latched Modifier Keys panel keys added to the real ones.
+/// Panel modifiers added to the real ones; Command only follows the held button.
 pub fn sticky_mods(app: &PhotocraftApp, mut m: egui::Modifiers) -> egui::Modifiers {
     let s = &app.ui.shell;
     m.shift |= s.sticky_shift;
     m.alt |= s.sticky_alt;
-    if s.sticky_command {
+    if s.modifier_keys && s.command_held {
         m.command = true;
         if cfg!(target_os = "macos") {
             m.mac_cmd = true;
@@ -118,12 +122,14 @@ pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<
     Some(match id {
         "window.panel.modifierKeys" => {
             s.modifier_keys = params.get("show").and_then(Value::as_bool).unwrap_or(!s.modifier_keys);
-            for (k, slot) in [("shift", &mut s.sticky_shift), ("command", &mut s.sticky_command), ("alt", &mut s.sticky_alt)] {
+            s.sticky_command = false;
+            s.command_held = false;
+            for (k, slot) in [("shift", &mut s.sticky_shift), ("alt", &mut s.sticky_alt)] {
                 if let Some(v) = params.get(k).and_then(Value::as_bool) {
                     *slot = v;
                 }
             }
-            Ok(json!({"visible": s.modifier_keys, "shift": s.sticky_shift, "command": s.sticky_command, "alt": s.sticky_alt}))
+            Ok(json!({"visible": s.modifier_keys, "shift": s.sticky_shift, "command": s.command_held, "alt": s.sticky_alt}))
         }
         "window.workspace.lockWorkspace" => {
             let on = params.get("on").and_then(Value::as_bool).unwrap_or(!app.session.prefs().workspace_locked);
@@ -336,25 +342,40 @@ pub fn confirm(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<Value, St
     r
 }
 
+/// Clear a released or cancelled panel hold before processing canvas input.
+pub(crate) fn refresh_held_command(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    app.ui.shell.sticky_command = false;
+    if !app.ui.shell.modifier_keys || !ctx.input(|i| i.focused && i.pointer.primary_down() && !i.pointer.primary_pressed()) {
+        app.ui.shell.command_held = false;
+    }
+}
+
 /// Draws the Modifier Keys panel and the open dialog.
 pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    refresh_held_command(app, ctx);
     if app.ui.shell.modifier_keys {
         let mut close = false;
         let mut s = app.ui.shell.clone();
+        let command_was_held = s.command_held;
+        s.command_held = false;
         let cmd = crate::shortcuts::pretty("Cmd");
         let shift = crate::shortcuts::pretty("Shift");
         let alt = crate::shortcuts::pretty("Alt");
         crate::analysis_ui::panel_window(app, ctx, "modifier-keys", tl!("Modifier Keys"), vec2(-420.0, 80.0), 150.0, |ui| {
             close = crate::analysis_ui::title_row(ui, tl!("Modifier Keys"));
             ui.horizontal(|ui| {
-                for (label, on) in [(&*shift, &mut s.sticky_shift), (&*cmd, &mut s.sticky_command), (&*alt, &mut s.sticky_alt)] {
-                    if ui.add(egui::Button::new(RichText::new(label).size(14.0)).selected(*on).min_size(vec2(40.0, 30.0))).clicked() {
-                        *on = !*on;
-                    }
+                if ui.add(egui::Button::new(RichText::new(&*shift).size(14.0)).selected(s.sticky_shift).min_size(vec2(40.0, 30.0))).clicked() {
+                    s.sticky_shift = !s.sticky_shift;
+                }
+                let command = ui.add(egui::Button::new(RichText::new(&*cmd).size(14.0)).selected(command_was_held).min_size(vec2(40.0, 30.0)));
+                s.command_held = command.is_pointer_button_down_on() && ui.input(|i| i.focused);
+                if ui.add(egui::Button::new(RichText::new(&*alt).size(14.0)).selected(s.sticky_alt).min_size(vec2(40.0, 30.0))).clicked() {
+                    s.sticky_alt = !s.sticky_alt;
                 }
             });
         });
         s.modifier_keys = !close;
+        s.command_held &= !close;
         app.ui.shell = s;
     }
     if app.ui.shell.dialog.is_some() {
@@ -636,6 +657,53 @@ mod tests {
         crate::canvas::tool_event(&mut app, crate::canvas::ToolEvent::Up { x: 10.0, y: 10.0 }, egui::Modifiers::NONE);
         assert_eq!(app.session.active().unwrap().doc.measurement.count_total(), 0);
         crate::analysis_ui::tests::render(&mut app, &ctx, windows);
+    }
+
+    #[test]
+    fn legacy_command_and_command_menu_parameter_never_latch() {
+        let (mut app, ctx) = app();
+        app.ui.shell = serde_json::from_value(json!({"modifier_keys": true, "sticky_command": true, "sticky_shift": true, "sticky_alt": true})).unwrap();
+        let m = sticky_mods(&app, egui::Modifiers::NONE);
+        assert!(m.shift && m.alt);
+        assert!(!m.command && !m.mac_cmd && !m.ctrl);
+        let result = crate::menus::invoke(&mut app, &ctx, "window.panel.modifierKeys", json!({"show": true, "command": true})).unwrap();
+        assert_eq!(result["command"], false);
+        assert!(!app.ui.shell.sticky_command && !app.ui.shell.command_held);
+        app.ui.shell.command_held = true;
+        let saved = serde_json::to_value(&app.ui.shell).unwrap();
+        assert!(saved.get("command_held").is_none() && saved.get("sticky_command").is_none());
+        let restored: ShellUi = serde_json::from_value(saved).unwrap();
+        assert!(!restored.command_held);
+    }
+
+    #[test]
+    fn held_command_is_cleared_on_release_focus_loss_or_hidden_panel() {
+        let (mut app, ctx) = app();
+        for (focused, down, visible) in [(true, false, true), (false, true, true), (true, true, false), (true, true, true)] {
+            app.ui.shell.modifier_keys = visible;
+            app.ui.shell.command_held = true;
+            let mut raw = egui::RawInput { focused, ..Default::default() };
+            if down {
+                raw.events.push(egui::Event::PointerButton {
+                    pos: egui::Pos2::new(10.0, 10.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            } else {
+                raw.events.push(egui::Event::PointerButton {
+                    pos: egui::Pos2::new(10.0, 10.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            // A press starts the held button; refresh observes its continuing frame.
+            ctx.run_ui(raw, |_| {}).textures_delta.clear();
+            ctx.run_ui(egui::RawInput { focused, ..Default::default() }, |ui| refresh_held_command(&mut app, ui.ctx())).textures_delta.clear();
+            assert_eq!(app.ui.shell.command_held, focused && down && visible);
+            assert_eq!(sticky_mods(&app, egui::Modifiers::NONE).command, focused && down && visible);
+        }
     }
 
     #[test]

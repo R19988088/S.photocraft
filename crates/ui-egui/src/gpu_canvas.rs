@@ -34,10 +34,6 @@ use eframe::wgpu;
 
 pub use photocraft_gpu::{DeviceHealth, Fault};
 
-#[path = "gpu_thumbnail.rs"]
-#[cfg(not(target_arch = "wasm32"))]
-mod thumbnails;
-
 /// Default tile side; documents up to this size (and the device limit) use a single texture.
 pub const DEFAULT_TILE: u32 = 8192;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -168,12 +164,6 @@ impl GpuCanvas {
         };
         // Device loss and uncaptured errors mark this flag instead of panicking (#243).
         let health = photocraft_gpu::DeviceHealth::watch(&rs.device);
-        #[cfg(not(target_arch = "wasm32"))]
-        photocraft_paint::gpu_backend::install(std::sync::Arc::new(photocraft_gpu::brush_stroke::GpuStrokeFactory::with_health(
-            &rs.device,
-            &rs.queue,
-            health.clone(),
-        )));
         let mut res = Resources::new(&rs.device, &rs.queue, rs.target_format, high != HighPolicy::Off);
         res.health = health.clone();
         let info = rs.adapter.get_info();
@@ -181,69 +171,13 @@ impl GpuCanvas {
         let vram = video_memory(&info);
         res.canvas_budget.store(canvas_budget(physical_memory(), vram), Ordering::Relaxed);
         let budget = res.canvas_budget.clone();
-        {
-            let mut renderer = rs.renderer.write();
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(thumbnails) = renderer.callback_resources.get_mut::<Resources>().and_then(|old| old.thumbnails.take()) {
-                thumbnails.free(&mut renderer);
-            }
-            renderer.callback_resources.insert(res);
-        }
+        rs.renderer.write().callback_resources.insert(res);
         log::info!(
             "gpu canvas: target {:?}, max texture {max}, tile {tile}, 16F canvas {high:?}, video memory {}",
             rs.target_format,
             vram.map_or_else(|| "unknown".to_owned(), |b| format!("{} MB", b >> 20))
         );
         Self { rs: rs.clone(), tile, high, health, vram, canvas_budget: budget }
-    }
-
-    /// Render the same nearest document-pixel samples as the CPU Layers thumbnail directly
-    /// from GPU snapshots. The returned egui texture stays current on every changed revision.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn layer_thumbnail(
-        &self,
-        doc: u64,
-        layer: photocraft_doc::LayerId,
-        revision: u64,
-        surface: &photocraft_raster::Surface,
-        frame: photocraft_geom::Rect,
-        clip: bool,
-    ) -> Option<egui::TextureId> {
-        if !self.health.is_ok() {
-            return None;
-        }
-        let mut renderer = self.rs.renderer.write();
-        let mut thumbnails =
-            renderer.callback_resources.get_mut::<Resources>()?.thumbnails.take().unwrap_or_else(|| thumbnails::LayerThumbnails::new(&self.rs.device));
-        let result = thumbnails.render(&self.rs.device, &self.rs.queue, &mut renderer, (doc, layer.0), revision, surface, frame, clip);
-        renderer.callback_resources.get_mut::<Resources>()?.thumbnails = Some(thumbnails);
-        result
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn paint_layer_thumbnail(&self, painter: &egui::Painter, doc: u64, layer: photocraft_doc::LayerId, rect: egui::Rect) -> bool {
-        let mut renderer = self.rs.renderer.write();
-        let Some(thumbnails) = renderer.callback_resources.get_mut::<Resources>().and_then(|r| r.thumbnails.as_mut()) else {
-            return false;
-        };
-        let Some(callback) = thumbnails.paint_callback(&self.rs.device, self.rs.target_format, (doc, layer.0), rect) else {
-            return false;
-        };
-        painter.add(callback);
-        true
-    }
-
-    /// Free native egui textures of layers removed from all open documents.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn retain_layer_thumbnails(&self, live: &std::collections::HashSet<photocraft_doc::LayerId>) {
-        let mut renderer = self.rs.renderer.write();
-        let thumbnails = renderer.callback_resources.get_mut::<Resources>().and_then(|res| res.thumbnails.take());
-        if let Some(mut thumbnails) = thumbnails {
-            thumbnails.retain(&mut renderer, live);
-            if let Some(res) = renderer.callback_resources.get_mut::<Resources>() {
-                res.thumbnails = Some(thumbnails);
-            }
-        }
     }
 
     /// The device's health flag (shared with the wgpu compositor and the paint callback).
@@ -260,10 +194,6 @@ impl GpuCanvas {
     /// a fault; the paint callback draws nothing from then on.
     pub fn release(&self) {
         let mut r = self.rs.renderer.write();
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(thumbnails) = r.callback_resources.get_mut::<Resources>().and_then(|res| res.thumbnails.take()) {
-            thumbnails.free(&mut r);
-        }
         if let Some(res) = r.callback_resources.get_mut::<Resources>() {
             res.compositor = None;
             res.compositor_failed = Some(photocraft_gpu::Unsupported(self.fault().map_or_else(|| "GPU canvas released".into(), |f| f.to_string())));
@@ -569,7 +499,7 @@ impl GpuCanvas {
                 }
             },
         };
-        comp.set_source_overrides(res.source_overrides.as_ref().filter(|(id,_)| *id == doc.id.0).map(|(_,sources)| sources.clone()).unwrap_or_default());
+        comp.set_source_overrides(res.source_overrides.as_ref().filter(|(id, _)| *id == doc.id.0).map(|(_, sources)| sources.clone()).unwrap_or_default());
         comp.set_health(self.health.clone());
         // Measured, not waited for: the timestamps come back a frame or two later.
         comp.measure_gpu_time(device, queue);
@@ -745,10 +675,18 @@ impl GpuCanvas {
             }
             Err(e) => {
                 out.fallback = Some(e.0);
-                let active = self.rs.renderer.read().callback_resources.get::<Resources>()
-                    .is_some_and(|r|r.source_overrides.as_ref().is_some_and(|(id,_)|*id==doc.id.0));
-                if active { out.kind="gpu-cached-error"; return out; }
-            },
+                let active = self
+                    .rs
+                    .renderer
+                    .read()
+                    .callback_resources
+                    .get::<Resources>()
+                    .is_some_and(|r| r.source_overrides.as_ref().is_some_and(|(id, _)| *id == doc.id.0));
+                if active {
+                    out.kind = "gpu-cached-error";
+                    return out;
+                }
+            }
         }
         let px = region.width() as u64 * region.height() as u64;
         if defer && px >= DEFER_PX && self.prepare_texture(key, doc).is_some() {
@@ -1635,8 +1573,6 @@ struct Resources {
     encode_pipeline_high: Option<wgpu::RenderPipeline>,
     mip_sampler: wgpu::Sampler,
     docs: HashMap<u64, DocTextures>,
-    #[cfg(not(target_arch = "wasm32"))]
-    thumbnails: Option<thumbnails::LayerThumbnails>,
     views: HashMap<u64, ViewGpu>,
     out_linear: bool,
     /// Build each mip level in a scratch texture and copy it back instead of rendering into
@@ -1914,8 +1850,6 @@ impl Resources {
             encode_pipeline_high,
             mip_sampler,
             docs: HashMap::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            thumbnails: None,
             views: HashMap::new(),
             out_linear: target.is_srgb(),
             separate_mip_targets: false,

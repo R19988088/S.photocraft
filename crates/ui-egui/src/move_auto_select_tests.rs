@@ -49,7 +49,9 @@ fn drag(app: &mut PhotocraftApp, from: [f64; 2], by: [f64; 2], mods: egui::Modif
     crate::canvas::tool_event(app, ToolEvent::Move { x: end[0], y: end[1], pressure: 1.0 }, mods);
     crate::canvas::tool_event(app, ToolEvent::Up { x: end[0], y: end[1] }, mods);
     // These tests inspect the committed Auto-Select target, after explicit acceptance.
-    if crate::transform_tool::is_cached_move(app) { crate::transform_tool::commit(app); }
+    if crate::transform_tool::is_cached_move(app) {
+        crate::transform_tool::commit(app);
+    }
 }
 
 #[test]

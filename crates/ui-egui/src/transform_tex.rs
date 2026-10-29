@@ -44,7 +44,8 @@ impl PreviewTextures {
         let image = Arc::new(image);
         let tex = ctx.load_texture(format!("{name}-0-linear"), Arc::clone(&image), TextureOptions::LINEAR);
         let base_uv = [base_uv[0].clamp(0.0, 1.0), base_uv[1].clamp(0.0, 1.0)];
-        let prepared = Self { name, images: Mutex::new(vec![image]), base_uv, uploaded: Mutex::new(vec![Level { level: 0, nearest: false, tex, uv: base_uv }]) };
+        let prepared =
+            Self { name, images: Mutex::new(vec![image]), base_uv, uploaded: Mutex::new(vec![Level { level: 0, nearest: false, tex, uv: base_uv }]) };
         // All sampling choices are resident before the first pointer update. In particular,
         // shrinking a large source must not build CPU mip levels in the interaction loop.
         let [w, h] = prepared.size();

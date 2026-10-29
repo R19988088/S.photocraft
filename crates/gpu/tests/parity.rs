@@ -246,6 +246,9 @@ fn stack_prefix_reuse_matches_uncached_gpu_and_cpu_at_every_depth() {
             top.fill_opacity = fill;
             top.blend = blend;
             top.visible = visible;
+            // The canvas installs an empty set on each ordinary brush refresh.
+            g.comp.set_source_overrides(Default::default());
+            g.paged.set_source_overrides(Default::default());
             let stats = diff_rect(&mut g, &doc, doc.bounds(), "top properties").unwrap();
             assert!(stats.prefix_hits > 0, "{depth:?}");
             assert!(stats.prefix_passes_skipped > 0);

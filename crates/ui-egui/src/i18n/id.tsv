@@ -3226,7 +3226,7 @@ curves	Smooth	Haluskan
 	Decrease Brush Hardness	Kurangi kekerasan kuas
 	Increase Brush Hardness	Tambah kekerasan kuas
 
-	Tablet	数位板
+	Tablet	Tablet
 
 	Tablet pressure	数位板压感
 
@@ -3333,3 +3333,12 @@ curves	Smooth	Haluskan
 	Primary Brush	Kuas utama
 	Secondary Brush	Kuas sekunder
 	Color Output	Keluaran warna
+	Pressure dead zone	Zona mati tekanan
+	Elasticity	Elastisitas
+	Stroke stability	Stabilitas goresan
+	Pressure calibration	Kalibrasi tekanan
+	Retained peak	Puncak yang dipertahankan
+	Blend Attribute	Atribut pencampuran
+	Color Attribute	Atribut Warna
+	Wet Edge	Tepi Basah
+	Tip	Ujung Kuas

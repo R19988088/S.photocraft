@@ -10,13 +10,12 @@ workspace = true
 [dependencies]
 bytemuck = { workspace = true }
 half = "2"
-photocraft-algo = { workspace = true }
 photocraft-geom = { workspace = true }
+photocraft-algo = { workspace = true }
 photocraft-color = { workspace = true }
 photocraft-raster = { workspace = true }
 photocraft-doc = { workspace = true }
 photocraft-compose = { workspace = true }
-photocraft-paint = { workspace = true }
 # Same major version as eframe's wgpu so the app's device can be shared.
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
 log = { workspace = true }
@@ -26,7 +25,6 @@ log = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
-photocraft-algo = { workspace = true }
 photocraft-cms = { workspace = true }
 wgpu = { version = "30" }
 pollster = "1"

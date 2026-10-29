@@ -37,6 +37,56 @@ fn compass_id() -> egui::Id {
     egui::Id::new("pc-rotate-view-compass")
 }
 
+#[derive(Clone, Copy)]
+struct ShiftSession {
+    start: Pos2,
+    xf: ViewXform,
+    zoom: f32,
+    mode: Option<bool>,
+}
+
+pub(crate) fn reset_shift_navigation(ctx: &egui::Context, id: egui::Id) {
+    ctx.data_mut(|d| d.remove::<ShiftSession>(id));
+}
+
+// Port of C3 CanvasMacInputView.beginShift/updateShift, driven by Shift plus primary contact.
+pub(crate) fn shift_navigation(ctx: &egui::Context, id: egui::Id, view: &mut View, xf: &ViewXform, active: bool, ppp: f32) {
+    let pointer = ctx.input(|i| i.pointer.hover_pos());
+    let Some(p) = pointer.filter(|_| active) else {
+        reset_shift_navigation(ctx, id);
+        return;
+    };
+    let start = ctx.input(|i| i.pointer.press_origin()).unwrap_or(p);
+    let mut session = ctx.data(|d| d.get_temp::<ShiftSession>(id))
+        .unwrap_or(ShiftSession { start, xf: *xf, zoom: view.zoom, mode: None });
+    let delta = p - session.start;
+    if session.mode.is_none() && delta.length() >= 10.0 {
+        let angle = delta.y.atan2(delta.x).to_degrees();
+        let vertical_distance = wrap_deg(angle - 90.0).abs().min(wrap_deg(angle + 90.0).abs());
+        session.mode = Some(vertical_distance < 35.0);
+    }
+    match session.mode {
+        Some(true) => {
+            // AppKit's Y is up, whereas egui's Y is down.
+            let zoom = crate::zoom_levels::clamp(session.zoom * (-delta.y * 0.01).clamp(-40.0, 40.0).exp(), view.doc_size);
+            view.rotation = session.xf.rotation;
+            crate::zoom_tool::anchor_view(view, &session.xf, session.start, session.xf.to_doc(session.start), zoom, ppp);
+        }
+        Some(false) => {
+            let center = session.xf.rect.center();
+            let delta = pointer_deg(p, center) - pointer_deg(session.start, center);
+            view.zoom = session.zoom;
+            view.center = session.xf.center;
+            view.rotation = wrap_deg(session.xf.rotation + screen_delta(delta, session.xf.flip));
+        }
+        None => {}
+    }
+    if session.mode.is_some() && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(id, session));
+}
+
 /// Wrap `a` degrees into (−180, 180]. Non-finite values become 0 so a hostile angle never
 /// propagates into the camera.
 pub fn wrap_deg(a: f32) -> f32 {

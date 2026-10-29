@@ -303,7 +303,7 @@ fn brush_and_eraser_size_fields_keep_sizes_above_2500_px() {
 }
 
 #[test]
-fn unsupported_brush_options_are_hidden_and_motion_and_symmetry_work() {
+fn unsupported_brush_options_and_smoothing_are_hidden_and_symmetry_works() {
     // #1177: in the default (Photoshop) theme these options-bar buttons did nothing.
     use egui_kittest::kittest::Queryable;
     let mut h = app_harness();
@@ -314,27 +314,9 @@ fn unsupported_brush_options_are_hidden_and_motion_and_symmetry_work() {
     assert!(h.query_by_label("Enable airbrush-style build-up effects").is_none());
     assert!(!brush(&h).build_up);
 
-    // The reference has no legacy smoothing gear; the amount edits Motion directly.
-    assert!(h.query_by_label("Set additional smoothing options").is_none());
-    for label in ["Pulled String Mode", "Stroke Catch-up", "Catch-up on Stroke End", "Adjust for Zoom"] {
-        assert!(h.query_by_label(label).is_none());
+    for label in ["Smoothing", "Smoothing:", "Set additional smoothing options", "Pulled String Mode", "Stroke Catch-up", "Catch-up on Stroke End", "Adjust for Zoom"] {
+        assert!(h.query_by_label(label).is_none(), "{label} is absent from the options bar");
     }
-    let before = brush(&h);
-    let label = h.query_by_label("Smoothing").or_else(|| h.query_by_label("Smoothing:")).unwrap().rect();
-    let field = h
-        .query_all_by_role(egui::accesskit::Role::SpinButton)
-        .find(|n| n.rect().left() > label.right() && (n.rect().center().y - label.center().y).abs() < 10.0)
-        .expect("motion smoothing amount");
-    field.click();
-    h.key_press(egui::Key::ArrowUp);
-    h.run_steps(2);
-    h.key_press(egui::Key::Enter);
-    h.run_steps(3);
-    let after = brush(&h);
-    assert!(after.motion.enabled);
-    assert_ne!(after.motion.smoothing, before.motion.smoothing);
-    assert_eq!(after.smoothing, before.smoothing);
-    assert_eq!(last_journal(h.state()).unwrap().0, "tools.setBrush");
 
     // Symmetry: the menu lists the document's paths and turns symmetry on and off.
     h.state_mut().run("file.new", json!({"width": 80, "height": 60})).unwrap();
@@ -558,26 +540,27 @@ fn obsolete_section_indices_recover_to_tip() {
 }
 
 #[test]
-fn editing_the_options_bar_amount_reenables_smoothing() {
+fn brush_options_bar_has_no_independent_smoothing_controls() {
     use egui_kittest::kittest::Queryable;
-    let mut h = options_bar_harness(crate::state::Tool::Brush);
-    h.state_mut().run("tools.setBrush", json!({"brush": {"c3TipMath":true,"motion": {"enabled": false, "smoothing": 0.4}}})).unwrap();
+    for tool in [crate::state::Tool::Brush, crate::state::Tool::Pencil, crate::state::Tool::Eraser] {
+        let h = options_bar_harness(tool);
+        for label in ["Smoothing", "Smoothing:", "Stroke Smoothing", "Anchor Smooth", "Set additional smoothing options"] {
+            assert!(h.query_by_label(label).is_none(), "{tool:?}: {label}");
+        }
+    }
+}
+
+#[test]
+fn motion_panel_rope_stays_editable_when_anchor_motion_is_disabled() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness(0, 2);
+    assert!(!h.state().session.tools.brush.motion.enabled);
+    h.get_by_label("Pulled String Mode").click();
     h.run_steps(3);
-    let n = h.state().session.journal.len();
-    let label = h.query_by_label("Smoothing").or_else(|| h.query_by_label("Smoothing:")).unwrap().rect();
-    let at = egui::pos2(label.right() + 25.0, label.center().y);
-    h.hover_at(at);
-    h.run_steps(2);
-    h.drag_at(at);
-    h.run_steps(2);
-    h.hover_at(at + vec2(20.0, 0.0));
-    h.run_steps(2);
-    h.drop_at(at + vec2(20.0, 0.0));
-    h.run_steps(3);
-    let motion = &h.state().session.tools.brush.motion;
-    assert!(motion.enabled && motion.smoothing != 0.4);
-    assert_eq!(h.state().session.journal.len(), n + 1, "one options-bar gesture");
-    assert_eq!(last_journal(h.state()).unwrap().1["brush"]["motion"]["enabled"], true);
+    let brush = &h.state().session.tools.brush;
+    assert!(brush.smoothing.enabled && brush.smoothing.pulled_string && brush.smoothing.amount > 0.0);
+    assert!(!brush.motion.enabled);
+    assert_eq!(last_journal(h.state()).unwrap().0, "tools.setBrush");
 }
 
 /// #4282: every name in the section list starts in the same column, Brush Tip Shape included,
@@ -1193,7 +1176,7 @@ fn brush_settings_hamburger_menu_actions() {
     assert_eq!(h.state().session.tools.presets.len(), count0 + 1);
     assert_eq!(last_journal(h.state()).unwrap().0, "brush.presets.save");
 
-    // 3. Clear Brush Controls resets dynamics, keeps locked sections and smoothing
+    // 3. Clear Brush Controls resets dynamics and rope, keeping locked sections.
     let mut h = harness(0, 0);
     h.state_mut().session.tools.brush.size = 45.0;
     h.state_mut().session.tools.brush.scattering.enabled = true;
@@ -1210,7 +1193,7 @@ fn brush_settings_hamburger_menu_actions() {
     let b = &h.state().session.tools.brush;
     assert!(!b.scattering.enabled, "unlocked scattering cleared");
     assert!(b.texture.enabled, "locked texture preserved");
-    assert_eq!(b.smoothing.amount, 0.5, "smoothing preserved");
+    assert_eq!(b.smoothing.amount, 0.0, "rope controls reset with the brush");
     assert_eq!(b.size, 45.0, "tip size preserved");
 
     // 4. Reset All Locked Settings clears all locks

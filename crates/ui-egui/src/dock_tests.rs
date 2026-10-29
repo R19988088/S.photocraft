@@ -122,6 +122,18 @@ fn drag(h: &mut Harness<'static, PhotocraftApp>, from: Pos2, to: Pos2) {
     h.run_steps(3);
 }
 
+fn double_click(h: &mut Harness<'static, PhotocraftApp>, at: Pos2) {
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(1);
+    for _ in 0..2 {
+        h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+}
+
 #[test]
 fn switching_layer_kinds_keeps_the_layers_panel_still() {
     for theme in [ThemeKind::ProMedium, ThemeKind::Studio] {
@@ -407,6 +419,28 @@ fn double_clicking_a_tab_collapses_and_dragging_a_strip_reorders() {
     assert!(rect_of(&h, Group::Color).height() < 40.0);
     h.state_mut().ui.dock.set_collapsed(Group::Color, false);
     h.run_steps(3);
+    let strip = last_strips(&h.ctx).into_iter().find(|strip| strip.group == Group::Layers).unwrap();
+    let blank_left = strip
+        .tabs
+        .iter()
+        .map(|(_, rect)| rect.right())
+        .chain(strip.chevron.map(|rect| rect.right()))
+        .fold(strip.area.left(), f32::max);
+    let blank = Rect::from_min_max(Pos2::new(blank_left, strip.menu.top()), Pos2::new(strip.menu.left(), strip.menu.bottom()));
+    assert!(blank.is_positive(), "Layers has blank tab-strip space for the double-click");
+    double_click(&mut h, blank.center());
+    assert!(h.state().ui.dock.is_collapsed(Group::Layers));
+    let strip = last_strips(&h.ctx).into_iter().find(|strip| strip.group == Group::Layers).unwrap();
+    let blank_left = strip
+        .tabs
+        .iter()
+        .map(|(_, rect)| rect.right())
+        .chain(strip.chevron.map(|rect| rect.right()))
+        .fold(strip.area.left(), f32::max);
+    let blank = Rect::from_min_max(Pos2::new(blank_left, strip.menu.top()), Pos2::new(strip.menu.left(), strip.menu.bottom()));
+    assert!(blank.is_positive(), "collapsed Layers keeps a blank tab-strip area");
+    double_click(&mut h, blank.center());
+    assert!(!h.state().ui.dock.is_collapsed(Group::Layers));
     // Drag the Layers tab strip (right of its tabs) above Color.
     let layers = rect_of(&h, Group::Layers);
     let strip = Pos2::new(layers.right() - 60.0, layers.top() + 13.0);

@@ -67,7 +67,7 @@ struct Layer {
     source: [Image; 2],
     rest: [Image; 2],
     stationary: Image,
-    native: crate::brush_format::NativeFormat,
+    native: crate::native_format::NativeFormat,
     default: Vec<f32>,
     mask: Mask,
     vector: Mask,
@@ -159,7 +159,7 @@ fn bind(
     layout: &wgpu::BindGroupLayout,
     textures: [&wgpu::Texture; 7],
     source: [&Image; 2],
-    native: &crate::brush_format::NativeFormat,
+    native: &crate::native_format::NativeFormat,
     output: Rect,
     densities: [f32; 2],
     coverage: Rect,
@@ -314,7 +314,7 @@ impl CachedTransform {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cached transform"),
-            source: wgpu::ShaderSource::Wgsl((crate::brush_format::NativeFormat::shader(0, 6, 7) + include_str!("cached_transform.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl((crate::native_format::NativeFormat::shader(0, 6, 7) + include_str!("cached_transform.wgsl")).into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cached transform pipeline"),
@@ -364,7 +364,7 @@ impl CachedTransform {
         let preview_background = pipeline("preview_background", wgpu::TextureFormat::Rgba32Float);
         let mut layers = Vec::new();
         for s in sources {
-            let native = crate::brush_format::NativeFormat::new(device, s.format).map_err(Unsupported)?;
+            let native = crate::native_format::NativeFormat::new(device, s.format).map_err(Unsupported)?;
             let source = [
                 image(device, queue, s.rect, wgpu::TextureFormat::Rgba32Float, bytemuck::cast_slice(&s.pixels), 4)?,
                 image(device, queue, s.rect, wgpu::TextureFormat::R32Float, &s.alpha, 1)?,

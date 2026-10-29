@@ -250,7 +250,7 @@ pub fn pill_tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
     let font = theme::medium(12.5);
     let galley = ui.painter().layout_no_wrap(translated.to_string(), font, t.text);
     let size = vec2(galley.size().x + 20.0, 24.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(size.x, size.y.max(32.0)), Sense::click());
     if selected {
         surface(ui, rect, t.hover, true);
         if !t.bevel {

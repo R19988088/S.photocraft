@@ -287,8 +287,8 @@ pub fn text_path(doc: &Document, t: &TextLayer) -> Path {
         let cs = contours(&glyph);
         let Some(outer) = cs.iter().map(|k| signed_area(k)).max_by(|a, b| a.abs().total_cmp(&b.abs())) else { continue };
         let (fills, holes): (Vec<_>, Vec<_>) = cs.into_iter().partition(|k| signed_area(k).signum() == outer.signum());
-        subpaths.extend(fills.into_iter().map(|knots| Subpath { closed: true, knots, op: PathOp::Combine }));
-        subpaths.extend(holes.into_iter().map(|knots| Subpath { closed: true, knots, op: PathOp::Subtract }));
+        subpaths.extend(fills.into_iter().map(|knots| Subpath { style: None, closed: true, knots, op: PathOp::Combine }));
+        subpaths.extend(holes.into_iter().map(|knots| Subpath { style: None, closed: true, knots, op: PathOp::Subtract }));
     }
     Path::new(subpaths)
 }
@@ -380,7 +380,7 @@ fn attach_to_path(s: &mut Session, p: &Value) -> Result<Value> {
         let inv = t.transform.inverse().ok_or_else(|| EngineError::Other("the type layer's transform cannot be inverted".into()))?;
         let map = |q: Point| inv.apply(q);
         let knots = sub.knots.iter().map(|k| Knot { anchor: map(k.anchor), in_ctrl: map(k.in_ctrl), out_ctrl: map(k.out_ctrl), smooth: k.smooth }).collect();
-        let path = Subpath { closed: sub.closed, knots, op: PathOp::Combine };
+        let path = Subpath { style: None, closed: sub.closed, knots, op: PathOp::Combine };
         if !path.knots.iter().all(|k| [k.anchor, k.in_ctrl, k.out_ctrl].iter().all(|q| q.x.is_finite() && q.y.is_finite())) {
             return Err(EngineError::Other("the path cannot be mapped into the type layer".into()));
         }

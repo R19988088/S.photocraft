@@ -253,6 +253,7 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
 pub fn vector_path() -> Path {
     Path::new(vec![
         Subpath {
+            style: None,
             closed: true,
             op: PathOp::Combine,
             knots: vec![

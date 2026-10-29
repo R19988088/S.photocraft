@@ -21,6 +21,7 @@ const MIN_INSET: f64 = 10.0;
 /// A selected live rectangle: its layer, `[x, y, w, h]` with a positive size, and its radii.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Target {
+    component: Option<usize>,
     layer: u64,
     rect: [f64; 4],
     radii: [f64; 4],
@@ -59,6 +60,22 @@ fn targets(app: &PhotocraftApp) -> Vec<Target> {
         return Vec::new();
     }
     let Some(st) = app.session.active() else { return Vec::new() };
+    if let Some(c) = &app.ui.shape_components
+        && c.doc == st.doc.id
+    {
+        return c
+            .targets
+            .iter()
+            .rev()
+            .filter_map(|target| {
+                let LayerContent::Shape(sh) = &st.doc.layer(target.layer)?.content else { return None };
+                let LiveShape::Rect { rect, radii } = photocraft_vector::shapes::rectangle_from_subpath(sh.path.subpaths.get(target.index)?)? else {
+                    return None;
+                };
+                Some(Target { component: Some(target.index), layer: target.layer.0, rect, radii })
+            })
+            .collect();
+    }
     let mut out: Vec<Target> = st
         .selected_layers()
         .into_iter()
@@ -68,7 +85,12 @@ fn targets(app: &PhotocraftApp) -> Vec<Target> {
             let Some(LiveShape::Rect { rect: [x, y, w, h], radii }) = sh.live else { return None };
             let (x, w) = if w < 0.0 { (x + w, -w) } else { (x, w) };
             let (y, h) = if h < 0.0 { (y + h, -h) } else { (y, h) };
-            (w > 0.0 && h > 0.0 && [x, y, w, h].iter().chain(&radii).all(|v| v.is_finite())).then_some(Target { layer: l.id.0, rect: [x, y, w, h], radii })
+            (w > 0.0 && h > 0.0 && [x, y, w, h].iter().chain(&radii).all(|v| v.is_finite())).then_some(Target {
+                component: None,
+                layer: l.id.0,
+                rect: [x, y, w, h],
+                radii,
+            })
         })
         .collect();
     // `selected_layers` lists bottom to top; the topmost widget wins a press.
@@ -143,7 +165,7 @@ pub fn hovers(app: &PhotocraftApp, p: [f64; 2]) -> bool {
 pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool {
     match ev {
         ToolEvent::Down { x, y, .. } => {
-            if mods.command {
+            if mods.command || (crate::vector_ui::is_shape_tool(app.ui.tool) && (mods.ctrl || mods.shift)) {
                 return false;
             }
             let targets = targets(app);
@@ -184,8 +206,12 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool 
             // One history step for every layer changed.
             let key = format!("corner-radius-{}", app.ui.alloc_id());
             for (t, now) in d.targets.iter().zip(&d.now) {
+                let mut params = serde_json::json!({"layer": t.layer, "radii": now, "coalesce": key});
+                if let Some(i) = t.component {
+                    params["components"] = serde_json::json!([i]);
+                }
                 if *now != t.radii
-                    && let Err(e) = app.run("shape.edit", serde_json::json!({"layer": t.layer, "radii": now, "coalesce": key}))
+                    && let Err(e) = app.run("shape.edit", params)
                 {
                     app.ui.status = e;
                     app.ui.status_error = true;
@@ -213,7 +239,7 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, to_scr: &dyn Fn([f64; 
     }
     let z = zoom(app);
     for t in targets(app) {
-        let now = drag.and_then(|d| d.targets.iter().position(|g| g.layer == t.layer).and_then(|i| d.now.get(i)));
+        let now = drag.and_then(|d| d.targets.iter().position(|g| g.layer == t.layer && g.component == t.component).and_then(|i| d.now.get(i)));
         let radii = now.copied().unwrap_or(t.radii);
         if now.is_some() {
             let path = photocraft_vector::shapes::rounded_rect(t.rect[0], t.rect[1], t.rect[2], t.rect[3], radii);

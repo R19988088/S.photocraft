@@ -371,6 +371,26 @@ mod tests {
         assert!(near(constrain([30.0, 20.0], Some(v), 4), [30.0, 0.0]));
     }
 
+    #[test]
+    fn command_alt_shift_selection_drag_copies_and_axis_locks() {
+        let mut app = app_with_layer();
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        app.ui.tool = Tool::RectMarquee;
+        app.session.execute("select.rect", json!({"x":8,"y":8,"width":8,"height":8})).unwrap();
+        let m = egui::Modifiers::COMMAND | egui::Modifiers::ALT | egui::Modifiers::SHIFT;
+        crate::canvas::tool_event(&mut app, ToolEvent::Down {x: 10.0,y:10.0,pressure:1.0},m);
+        crate::canvas::tool_event(&mut app, ToolEvent::Move {x: 20.0,y:13.0,pressure:1.0},m);
+        assert_eq!(crate::canvas::selection_drag_delta(&app), Some((10, 0)));
+        crate::canvas::tool_event(&mut app, ToolEvent::Move {x: 20.0,y:20.0,pressure:1.0},m);
+        assert_eq!(crate::canvas::selection_drag_delta(&app), Some((10, 10)));
+        crate::canvas::tool_event(&mut app, ToolEvent::Move {x: 20.0,y:13.0,pressure:1.0},m);
+        crate::canvas::tool_event(&mut app, ToolEvent::Up {x: 20.0,y:13.0},m);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.doc.layer(id).unwrap().surface().unwrap().rgba(10,10)[3],1.0);
+        assert_eq!(photocraft_engine::float_cmds::floating(st).unwrap().offset,(10,0));
+        assert_eq!(crate::canvas::selection_drag_kind(&app, Tool::RectMarquee,[20.0,10.0],m),Some(true));
+    }
+
     fn app_with_layer() -> PhotocraftApp {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();

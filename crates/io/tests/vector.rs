@@ -26,6 +26,7 @@ fn roundtrip(d: &Document) -> Document {
 fn path() -> Path {
     Path::new(vec![
         Subpath {
+            style: None,
             closed: true,
             op: PathOp::Combine,
             knots: vec![

@@ -478,6 +478,28 @@ fn strips_id() -> egui::Id {
     egui::Id::new("dock-strip-rects")
 }
 
+#[derive(Clone, Copy, Default)]
+struct StripClick {
+    time: f64,
+    position: Pos2,
+}
+
+pub(crate) fn blank_strip_double_clicked(ctx: &egui::Context, id: egui::Id, response: &egui::Response) -> bool {
+    let Some(position) = response.interact_pointer_pos().filter(|_| response.clicked()) else { return false };
+    let (time, options) = ctx.input(|input| (input.time, egui::InputOptions::default()));
+    let previous = ctx.data_mut(|data| data.remove_temp::<StripClick>(id));
+    // Pair releases explicitly so a second double-click is not mistaken for one triple-click.
+    if previous.is_some_and(|click| {
+        time - click.time < options.max_double_click_delay
+            && position.distance_sq(click.position) < options.max_click_dist * options.max_click_dist
+    }) {
+        true
+    } else {
+        ctx.data_mut(|data| data.insert_temp(id, StripClick { time, position }));
+        false
+    }
+}
+
 /// Draw the `shown` groups (any order; the layout decides) filling `ui`. `body` draws one
 /// group's tab content.
 pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut body: impl FnMut(&mut PhotocraftApp, &mut egui::Ui, Group, usize)) {
@@ -562,7 +584,10 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
                 crate::tab_strip::TabContextAction::CloseGroup => actions.push(Action::Close(g)),
             }
         }
-        if resp.strip.double_clicked() || resp.tab_double_clicked || (collapsed && resp.tab_clicked) {
+        if blank_strip_double_clicked(ui.ctx(), egui::Id::new(("dock-strip-double-click", g.key())), &resp.strip)
+            || resp.tab_double_clicked
+            || (collapsed && resp.tab_clicked)
+        {
             actions.push(Action::ToggleCollapse(g));
             // A single click on a collapsed strip's tab expands the group as a peek: the next
             // click outside closes it again, with Auto-Collapse Iconic Panels on.
@@ -625,10 +650,6 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
             }
             if let Some(label) = tabs.get(sel) {
                 crate::panel_docking::legacy_menu(app, ui, label);
-            }
-            if ui.button(if collapsed { tl!("Expand Panel Group") } else { tl!("Collapse Panel Group") }).clicked() {
-                actions.push(Action::ToggleCollapse(g));
-                ui.close();
             }
             let pos = order.iter().position(|x| *x == g).unwrap_or(0);
             if ui.add_enabled(!locked && pos > 0, egui::Button::new(tl!("Move Group Up"))).clicked() {

@@ -1,5 +1,4 @@
-//! Filter › Liquify…: a full-window dialog like Photoshop's (tool strip on the left, properties on
-//! the right, preview in the middle, OK / Cancel).
+//! Standalone on-canvas Liquify tool with its controls in the options bar.
 //!
 //! Native previews keep the original full-resolution pixels resident on the GPU. Pointer events
 //! edit the inverse field; the shader samples the original without resampling document pixels.
@@ -8,7 +7,9 @@
 #[path = "liquify_gpu.rs"]
 mod gpu;
 
-use egui::{Align2, Color32, FontId, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
+use egui::{Color32, Rect as ERect, TextureHandle};
+#[cfg(test)]
+use egui::{pos2, vec2};
 use photocraft_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, auto_cell};
 use photocraft_doc::LayerId;
 use photocraft_geom::Rect;
@@ -17,14 +18,12 @@ use serde_json::{Value, json};
 
 use crate::PhotocraftApp;
 use crate::canvas::{ToolEvent, ViewXform};
-use crate::theme::Tokens;
 use crate::widgets;
 
 /// Longest side of the preview proxy (px).
 const PROXY_SIDE: usize = 1600;
+#[cfg(test)]
 const MAX_VIEW_PREVIEW_PIXELS: usize = 8 * 1024 * 1024;
-const LEFT_W: f32 = 48.0;
-const RIGHT_W: f32 = 292.0;
 const REDO_STACK_LIMIT: usize = 100;
 
 /// Options shown in the properties panel (and settable over the control channel).
@@ -138,7 +137,6 @@ pub struct LiquifyDialog {
     gpu_doc: Option<std::sync::Arc<photocraft_doc::Document>>,
     gpu_error: Option<String>,
     gpu_damage: Option<Rect>,
-    layer_name: String,
     canvas: Rect,
     cell: f64,
     pub field: LiquifyField,
@@ -156,20 +154,20 @@ pub struct LiquifyDialog {
     dirty: Option<[usize; 4]>,
     /// Document-pixel preview used above 100% zoom.
     view_bounds: Option<Rect>,
+    #[cfg(test)]
     view_out: Vec<[u8; 4]>,
+    #[cfg(test)]
     view_source_scratch: Vec<[f32; 4]>,
     view_tex: Option<TextureHandle>,
     view_dirty: Option<Rect>,
-    backdrop: Option<TextureHandle>,
     mask_tex: Option<TextureHandle>,
     mask_dirty: bool,
     pub opts: LiquifyOpts,
     /// Screen px per document px (0 = fit on next frame) and the view centre (document px).
+    #[cfg(test)]
     zoom: f32,
+    #[cfg(test)]
     center: [f64; 2],
-    hover: Option<[f64; 2]>,
-    /// Alt+right-drag (or Control+Alt-drag) resizing the brush: screen anchor, starting size, starting density.
-    brush_resize: Option<(Pos2, f32, f32)>,
     last_dab: f64,
     /// Last dab + proxy update time (ms), shown in the footer.
     pub dab_ms: f64,
@@ -204,6 +202,7 @@ impl LiquifyDialog {
             "scope": self.opts.scope,
             "layers": self.targets.iter().map(|id| id.0).collect::<Vec<_>>(),
             "gpuCached": self.gpu.is_some(),
+            "gpuError": self.gpu_error,
             "tool": self.opts.tool,
             "size": self.opts.size,
             "strokes": self.strokes.len() + usize::from(self.cur.is_some()),
@@ -363,6 +362,7 @@ impl LiquifyDialog {
 
     /// Builds or updates the visible source-resolution viewport. At ordinary zoom the whole-layer
     /// proxy remains cheaper; above 100%, a full-resolution crop is enough to fill the preview.
+    #[cfg(test)]
     fn update_view_preview(&mut self, ctx: &egui::Context, area: ERect) {
         if self.gpu.is_some() || self.zoom <= 1.0 {
             return;
@@ -502,11 +502,12 @@ pub fn draw_cursor(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform)
 /// The full properties panel remains available through the control channel; the
 /// in-canvas tool only exposes target scope, size and hardness (density).
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
-    if app.distort.liquify.is_none() && app.ui.tool == crate::state::Tool::Liquify {
-        if let Err(error) = open(app, ui.ctx()) {
-            crate::notices::error(app, error);
-            return true;
-        }
+    if app.distort.liquify.is_none()
+        && app.ui.tool == crate::state::Tool::Liquify
+        && let Err(error) = open(app, ui.ctx())
+    {
+        crate::notices::error(app, error);
+        return true;
     }
     let Some(d) = app.distort.liquify.as_mut() else { return false };
     for tool in LiquifyTool::ALL.into_iter().filter(|tool| *tool != LiquifyTool::Smooth) {
@@ -521,13 +522,11 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     }
     widgets::vline(ui, 22.0);
     let before_scope = d.opts.scope.clone();
-    egui::ComboBox::from_id_salt("liquify-options-scope")
-        .selected_text(scope_label(&d.opts.scope))
-        .show_ui(ui, |ui| {
-            for scope in ["layer", "group", "all"] {
-                ui.selectable_value(&mut d.opts.scope, scope.into(), scope_label(scope));
-            }
-        });
+    egui::ComboBox::from_id_salt("liquify-options-scope").selected_text(scope_label(&d.opts.scope)).show_ui(ui, |ui| {
+        for scope in ["layer", "group", "all"] {
+            ui.selectable_value(&mut d.opts.scope, scope.into(), scope_label(scope));
+        }
+    });
     if before_scope != d.opts.scope {
         d.end();
         d.scope_dirty = true;
@@ -549,12 +548,15 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
         return Err("Liquify requires an available GPU canvas.".into());
     }
     let st = app.session.active().ok_or("no document")?;
-    let layer = st.active_layer.ok_or("no active layer")?;
-    let ids = photocraft_engine::distort_cmds::liquify_targets(&app.session, &json!({})).map_err(|e| e.to_string())?;
+    let mut opts = LiquifyOpts::default();
+    if let Some(saved) = app.session.prefs().dialogs.get(REMEMBERED) {
+        opts.apply(saved).ok();
+    }
+    let ids = photocraft_engine::distort_cmds::liquify_targets(&app.session, &json!({"scope":opts.scope})).map_err(|e| e.to_string())?;
+    let layer = st.active_layer.or_else(|| ids.first().copied()).ok_or("no active layer")?;
     let surf = ids.first().and_then(|id| st.doc.layer(*id)).and_then(|l| l.surface()).cloned().ok_or("target has no pixel cache")?;
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
-    let name = st.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
     let cell = auto_cell(canvas);
     let proxy = if app.gpu.is_some() {
         ProxyImage::new(&Surface::new(photocraft_color::PixelFormat::RGBA32F), Rect::new(0, 0, 1, 1), 1)
@@ -562,6 +564,7 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
         ProxyImage::new(&surf, canvas, PROXY_SIDE)
     };
     let out = vec![[0u8; 4]; proxy.w * proxy.h];
+    #[cfg(test)]
     let center = [f64::from(canvas.x0 + canvas.x1) / 2.0, f64::from(canvas.y0 + canvas.y1) / 2.0];
     let mut d = LiquifyDialog {
         layer,
@@ -573,7 +576,6 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
         gpu_doc: None,
         gpu_error: None,
         gpu_damage: None,
-        layer_name: name,
         canvas,
         cell,
         field: LiquifyField::new(canvas, cell),
@@ -587,18 +589,19 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
         tex: None,
         dirty: None,
         view_bounds: None,
+        #[cfg(test)]
         view_out: Vec::new(),
+        #[cfg(test)]
         view_source_scratch: Vec::new(),
         view_tex: None,
         view_dirty: None,
-        backdrop: None,
         mask_tex: None,
         mask_dirty: true,
-        opts: LiquifyOpts::default(),
+        opts,
+        #[cfg(test)]
         zoom: 0.0,
+        #[cfg(test)]
         center,
-        hover: None,
-        brush_resize: None,
         last_dab: 0.0,
         dab_ms: 0.0,
         preview_ms: 0.0,
@@ -652,16 +655,6 @@ fn refresh_scope(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result
     // The dialog owns its display texture. The document canvas and Navigator can refresh
     // independently while the cached Liquify edit remains unchanged.
     doc.id = app.distort.liquify.as_ref().and_then(|d| d.gpu_doc.as_ref().map(|doc| doc.id)).unwrap_or_else(photocraft_doc::DocId::fresh);
-    fn retain(layers: &mut [photocraft_doc::Layer], targets: &[LayerId]) -> bool {
-        let mut any = false;
-        for layer in layers {
-            let keep = if let Some(children) = layer.children_mut() { retain(children, targets) } else { targets.contains(&layer.id) };
-            layer.visible &= keep;
-            any |= keep;
-        }
-        any
-    }
-    retain(&mut doc.layers, &targets);
     let d = app.distort.liquify.as_mut().ok_or("Liquify is not open")?;
     let preview = if let Some(renderer) = &app.gpu {
         let mut sources = Vec::new();
@@ -742,6 +735,54 @@ fn refresh_scope(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result
 fn remember(app: &mut PhotocraftApp, opts: &LiquifyOpts) {
     let v = opts.to_json();
     app.session.prefs.edit(|p| p.dialogs.insert(REMEMBERED.into(), v));
+}
+
+/// Present the resident edit in the active canvas without touching its normal display cache.
+pub(crate) fn canvas_preview(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize) -> Option<std::sync::Arc<photocraft_doc::Document>> {
+    if app.ui.tool != crate::state::Tool::Liquify || app.session.active_index() != Some(idx) {
+        return None;
+    }
+    if app.distort.liquify.as_ref().is_some_and(|d| d.scope_dirty)
+        && let Err(error) = refresh_scope(app, Some(ctx))
+    {
+        crate::notices::error(app, error);
+        return None;
+    }
+    let renderer = app.gpu.clone()?;
+    let d = app.distort.liquify.as_mut()?;
+    let doc = d.gpu_doc.clone()?;
+    if let Some((_, last)) = &d.cur {
+        let last = *last;
+        if d.opts.tool.is_stationary() && crate::gpu_canvas::now_ms() - d.last_dab > 33.0 {
+            d.extend(last, crate::gpu_canvas::now_ms());
+        }
+        ctx.request_repaint();
+    }
+    let preview = d.gpu.as_ref()?;
+    let ops = std::mem::take(&mut d.field.gpu_ops);
+    if !ops.is_empty() || d.gpu_dirty || !renderer.has(doc.id.0, [doc.size.width, doc.size.height]) {
+        let started = crate::gpu_canvas::now_ms();
+        preview.apply_ops(renderer.render_state(), &d.field, &ops, d.gpu_dirty);
+        let damage = if d.gpu_dirty { None } else { d.gpu_damage.take() };
+        renderer.set_source_overrides(doc.id.0, preview.render_outputs(renderer.render_state(), damage));
+        if let Err(error) = renderer.composite(&doc, doc.bounds(), false) {
+            d.gpu_error = Some(error.0.clone());
+            crate::notices::error(app, error.0);
+            return Some(doc);
+        }
+        d.gpu_error = None;
+        d.gpu_dirty = false;
+        d.preview_ms = crate::gpu_canvas::now_ms() - started;
+    }
+    Some(doc)
+}
+
+pub(crate) fn draw_gpu_overlay(app: &PhotocraftApp, painter: &egui::Painter, area: ERect, image: ERect) {
+    if let Some(d) = &app.distort.liquify
+        && let Some(gpu) = &d.gpu
+    {
+        painter.add(gpu.callback(area, image, d.canvas, &d.field, d.opts.show_mask, d.opts.show_mesh, d.opts.mesh_size));
+    }
 }
 
 pub(crate) fn gpu_key(app: &PhotocraftApp) -> Option<u64> {
@@ -884,20 +925,6 @@ fn alt_tool(t: LiquifyTool) -> LiquifyTool {
 }
 
 /// Alt+right-drag, and Control+Alt-drag, change the Liquify brush instead of painting (#4702).
-fn brush_resize_gesture(mods: egui::Modifiers, secondary: bool) -> bool {
-    mods.alt && (secondary || mods.ctrl)
-}
-
-/// Horizontal motion sets the diameter (the circle's edge follows the pointer). Vertical motion
-/// sets density, Liquify's edge falloff, over the same 200 px travel the canvas uses for hardness.
-fn resized_brush(start_size: f32, start_density: f32, dx: f32, dy: f32) -> (f32, f32) {
-    let dx = if dx.is_finite() { dx } else { 0.0 };
-    let dy = if dy.is_finite() { dy } else { 0.0 };
-    let size = (start_size + dx).round().clamp(1.0, 15000.0);
-    let density = (start_density + dy * 100.0 / crate::brush_resize::HARDNESS_TRAVEL).clamp(0.0, 100.0);
-    (size, (density * 10.0).round() / 10.0)
-}
-
 /// Pointer in document coordinates (from the preview or the control channel). Alt at
 /// pointer-down subtracts from the freeze mask (lasso), reverses a twirl and swaps Pucker/Bloat;
 /// Shift adds to the mask, same as no modifier.
@@ -913,7 +940,6 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) {
             }
         }
         ToolEvent::Move { x, y, pressure } => {
-            d.hover = Some([x, y]);
             if let Some((_, pts)) = &mut d.lasso {
                 if pts.last().is_none_or(|&l| l[0] != x || l[1] != y) {
                     pts.push([x, y]);
@@ -1016,33 +1042,7 @@ fn tool_icon(t: LiquifyTool) -> &'static str {
     }
 }
 
-fn shortcut(t: LiquifyTool) -> &'static str {
-    match t {
-        LiquifyTool::ForwardWarp => "W",
-        LiquifyTool::Reconstruct => "R",
-        LiquifyTool::Smooth => "E",
-        LiquifyTool::TwirlCw => "C",
-        LiquifyTool::Pucker => "S",
-        LiquifyTool::Bloat => "B",
-        LiquifyTool::PushLeft => "O",
-        LiquifyTool::Freeze => "F",
-        LiquifyTool::Thaw => "D",
-        LiquifyTool::LassoMask => "L",
-        _ => "",
-    }
-}
-
-fn load_backdrop(app: &PhotocraftApp, ctx: &egui::Context, layer: LayerId, canvas: Rect) -> Option<TextureHandle> {
-    let st = app.session.active()?;
-    let doc = crate::distort_ui::without_layer(&st.doc, layer);
-    let buf = photocraft_compose::render(&doc, canvas);
-    let mut s = photocraft_raster::Surface::new(photocraft_color::PixelFormat::RGBA8);
-    let flat: Vec<f32> = buf.px.iter().flat_map(|p| *p).collect();
-    s.write_region(canvas, &flat);
-    Some(ctx.load_texture("liquify-backdrop", crate::distort_ui::surface_image(&s, canvas, PROXY_SIDE), egui::TextureOptions::LINEAR))
-}
-
-/// Draws the dialog (a full-window layer over the app).
+/// Refresh the frozen target set after an options-bar scope change.
 pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if app.distort.liquify.as_ref().is_some_and(|d| d.scope_dirty)
         && let Err(error) = refresh_scope(app, Some(ctx))
@@ -1053,435 +1053,11 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         }
         crate::notices::error(app, error);
     }
-    if let (Some(renderer), Some(d)) = (app.gpu.as_ref(), app.distort.liquify.as_mut())
-        && let Some(gpu) = &d.gpu
-    {
-        let ops = std::mem::take(&mut d.field.gpu_ops);
-        if !ops.is_empty() || d.gpu_dirty {
-            gpu.apply_ops(renderer.render_state(), &d.field, &ops, d.gpu_dirty);
-            if let Some(st) = app.session.active() {
-                renderer.set_source_overrides(st.doc.id.0, gpu.render_outputs(renderer.render_state(), if d.gpu_dirty { None } else { d.gpu_damage.take() }));
-                if let Err(error) = renderer.composite(&st.doc, st.doc.bounds(), false) {
-                    d.gpu_error = Some(error.0);
-                }
-            }
-        }
-        d.gpu_dirty = false;
-    }
-    // Liquify remains a canvas tool; its legacy full-window Area is never shown.
-    if app.ui.tool == crate::state::Tool::Liquify {
-        return;
-    }
-    let t = Tokens::get(ctx);
-    let screen = ctx.content_rect();
-    if app.distort.liquify.as_ref().is_some_and(|d| d.opts.show_backdrop && d.backdrop.is_none()) {
-        let tex = app.distort.liquify.as_ref().map(|d| (d.layer, d.canvas)).and_then(|(layer, canvas)| load_backdrop(app, ctx, layer, canvas));
-        if let Some(d) = app.distort.liquify.as_mut() {
-            d.backdrop = tex;
-        }
-    }
-    let mut action: Option<&str> = None;
-    let mut events: Vec<(ToolEvent, egui::Modifiers)> = Vec::new();
-    egui::Area::new(egui::Id::new("liquify-dialog")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
-        let Some(d) = app.distort.liquify.as_mut() else { return };
-        d.upload(ctx);
-        let (full, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
-        let painter = ui.painter().clone();
-        painter.rect_filled(full, 0.0, t.chrome);
-        // Title strip.
-        let title = ERect::from_min_size(full.min, vec2(full.width(), 30.0));
-        painter.rect_filled(title, 0.0, t.dock);
-        painter.line_segment([title.left_bottom(), title.right_bottom()], Stroke::new(1.0, t.separator));
-        let pct = if d.zoom > 0.0 { d.zoom * 100.0 } else { 100.0 };
-        painter.text(
-            title.center(),
-            Align2::CENTER_CENTER,
-            format!("{} ({}, {:.0}%)", tl!("Liquify…").trim_end_matches('…'), d.layer_name, pct),
-            FontId::proportional(13.0),
-            t.text,
-        );
-        let body = ERect::from_min_max(pos2(full.left(), title.bottom()), full.max);
-        // Left tool strip.
-        let left = ERect::from_min_size(body.min, vec2(LEFT_W, body.height()));
-        painter.rect_filled(left, 0.0, t.dock);
-        painter.line_segment([left.right_top(), left.right_bottom()], Stroke::new(1.0, t.separator));
-        let mut strip = ui.new_child(egui::UiBuilder::new().max_rect(left.shrink2(vec2(6.0, 8.0))));
-        strip.spacing_mut().item_spacing.y = 4.0;
-        for tool in LiquifyTool::ALL {
-            let tip = match tool {
-                // The lasso works on the same freeze mask as Freeze/Thaw.
-                LiquifyTool::LassoMask => tl!("Freeze Lasso: drag to freeze an area, Alt-drag to thaw it (L)").to_string(),
-                _ => format!("{} ({})", tl!(tool.label()), shortcut(tool)),
-            };
-            if crate::icons::button(&mut strip, tool_icon(tool), 34.0, d.opts.tool == tool, &tip).clicked() {
-                d.opts.tool = tool;
-            }
-            if matches!(tool, LiquifyTool::Smooth | LiquifyTool::PushLeft | LiquifyTool::Thaw) {
-                strip.add_space(6.0);
-            }
-        }
-        // Right properties panel.
-        let right = ERect::from_min_size(pos2(body.right() - RIGHT_W, body.top()), vec2(RIGHT_W, body.height()));
-        painter.rect_filled(right, 0.0, t.dock);
-        painter.line_segment([right.left_top(), right.left_bottom()], Stroke::new(1.0, t.separator));
-        let mut props = ui.new_child(egui::UiBuilder::new().max_rect(right.shrink2(vec2(14.0, 12.0))));
-        egui::ScrollArea::vertical().id_salt("liquify-props").show(&mut props, |ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            if let Some(error) = &d.gpu_error {
-                ui.colored_label(t.danger, error);
-            }
-            let old_scope = d.opts.scope.clone();
-            egui::ComboBox::from_id_salt("liquify-target-scope").selected_text(scope_label(&d.opts.scope)).show_ui(ui, |ui| {
-                for scope in ["layer", "all", "group"] {
-                    ui.selectable_value(&mut d.opts.scope, scope.into(), scope_label(scope));
-                }
-            });
-            if old_scope != d.opts.scope {
-                d.end();
-                d.scope_dirty = true;
-            }
-            widgets::section_label(ui, tl!("Brush Tool Options"));
-            widgets::slider_row(ui, tl!("Size"), &mut d.opts.size, 1.0..=3000.0, "", None);
-            widgets::slider_row(ui, tl!("Density"), &mut d.opts.density, 0.0..=100.0, "", None);
-            widgets::slider_row(ui, tl!("Pressure"), &mut d.opts.pressure, 0.0..=100.0, "", None);
-            widgets::slider_row(ui, tl!("Rate"), &mut d.opts.rate, 0.0..=100.0, "", None);
-            widgets::hairline(ui);
-            widgets::section_label(ui, tl!("Brush Reconstruct Options"));
-            widgets::slider_row(ui, tl!("Amount"), &mut d.opts.reconstruct_amount, 0.0..=100.0, "%", None);
-            ui.horizontal(|ui| {
-                if widgets::secondary_button(ui, tl!("Reconstruct"), 110.0).clicked() {
-                    let a = f64::from(d.opts.reconstruct_amount);
-                    d.global(LiquifyTool::ReconstructAll, Some(a));
-                }
-                if widgets::secondary_button(ui, tl!("Restore All"), 110.0).clicked() {
-                    d.restore_all();
-                }
-            });
-            widgets::hairline(ui);
-            widgets::section_label(ui, tl!("Mask Options"));
-            ui.horizontal(|ui| {
-                if widgets::secondary_button(ui, tl!("None"), 70.0).clicked() {
-                    d.global(LiquifyTool::ThawAll, None);
-                }
-                if widgets::secondary_button(ui, tl!("Mask All"), 80.0).clicked() {
-                    d.global(LiquifyTool::FreezeAll, None);
-                }
-                if widgets::secondary_button(ui, tl!("Invert All"), 80.0).clicked() {
-                    d.global(LiquifyTool::InvertFreeze, None);
-                }
-            });
-            widgets::hairline(ui);
-            widgets::section_label(ui, tl!("View Options"));
-            widgets::checkbox(ui, &mut d.opts.show_mesh, tl!("Show Mesh"));
-            ui.horizontal(|ui| {
-                ui.label(tl!("Mesh Size"));
-                widgets::dropdown(ui, "liquify-mesh-size", &mut d.opts.mesh_size, &[(0, tl!("Small")), (1, tl!("Medium")), (2, tl!("Large"))], 110.0);
-            });
-            widgets::checkbox(ui, &mut d.opts.show_mask, tl!("Show Mask"));
-            widgets::checkbox(ui, &mut d.opts.show_backdrop, tl!("Show Backdrop"));
-            if d.opts.show_backdrop {
-                widgets::slider_row(ui, tl!("Opacity"), &mut d.opts.backdrop_opacity, 0.0..=100.0, "", None);
-            }
-            widgets::hairline(ui);
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} stroke(s) · field {} px/node · dab {:.2} ms · preview {:.2} ms",
-                    d.strokes.len(),
-                    d.cell,
-                    d.dab_ms,
-                    d.preview_ms
-                ))
-                .color(t.text_faint)
-                .size(11.0),
-            );
-        });
-        // Footer buttons.
-        let foot = ERect::from_min_size(pos2(right.left() + 14.0, right.bottom() - 48.0), vec2(RIGHT_W - 28.0, 32.0));
-        let mut fb = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        if let Some(role) = widgets::dialog_buttons(
-            &mut fb,
-            &[
-                widgets::DialogButton::new(widgets::ButtonRole::Default, tl!("OK"), 84.0),
-                widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), 84.0),
-            ],
-        ) {
-            action = Some(if role == widgets::ButtonRole::Default { "ok" } else { "cancel" });
-        }
-        // Preview.
-        let area = ERect::from_min_max(pos2(left.right(), body.top()), pos2(right.left(), body.bottom()));
-        painter.rect_filled(area, 0.0, t.canvas);
-        let (cw, ch) = (d.canvas.width() as f32, d.canvas.height() as f32);
-        if d.zoom <= 0.0 {
-            d.zoom = ((area.width() - 40.0) / cw).min((area.height() - 40.0) / ch).clamp(0.01, 4.0);
-            d.center = [f64::from(d.canvas.x0) + f64::from(cw) / 2.0, f64::from(d.canvas.y0) + f64::from(ch) / 2.0];
-        }
-        let resp = ui.interact(area, egui::Id::new("liquify-preview"), Sense::click_and_drag());
-        // Wheel zooms about the pointer.
-        if resp.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0
-                && let Some(hp) = resp.hover_pos()
-            {
-                let before = to_doc(d, area, hp);
-                // Liquify's own preview zoom, not the canvas (`zoom_levels` doesn't apply).
-                d.zoom = (d.zoom * (scroll / 200.0).exp()).clamp(0.01, 32.0);
-                let after = to_doc(d, area, hp);
-                d.center = [d.center[0] + before[0] - after[0], d.center[1] + before[1] - after[1]];
-            }
-        }
-        d.update_view_preview(ctx, area);
-        let img = ERect::from_min_max(
-            to_screen(d, area, [f64::from(d.canvas.x0), f64::from(d.canvas.y0)]),
-            to_screen(d, area, [f64::from(d.canvas.x1), f64::from(d.canvas.y1)]),
-        );
-        let clip = painter.with_clip_rect(area);
-        widgets::checker(&clip, img.intersect(area), 8.0);
-        let uv = ERect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        if d.opts.show_backdrop
-            && let Some(b) = &d.backdrop
-        {
-            clip.image(b.id(), img, uv, Color32::from_white_alpha((d.opts.backdrop_opacity / 100.0 * 255.0) as u8));
-        }
-        if let Some(gpu) = &d.gpu {
-            if let Some(doc) = &d.gpu_doc {
-                crate::gpu_canvas::GpuCanvas::paint(
-                    &clip,
-                    area,
-                    crate::gpu_canvas::ViewParams {
-                        doc: doc.id.0,
-                        doc_size: [doc.size.width, doc.size.height],
-                        zoom: d.zoom,
-                        center: [d.center[0] as f32, d.center[1] as f32],
-                        rotation: 0.0,
-                        shadow: false,
-                        pixel_grid: false,
-                        view_key: 0x4c495155494659,
-                        display: 0,
-                        output: 0,
-                        hdr: None,
-                        offset: [0.0; 2],
-                    },
-                );
-            }
-            clip.add(gpu.callback(area, img, d.canvas, &d.field, d.opts.show_mask, d.opts.show_mesh, d.opts.mesh_size));
-        } else if d.zoom > 1.0
-            && let (Some(bounds), Some(tex)) = (d.view_bounds, &d.view_tex)
-        {
-            let detail = ERect::from_min_max(
-                to_screen(d, area, [f64::from(bounds.x0), f64::from(bounds.y0)]),
-                to_screen(d, area, [f64::from(bounds.x1), f64::from(bounds.y1)]),
-            );
-            clip.image(tex.id(), detail, uv, Color32::WHITE);
-        } else {
-            // The proxy covers whole proxy pixels, a little past the canvas edge.
-            let pr = ERect::from_min_max(
-                img.min,
-                img.min + vec2(d.proxy.w as f32 * d.proxy.scale as f32 * d.zoom, d.proxy.h as f32 * d.proxy.scale as f32 * d.zoom),
-            );
-            if let Some(tex) = &d.tex {
-                clip.image(tex.id(), pr, uv, Color32::WHITE);
-            }
-        }
-        if d.gpu.is_none()
-            && d.opts.show_mask
-            && let Some(m) = &d.mask_tex
-        {
-            let f = &d.field;
-            let mr = ERect::from_min_size(
-                img.min - vec2(0.5, 0.5) * d.zoom * f.cell as f32 + vec2(0.5, 0.5) * d.zoom,
-                vec2(f.w as f32, f.h as f32) * f.cell as f32 * d.zoom,
-            );
-            clip.image(m.id(), mr, uv, Color32::WHITE);
-        }
-        if d.gpu.is_none() && d.opts.show_mesh {
-            draw_mesh(d, &clip, area);
-        }
-        // The lasso polygon being drawn (danger colour freezes, accent thaws; the mask overlay paints the
-        // applied area red like the Freeze brush).
-        if let Some((subtract, pts)) = &d.lasso
-            && pts.len() > 1
-        {
-            let color = if *subtract { t.accent } else { t.danger };
-            let line: Vec<Pos2> = pts.iter().map(|p| to_screen(d, area, *p)).collect();
-            clip.add(egui::Shape::line(line, Stroke::new(1.0, color)));
-        }
-        // Brush outline (the lasso has none).
-        if let Some(hp) = resp.hover_pos() {
-            if d.opts.tool != LiquifyTool::LassoMask {
-                let r = d.opts.size * 0.5 * d.zoom;
-                clip.circle_stroke(hp, r, Stroke::new(1.5, Color32::BLACK));
-                clip.circle_stroke(hp, r, Stroke::new(0.75, Color32::WHITE));
-            }
-            d.hover = Some(to_doc(d, area, hp));
-        }
-        clip.rect_stroke(img, 0.0, Stroke::new(1.0, t.separator), egui::StrokeKind::Outside);
-        // Mouse → strokes (Space or middle button pans). Alt+right-drag resizes the brush (#4702).
-        let (pan, secondary, mods_now) =
-            ui.input(|i| (i.key_down(egui::Key::Space) || i.pointer.middle_down(), i.pointer.button_down(egui::PointerButton::Secondary), i.modifiers));
-        let resize = d.brush_resize.is_some() || (resp.drag_started() && brush_resize_gesture(mods_now, secondary));
-        if resize {
-            if d.brush_resize.is_none()
-                && let Some(p) = resp.interact_pointer_pos()
-            {
-                d.brush_resize = Some((p, d.opts.size, d.opts.density));
-            }
-            if let (Some((anchor, size0, dens0)), Some(p)) = (d.brush_resize, resp.interact_pointer_pos()) {
-                let delta = p - anchor;
-                let (size, density) = resized_brush(size0, dens0, delta.x, delta.y);
-                d.opts.size = size;
-                d.opts.density = density;
-            }
-            if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
-                d.brush_resize = None;
-            }
-        } else if pan && resp.dragged() {
-            let dl = resp.drag_delta();
-            d.center = [d.center[0] - f64::from(dl.x / d.zoom), d.center[1] - f64::from(dl.y / d.zoom)];
-        } else if !pan {
-            // Replay the original sequence: a whole drag can arrive in one frame,
-            // where Response's aggregate drag flags no longer retain the press.
-            let mut owned = d.cur.is_some() || d.lasso.is_some();
-            let mut last = d.cur.as_ref().map(|(_, p)| [p[0], p[1]]).or_else(|| d.lasso.as_ref().and_then(|(_, p)| p.last().copied()));
-            let mut sampled = false;
-            for event in ui.input(|i| i.events.clone()) {
-                match event {
-                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers }
-                        if !owned && area.contains(pos) && ctx.layer_id_at(pos) == Some(resp.layer_id) && !egui::Popup::is_any_open(ctx) =>
-                    {
-                        let q = to_doc(d, area, pos);
-                        events.push((ToolEvent::Down { x: q[0], y: q[1], pressure: 1.0 }, modifiers));
-                        owned = true;
-                        last = Some(q);
-                        sampled = true;
-                    }
-                    egui::Event::PointerMoved(pos) if owned => {
-                        let q = to_doc(d, area, pos);
-                        if last != Some(q) {
-                            events.push((ToolEvent::Move { x: q[0], y: q[1], pressure: 1.0 }, mods_now));
-                            last = Some(q);
-                            sampled = true;
-                        }
-                    }
-                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers } if owned => {
-                        let q = to_doc(d, area, pos);
-                        events.push((ToolEvent::Up { x: q[0], y: q[1] }, modifiers));
-                        owned = false;
-                        sampled = true;
-                    }
-                    _ => {}
-                }
-            }
-            if owned {
-                if !ui.input(|i| i.pointer.primary_down()) {
-                    if let Some(q) = last {
-                        events.push((ToolEvent::Up { x: q[0], y: q[1] }, mods_now));
-                    }
-                } else {
-                    // Stationary tools continue at 30 dabs/s without duplicating
-                    // any movement already replayed from this input frame.
-                    if !sampled
-                        && d.opts.tool.is_stationary()
-                        && crate::gpu_canvas::now_ms() - d.last_dab > 33.0
-                        && let Some(q) = last
-                    {
-                        events.push((ToolEvent::Move { x: q[0], y: q[1], pressure: 1.0 }, mods_now));
-                    }
-                    ctx.request_repaint();
-                }
-            }
-        }
-    });
-    let changed = !events.is_empty();
-    for (ev, mods) in events {
-        pointer(app, ev, mods);
-    }
-    // Pointer events are collected after this frame's GPU sampling. Always present their
-    // result next frame, including a stationary dab and the final movement on release.
-    if changed {
-        ctx.request_repaint();
-    }
-    match action {
-        Some("ok") => commit(app),
-        Some("cancel") => cancel(app),
-        _ => {}
-    }
-}
-
-fn to_screen(d: &LiquifyDialog, area: ERect, p: [f64; 2]) -> Pos2 {
-    area.center() + vec2(((p[0] - d.center[0]) as f32) * d.zoom, ((p[1] - d.center[1]) as f32) * d.zoom)
-}
-
-fn to_doc(d: &LiquifyDialog, area: ERect, p: Pos2) -> [f64; 2] {
-    let v = (p - area.center()) / d.zoom;
-    [d.center[0] + f64::from(v.x), d.center[1] + f64::from(v.y)]
-}
-
-/// The deformed mesh: where the source grid lines land. Each output sample knows its source
-/// position `p + d(p)`, so a source line `x = c` is the iso-line of that function, traced with
-/// marching squares on a sample grid four times finer than the mesh (exact for any field, unlike
-/// inverting the field point by point, which fails where it folds).
-fn draw_mesh(d: &LiquifyDialog, painter: &egui::Painter, area: ERect) {
-    let c = d.canvas;
-    let cells = [64.0, 40.0, 24.0][d.opts.mesh_size.min(2)];
-    let step = f64::from(c.width().max(c.height())) / cells;
-    let h = step / 4.0;
-    let nx = (f64::from(c.width()) / h).ceil() as usize + 1;
-    let ny = (f64::from(c.height()) / h).ceil() as usize + 1;
-    let (x0, y0) = (f64::from(c.x0), f64::from(c.y0));
-    let mut src = Vec::with_capacity(nx * ny);
-    for j in 0..ny {
-        for i in 0..nx {
-            let p = [x0 + i as f64 * h, y0 + j as f64 * h];
-            let v = d.field.sample(p[0], p[1]);
-            src.push([p[0] + v[0], p[1] + v[1]]);
-        }
-    }
-    let stroke = Stroke::new(0.75, Color32::from_rgba_unmultiplied(90, 90, 90, 210));
-    let pos = |i: usize, j: usize| [x0 + i as f64 * h, y0 + j as f64 * h];
-    for axis in [0usize, 1] {
-        let origin = if axis == 0 { x0 } else { y0 };
-        for jj in 0..ny - 1 {
-            for ii in 0..nx - 1 {
-                let corners = [(ii, jj), (ii + 1, jj), (ii + 1, jj + 1), (ii, jj + 1)];
-                let vals = corners.map(|(i, j)| src[j * nx + i][axis]);
-                let (lo, hi) = (vals.iter().copied().fold(f64::MAX, f64::min), vals.iter().copied().fold(f64::MIN, f64::max));
-                let mut k = ((lo - origin) / step).ceil() as i64;
-                while origin + k as f64 * step <= hi {
-                    let level = origin + k as f64 * step;
-                    let mut pts: Vec<[f64; 2]> = Vec::with_capacity(4);
-                    for e in 0..4 {
-                        let (a, b) = (vals[e] - level, vals[(e + 1) % 4] - level);
-                        if (a <= 0.0) != (b <= 0.0) {
-                            let t = a / (a - b);
-                            let (pa, pb) = (pos(corners[e].0, corners[e].1), pos(corners[(e + 1) % 4].0, corners[(e + 1) % 4].1));
-                            pts.push([pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t]);
-                        }
-                    }
-                    for seg in pts.as_chunks::<2>().0 {
-                        painter.line_segment([to_screen(d, area, seg[0]), to_screen(d, area, seg[1])], stroke);
-                    }
-                    k += 1;
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn alt_right_drag_resizes_the_liquify_brush_and_does_not_paint() {
-        assert!(brush_resize_gesture(egui::Modifiers::ALT, true));
-        assert!(brush_resize_gesture(egui::Modifiers::CTRL | egui::Modifiers::ALT, false));
-        assert!(!brush_resize_gesture(egui::Modifiers::ALT, false), "Alt+left stays the tool's opposite");
-        assert!(!brush_resize_gesture(egui::Modifiers::NONE, true));
-        let (size, density) = resized_brush(40.0, 50.0, 25.0, crate::brush_resize::HARDNESS_TRAVEL);
-        assert_eq!((size, density), (65.0, 100.0));
-        let (size, density) = resized_brush(40.0, 50.0, -100.0, 0.0);
-        assert_eq!((size, density), (1.0, 50.0));
-    }
 
     fn app_with_layer() -> PhotocraftApp {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());

@@ -12,6 +12,7 @@ struct DockSurface {
     generation: u64,
     floating: Option<egui::Rect>,
     dragging: bool,
+    resize_start: Option<(f32, f32)>,
 }
 
 /// Floating shell placement shares the same lifetime as the saved workspace.
@@ -38,7 +39,7 @@ pub(crate) fn restore_surfaces(app: &PhotocraftApp, ctx: &egui::Context) {
         }
         for (name, rect) in [("photocraft-panel-rail", app.ui.floating_panels.rail), ("photocraft-whole-dock", app.ui.floating_panels.dock)] {
             let floating = rect.map(|[min, max]| egui::Rect::from_min_max(min.into(), max.into())).filter(|rect| rect.is_finite() && rect.is_positive());
-            data.insert_temp(egui::Id::new(name), DockSurface { generation, floating, dragging: false });
+            data.insert_temp(egui::Id::new(name), DockSurface { generation, floating, dragging: false, resize_start: None });
         }
         data.insert_temp(marker, generation);
     });
@@ -62,7 +63,12 @@ pub(crate) fn capture_surfaces(app: &mut PhotocraftApp, ctx: &egui::Context) {
 
 pub(crate) fn floating_frame(ctx: &egui::Context, frame: egui::Frame) -> egui::Frame {
     let tokens = crate::theme::Tokens::get(ctx);
-    frame.corner_radius(egui::CornerRadius::same(tokens.radius_lg as u8)).shadow(egui::Shadow { offset: [0, 10], blur: 30, spread: 0, color: tokens.shadow })
+    frame.corner_radius(egui::CornerRadius::same(tokens.radius_lg as u8)).shadow(egui::Shadow {
+        offset: [0, 3],
+        blur: 9,
+        spread: 0,
+        color: tokens.shadow.linear_multiply(0.30),
+    })
 }
 
 /// Keep the complete right column together when its top grip is detached.
@@ -110,10 +116,6 @@ pub(crate) fn dock_surface<R>(
                 state.floating = Some(bounds.translate(grip.drag_delta()));
                 state.dragging = true;
             }
-            if grip.double_clicked() {
-                state.floating = None;
-                state.dragging = false;
-            }
         }
         body(ui)
     };
@@ -123,7 +125,7 @@ pub(crate) fn dock_surface<R>(
         let frame = floating_frame(ui.ctx(), frame);
         egui::Area::new(id.with("floating"))
             .constrain(false)
-            .order(egui::Order::Middle)
+            .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
             .movable(false)
             .show(ui.ctx(), |ui| {
@@ -148,11 +150,18 @@ pub(crate) fn dock_surface<R>(
                         );
                         if !locked {
                             let grip = grip.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                            if grip.drag_started() {
+                                if let Some(pointer) = grip.interact_pointer_pos() {
+                                    state.resize_start = Some((height, pointer.y));
+                                }
+                            }
                             if grip.dragged() {
-                                resized_height = Some(
-                                    (height + grip.drag_delta().y)
-                                        .clamp(240.0_f32.min(height), (ui.ctx().content_rect().bottom() - rect.top()).max(240.0_f32.min(height))),
-                                );
+                                if let (Some((start_height, start_y)), Some(pointer)) = (state.resize_start, grip.interact_pointer_pos()) {
+                                    resized_height = Some(
+                                        (start_height + pointer.y - start_y)
+                                            .clamp(240.0_f32.min(start_height), (ui.ctx().content_rect().bottom() - rect.top()).max(240.0_f32.min(start_height))),
+                                    );
+                                }
                             }
                         }
                         ui.allocate_rect(bounds, egui::Sense::hover());
@@ -168,6 +177,9 @@ pub(crate) fn dock_surface<R>(
         && let Some(rect) = &mut state.floating
     {
         rect.max.y = rect.top() + height;
+    }
+    if !ui.input(|input| input.pointer.primary_down()) {
+        state.resize_start = None;
     }
     if let Some(rect) = state.floating
         && !state.dragging
@@ -609,8 +621,6 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
                 if collapsed.contains(id) {
                     craft_ui::docking::PanelLimits { min: egui::vec2(220.0, 0.0), max: egui::vec2(1_000_000.0, 0.0) }
                 } else {
-                    // Layers owns its row scroll and footer; leave room for its fixed controls
-                    // plus a scrolling row area instead of clipping the footer after a split.
                     let height = if id == "layers" { 220.0 } else { 80.0 };
                     craft_ui::docking::PanelLimits { min: egui::vec2(220.0, height), ..Default::default() }
                 }
@@ -1085,38 +1095,17 @@ impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
                 accepts_tabs: !self.app.session.prefs().workspace_locked,
             });
         }
-        let collapsed = panels.iter().all(|id| self.collapsed.contains(id));
+        let collapsed = panels.iter().all(|panel| self.collapsed.contains(panel));
+        let icon = if collapsed { "chevron-right" } else { "chevron-down" };
+        let tooltip = if collapsed { "Expand Panel Group" } else { "Collapse Panel Group" };
         let locked = self.app.session.prefs().workspace_locked;
-        let resp = crate::icons::button(ui, "ellipsis", ui.available_height().min(28.0), false, tl!("Panel menu"));
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.set_min_width(180.0);
-            panel_menu(self.app, ui, active);
-            if ui.add_enabled(!locked, egui::Button::new(if collapsed { tl!("Expand Panel Group") } else { tl!("Collapse Panel Group") })).clicked() {
-                self.commands.push(("window.panel.group", json!({"panel":active,"operation":if collapsed {"expand"} else {"collapse"}})));
-                ui.close();
-            }
-            if ui.add_enabled(!locked, egui::Button::new(if floating { tl!("Dock Panel") } else { tl!("Float Panel") })).clicked() {
-                self.commands.push((if floating { "window.panel.dock" } else { "window.panel.float" }, json!({"panel":active})));
-                ui.close();
-            }
-            if !floating {
-                let groups = self.app.ui.docking.as_ref().map(root_groups).unwrap_or_default();
-                let index = groups.iter().position(|g| g.contains(active));
-                for (operation, label, enabled) in
-                    [("up", tl!("Move Group Up"), index.is_some_and(|i| i > 0)), ("down", tl!("Move Group Down"), index.is_some_and(|i| i + 1 < groups.len()))]
-                {
-                    if ui.add_enabled(!locked && enabled, egui::Button::new(label)).clicked() {
-                        self.commands.push(("window.panel.group", json!({"panel":active,"operation":operation})));
-                        ui.close();
-                    }
-                }
-            }
-            ui.separator();
-            if ui.add_enabled(!locked, egui::Button::new(tl!("Close Tab Group"))).clicked() {
-                self.commands.push(("window.panel.group", json!({"panel":active,"operation":"close"})));
-                ui.close();
-            }
-        });
+        let response = ui.add_enabled_ui(!locked, |ui| crate::icons::button(ui, icon, ui.available_height().min(28.0), false, tooltip)).inner;
+        if response.clicked() {
+            self.commands.push((
+                "window.panel.group",
+                json!({"panel": active, "operation": if collapsed { "expand" } else { "collapse" }}),
+            ));
+        }
     }
 }
 

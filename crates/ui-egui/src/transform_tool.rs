@@ -212,11 +212,12 @@ fn encode_transform(work: &mut GpuWork, request: &RenderRequest) -> RenderResult
         )
         .map_err(|error| error.to_string())?;
     let submission = work.state.queue.submit([encoder.finish()]);
+    // Preview work is only sampled by later submissions on the same queue.  Waiting here made
+    // every pointer update pay the full GPU latency before the worker could hand the latest
+    // geometry back to the UI.  Queue ordering keeps the texture writes and the compositor
+    // reads ordered, so the preview worker can return as soon as the commands are submitted.
     #[cfg(not(target_arch = "wasm32"))]
-    work.state
-        .device
-        .poll(eframe::wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
-        .map_err(|error| format!("The transform GPU work did not complete: {error}"))?;
+    let _ = submission;
     #[cfg(target_arch = "wasm32")]
     let _ = submission;
     Ok((Arc::new(shown), sources))
@@ -243,14 +244,7 @@ fn initialize_gpu(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), St
     #[cfg(target_arch = "wasm32")]
     let _ = ctx;
     let Some(gpu) = app.gpu.as_ref() else {
-        #[cfg(test)]
-        {
-            return Ok(());
-        }
-        #[cfg(not(test))]
-        {
-            return Err("Cached Move and Transform require the GPU renderer".into());
-        }
+        return Ok(());
     };
     let state = gpu.render_state().clone();
     let (Some(t), Some(pv), Some(st)) = (&app.ui.transform, &app.transform_preview, app.session.active()) else { return Ok(()) };
@@ -762,7 +756,7 @@ fn begin_impl(app: &mut PhotocraftApp, ctx: &egui::Context, copy_override: Optio
         return Err("Adjustment layers have nothing to transform".into());
     }
     // With a selection the box is the selection's (#5297).
-    let scoped_selection = app.ui.tool_options.move_target == "layer" && targets.len() == 1;
+    let scoped_selection = app.ui.tool_options.move_target != "all" && targets.len() == 1 && !layer.is_group();
     let b = targets
         .iter()
         .filter_map(|id| doc.layer(*id))
@@ -4178,7 +4172,8 @@ mod tests {
         PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
         h.run_steps(6);
         assert!(
-            h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|node| node.accesskit_node().value().as_deref() == Some("Group")).unwrap().rect().left() < 120.0,
+            h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|node| node.accesskit_node().value().as_deref() == Some("Group")).unwrap().rect().left()
+                < 120.0,
             "scope remains first in the actual transform bar"
         );
         let commit = h.get_by_label("Commit transform").rect();
@@ -4191,7 +4186,8 @@ mod tests {
         h.run_steps(2);
         assert!(h.state().ui.transform.as_ref().unwrap().warp.is_some());
         assert!(
-            h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|node| node.accesskit_node().value().as_deref() == Some("Group")).unwrap().rect().left() < 120.0,
+            h.query_all_by_role(egui::accesskit::Role::ComboBox).find(|node| node.accesskit_node().value().as_deref() == Some("Group")).unwrap().rect().left()
+                < 120.0,
             "warp retains its scope selector"
         );
         h.get_by_label("Switch between free transform and warp modes").click();
@@ -6476,6 +6472,63 @@ mod tests {
         assert_eq!(app.transform_preview.as_ref().unwrap().targets, targets);
         assert_eq!(app.transform_preview.as_ref().unwrap().steps.undo, history);
         assert!(Arc::ptr_eq(&source, &app.session.active().unwrap().doc));
+    }
+
+    #[test]
+    fn automation_save_requires_pending_transform_to_be_applied() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_square(64, photocraft_geom::Rect::new(8, 8, 24, 24));
+        begin(&mut app, &ctx).unwrap();
+        nudge(&mut app, 4.0, 3.0);
+        let before = app.session.active().unwrap().doc.clone();
+        let error = app.save_automation(Some("pending.png".into())).unwrap_err();
+        assert!(error.contains("pending transform"), "{error}");
+        assert!(Arc::ptr_eq(&before, &app.session.active().unwrap().doc));
+        cancel(&mut app);
+        let error = app.save_automation(Some("cancelled.png".into())).unwrap_err();
+        assert!(error.contains("no exporter configured"), "{error}");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_cached_nine_grid_drag_preserves_source_and_commits_one_undo_step() {
+        let _gpu = photocraft_testkit::gpu_lock();
+        let rs = egui_kittest::wgpu::create_render_state(crate::gpu_canvas::wgpu_setup(), Default::default());
+        let ctx = egui::Context::default();
+        let mut app = app_with_square(192, photocraft_geom::Rect::new(24, 24, 168, 168));
+        app.session
+            .edit("marker", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photocraft_geom::Rect::new(66, 66, 78, 78), &[0., 0., 1., 1.]);
+                Ok(())
+            })
+            .unwrap();
+        app.gpu = Some(crate::gpu_canvas::GpuCanvas::new(&rs));
+        app.ui.tool_options.move_target = "layer".into();
+        begin(&mut app, &ctx).unwrap();
+        enter_warp(&mut app, &ctx);
+        let t = app.ui.transform.as_mut().unwrap();
+        t.warp = Some(Warp::custom(BezierMesh::identity(t.rect, 3, 3), t.rect));
+        let source = app.session.active().unwrap().doc.clone();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        let past = app.session.active().unwrap().history.past_len();
+        for event in [ToolEvent::Down { x: 72., y: 72., pressure: 1. }, ToolEvent::Move { x: 85., y: 82., pressure: 1. }, ToolEvent::Up { x: 85., y: 82. }] {
+            assert!(pointer(&mut app, event, egui::Modifiers::NONE));
+        }
+        let warp = app.ui.transform.as_ref().unwrap().warp.as_ref().unwrap();
+        assert!(!warp.is_identity());
+        assert_eq!(warp.mesh.as_ref().unwrap().us.len(), 4);
+        assert!(Arc::ptr_eq(&source, &app.session.active().unwrap().doc));
+        assert_eq!(app.session.active().unwrap().history.past_len(), past);
+        commit(&mut app);
+        assert!(app.ui.transform.is_none(), "{}", app.ui.status);
+        let st = app.session.active().unwrap();
+        let committed = st.doc.layer(layer).unwrap().surface().unwrap().clone();
+        assert_ne!(Some(&committed), source.layer(layer).unwrap().surface());
+        assert_eq!(st.history.past_len(), past + 1);
+        assert!(app.session.undo());
+        assert_eq!(app.session.active().unwrap().doc.layer(layer).unwrap().surface(), source.layer(layer).unwrap().surface());
+        assert!(app.session.redo());
+        assert_eq!(app.session.active().unwrap().doc.layer(layer).unwrap().surface(), Some(&committed));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
