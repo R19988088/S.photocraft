@@ -2594,7 +2594,20 @@ fn pro_tabs(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> TabStrip {
     let large_tabs = app.session.prefs().workspace.large_tabs;
     let font = egui::FontId::proportional(if large_tabs { 13.0 } else { 11.5 });
     let tab_h = if large_tabs { 34.0 } else { 26.0 };
-    let (strip, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), tab_h), Sense::hover());
+    // Keep a compact Photoshop-style entry point at the right edge for opening another image.
+    // Reserve its hit area before fitting tabs so it can never overlap the last tab.
+    const OPEN_TAB_WIDTH: f32 = 34.0;
+    let (strip, _) = ui.allocate_exact_size(egui::vec2((ui.available_width() - OPEN_TAB_WIDTH).max(1.0), tab_h), Sense::hover());
+    let open_rect = egui::Rect::from_min_size(egui::pos2(strip.right(), strip.top()), egui::vec2(OPEN_TAB_WIDTH, tab_h));
+    let open_resp = ui.interact(open_rect, ui.id().with("open-document"), Sense::click());
+    open_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Open…")));
+    if open_resp.hovered() {
+        ui.painter().rect_filled(open_rect, 0.0, t.hover.gamma_multiply(0.45));
+    }
+    crate::icons::paint(ui, egui::Rect::from_center_size(open_rect.center(), egui::vec2(18.0, 18.0)), "+", 18.0, if open_resp.hovered() { t.text } else { t.text_faint });
+    if open_resp.clicked() {
+        let _ = app.open_dialog_file();
+    }
     // Files opening in the background (#210) are tabs too ("name (Opening… 45%)" with a progress
     // underline); they share the fit's index space, after the documents.
     let opening = crate::jobs_ui::open_tabs(app);
@@ -7441,6 +7454,44 @@ mod tests {
             let names: Vec<String> = h.state().0.session.documents().iter().map(|d| d.doc.name.clone()).collect();
             assert_eq!(names, ["b", "a", "c"], "{kind:?}: the dragged tab took the dropped slot");
         }
+    }
+
+    #[test]
+    fn pro_tabs_open_button_requests_the_file_dialog_without_covering_tabs() {
+        use egui_kittest::kittest::Queryable;
+        use std::{cell::RefCell, rc::Rc};
+
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let received = requests.clone();
+        let services = crate::Services {
+            file_dialog: Some(Box::new(move |request, _, _| received.borrow_mut().push(request))),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        for name in ["a", "b", "c"] {
+            app.run("file.new", json!({"width": 8, "height": 8, "name": name})).unwrap();
+        }
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(700.0, 40.0)).build_ui_state(
+            |ui, (app, ready): &mut (PhotocraftApp, bool)| {
+                if *ready {
+                    tabs(app, ui);
+                }
+            },
+            (app, false),
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Pro);
+        h.state_mut().1 = true;
+        h.run_steps(2);
+
+        let open = h.get_by_label("Open…");
+        let open_rect = open.rect();
+        let last_tab = h.get_by_label_contains("c @").rect();
+        assert!(open_rect.left() >= last_tab.right(), "the open button must not cover the last document tab");
+        open.click();
+        h.run_steps(2);
+        let ctx = h.ctx.clone();
+        h.state_mut().0.poll_file_dialog(&ctx, None);
+        assert!(matches!(requests.borrow().as_slice(), [crate::FileDialogRequest::Open { multiple: true, .. }]));
     }
 
     /// Dragging a tab off the strip floats its document in its own OS window instead of
