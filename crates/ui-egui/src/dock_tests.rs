@@ -401,6 +401,36 @@ fn auto_collapse_icon_panels_closes_a_peeked_panel_on_an_outside_click() {
 }
 
 #[test]
+fn collapse_button_toggles_groups_in_the_default_dock() {
+    use egui_kittest::kittest::Queryable;
+
+    for theme in [ThemeKind::Studio, ThemeKind::ProMedium] {
+        let (app, _, _) = app_with_layers();
+        let mut h = harness(app, vec2(1200.0, 800.0), theme);
+        assert!(h.state().ui.docking.is_none(), "{theme:?}: use the default dock renderer");
+
+        let toggle_y = last_strips(&h.ctx).into_iter().find(|strip| strip.group == Group::Layers).unwrap().collapse.center().y;
+        let layer_y = last_rects(&h.ctx).into_iter().find(|(group, _)| *group == Group::Layers).unwrap().1.top();
+        let button_rects: Vec<_> = h.query_all_by_label("Collapse Panel Group").map(|node| node.rect()).collect();
+        h.query_all_by_label("Collapse Panel Group")
+            .find(|node| (node.rect().center().y - toggle_y).abs() < 2.0)
+            .unwrap_or_else(|| panic!("{theme:?}: Layers at {layer_y}, collapse buttons at {button_rects:?}"))
+            .click();
+        h.run_steps(2);
+        assert!(h.state().ui.dock.is_collapsed(Group::Layers), "{theme:?}: button collapses the group");
+
+        let toggle_y = last_strips(&h.ctx).into_iter().find(|strip| strip.group == Group::Layers).unwrap().collapse.center().y;
+        h.query_all_by_label("Expand Panel Group")
+            .into_iter()
+            .find(|node| (node.rect().center().y - toggle_y).abs() < 2.0)
+            .expect("Layers group toggle")
+            .click();
+        h.run_steps(2);
+        assert!(!h.state().ui.dock.is_collapsed(Group::Layers), "{theme:?}: button expands the group");
+    }
+}
+
+#[test]
 fn double_clicking_a_tab_collapses_and_dragging_a_strip_reorders() {
     let (app, _, _) = app_with_layers();
     let mut h = harness(app, vec2(1200.0, 800.0), ThemeKind::ProMedium);
@@ -426,7 +456,7 @@ fn double_clicking_a_tab_collapses_and_dragging_a_strip_reorders() {
         .map(|(_, rect)| rect.right())
         .chain(strip.chevron.map(|rect| rect.right()))
         .fold(strip.area.left(), f32::max);
-    let blank = Rect::from_min_max(Pos2::new(blank_left, strip.menu.top()), Pos2::new(strip.menu.left(), strip.menu.bottom()));
+    let blank = Rect::from_min_max(Pos2::new(blank_left, strip.collapse.top()), Pos2::new(strip.collapse.left(), strip.collapse.bottom()));
     assert!(blank.is_positive(), "Layers has blank tab-strip space for the double-click");
     double_click(&mut h, blank.center());
     assert!(h.state().ui.dock.is_collapsed(Group::Layers));
@@ -437,7 +467,7 @@ fn double_clicking_a_tab_collapses_and_dragging_a_strip_reorders() {
         .map(|(_, rect)| rect.right())
         .chain(strip.chevron.map(|rect| rect.right()))
         .fold(strip.area.left(), f32::max);
-    let blank = Rect::from_min_max(Pos2::new(blank_left, strip.menu.top()), Pos2::new(strip.menu.left(), strip.menu.bottom()));
+    let blank = Rect::from_min_max(Pos2::new(blank_left, strip.collapse.top()), Pos2::new(strip.collapse.left(), strip.collapse.bottom()));
     assert!(blank.is_positive(), "collapsed Layers keeps a blank tab-strip area");
     double_click(&mut h, blank.center());
     assert!(!h.state().ui.dock.is_collapsed(Group::Layers));
@@ -865,7 +895,7 @@ fn tab_strips_never_overlap_the_menu_button() {
                                 let r = crate::widgets::card_ex(ui, "t", tabs, &mut s, false, false, |ui, _| {
                                     ui.label("body");
                                 });
-                                *out = Some((r.tabs, r.menu.rect, r.chevron, ui.max_rect()));
+                                *out = Some((r.tabs, r.collapse.rect, r.chevron, ui.max_rect()));
                             },
                             None,
                         );
@@ -875,7 +905,7 @@ fn tab_strips_never_overlap_the_menu_button() {
                         let what = format!("{theme:?} {scale}x {width}pt {g:?} selected {sel}");
                         assert!(shown.iter().any(|(i, _)| *i == sel), "{what}: the selected tab is on the strip: {shown:?}");
                         for (i, r) in &shown {
-                            assert!(!overlap(*r, menu), "{what}: tab {i} {r:?} runs under the menu {menu:?}");
+                            assert!(!overlap(*r, menu), "{what}: tab {i} {r:?} runs under the collapse button {menu:?}");
                             assert!(r.left() >= card.left() - 0.5 && r.right() <= card.right() + 0.5, "{what}: tab {i} outside the card");
                         }
                         for w in shown.windows(2) {
@@ -919,7 +949,7 @@ fn dock_strips_fit_and_the_chevron_menu_switches_tabs() {
         assert!(strips.len() >= 5, "{theme:?}: {strips:?}");
         for s in &strips {
             for (i, r) in &s.tabs {
-                assert!(r.intersect(s.menu).width() <= 0.5, "{theme:?} {:?}: tab {i} under the menu", s.group);
+                assert!(r.intersect(s.collapse).width() <= 0.5, "{theme:?} {:?}: tab {i} under the collapse button", s.group);
             }
         }
     }

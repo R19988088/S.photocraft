@@ -53,6 +53,10 @@ choice!(
 );
 choice!(TypeUnit { Points = "points", Pixels = "pixels", Millimeters = "mm" } default Points);
 choice!(PointSize { PostScript = "postScript", Traditional = "traditional" } default PostScript);
+choice!(
+    /// Windows pen input source. Ink is the system WM_POINTER path; WinTab is the legacy tablet API.
+    TabletBackend { Ink = "ink", WinTab = "winTab" } default Ink
+);
 choice!(Interpolation { BicubicAutomatic = "bicubicAutomatic", Nearest = "nearestNeighbor", Bilinear = "bilinear", Bicubic = "bicubic", BicubicSmoother = "bicubicSmoother", BicubicSharper = "bicubicSharper", PreserveDetails = "preserveDetails" } default BicubicAutomatic);
 choice!(ColorPicker { Adobe = "adobe", System = "system" } default Adobe);
 choice!(Theme { Pro = "pro", ProMedium = "proMedium", ProLightGray = "proLightGray", ProLight = "proLight", Studio = "studio", StudioLight = "studioLight", Classic = "classic", SolarizedDark = "solarizedDark", Adwaita = "adwaita", AdwaitaDark = "adwaitaDark", BreezeLight = "breezeLight", BreezeDark = "breezeDark", SoftDark = "softDark", SoftLight = "softLight" } default ProMedium);
@@ -377,6 +381,8 @@ pub struct Tools {
     pub double_click_layer_mask_launches_select_and_mask: bool,
     /// What the right mouse button does on the canvas with the Brush and other painting tools.
     pub right_click_with_painting_tools: RightClickPaint,
+    /// Windows-only pen input source. Other platforms always use their native tablet path.
+    pub tablet_backend: TabletBackend,
     /// Pen tablets: pressure, tilt and rotation reach the brush (off: a pen paints like a mouse).
     pub use_tablet_pressure: bool,
     /// Pen pressure response: `[input, output]` control points in 0..1 that the pen's pressure
@@ -407,6 +413,7 @@ impl Default for Tools {
             overscroll: true,
             double_click_layer_mask_launches_select_and_mask: true,
             right_click_with_painting_tools: RightClickPaint::BrushPicker,
+            tablet_backend: TabletBackend::default(),
             use_tablet_pressure: true,
             pressure_curve: vec![[0.0, 0.0], [1.0, 1.0]],
             tablet_pressure: Default::default(),
@@ -1104,6 +1111,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "cursors.painting" => PaintingCursor::NAMES,
         "cursors.other" => OtherCursor::NAMES,
         "tools.rightClickWithPaintingTools" => RightClickPaint::NAMES,
+        "tools.tabletBackend" => TabletBackend::NAMES,
         "transparencyAndGamut.gridSize" => CheckerSize::NAMES,
         "transparencyAndGamut.gridColors" => CheckerColors::NAMES,
         "unitsAndRulers.rulers" | "guidesGridAndSlices.gridUnit" => Unit::NAMES,

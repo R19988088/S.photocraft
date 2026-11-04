@@ -10,6 +10,43 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+/// Whether this device can run the resident Liquify preview: compute shaders, multi-layer
+/// textures, and `Rgba32Float` as a storage, render and copy target. Older/weak GPUs (software
+/// rasterizers, GLES3 without compute, drivers without 32-bit float render targets) cannot, and
+/// the CPU preview takes over instead of failing to open the tool.
+#[inline(never)]
+pub(crate) fn supported(rs: &RenderState) -> Result<(), String> {
+    let info = rs.adapter.get_info();
+    if info.device_type == wgpu::DeviceType::Cpu {
+        return Err(format!("{} is a software renderer", info.name));
+    }
+    if !has_compute_shaders(rs) {
+        return Err("the GPU has no compute shaders".into());
+    }
+    if !float_targets(rs) {
+        return Err("the GPU cannot store 32-bit float textures".into());
+    }
+    let limits = rs.device.limits();
+    if limits.max_texture_array_layers < 2 || limits.max_texture_dimension_2d < 256 {
+        return Err("the GPU's texture limits are too small".into());
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn has_compute_shaders(rs: &RenderState) -> bool {
+    rs.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+}
+
+/// `Rgba32Float` as a sampled, storage and render-target texture in one query.
+#[inline(never)]
+fn float_targets(rs: &RenderState) -> bool {
+    let allowed = rs.adapter.get_texture_format_features(wgpu::TextureFormat::Rgba32Float).allowed_usages;
+    [wgpu::TextureUsages::TEXTURE_BINDING, wgpu::TextureUsages::STORAGE_BINDING, wgpu::TextureUsages::RENDER_ATTACHMENT]
+        .into_iter()
+        .all(|usage| allowed.contains(usage))
+}
+
 #[derive(Clone)]
 pub(super) struct Source {
     pub id: LayerId,
@@ -145,6 +182,9 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 impl Preview {
+    /// Builds the resident preview. Out of line: its initializer holds every pipeline and
+    /// texture handle, and inlining it enlarges callers that only reach it on a real GPU.
+    #[inline(never)]
     pub(super) fn new(rs: &RenderState, sources: Vec<Source>, selection: Option<&Surface>, canvas: Rect, field: &LiquifyField) -> Result<Arc<Self>, String> {
         let device = &rs.device;
         let (w, h) = (canvas.width(), canvas.height());

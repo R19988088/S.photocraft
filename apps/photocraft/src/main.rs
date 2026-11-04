@@ -684,6 +684,13 @@ fn main() -> eframe::Result {
     if gpu_startup::read_low_latency(services::prefs_file().as_deref()) {
         options.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
     }
+    // macOS window dragging and all input responsiveness: force immediate mode for low latency.
+    // AppKit's performWindowDragWithEvent is blocking, so we need immediate rendering everywhere.
+    #[cfg(target_os = "macos")]
+    {
+        options.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
+        options.wgpu_options.surface.desired_maximum_frame_latency = Some(1);
+    }
     // Testers' present mode and frame latency overrides (#1343), after the preference.
     let present = presentation::Overrides::from_args_or_env(present_mode_arg.as_deref(), frame_latency_arg.as_deref());
     options.wgpu_options.surface = present.apply(options.wgpu_options.surface);

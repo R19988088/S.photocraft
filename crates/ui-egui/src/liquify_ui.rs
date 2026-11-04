@@ -4,9 +4,12 @@
 //! edit the inverse field; the shader samples the original without resampling document pixels.
 //! Only confirmation commits the recorded strokes, as one document history entry.
 
+#[path = "liquify_cpu.rs"]
+mod cpu;
 #[path = "liquify_gpu.rs"]
 mod gpu;
 
+pub(crate) use gpu::supported as gpu_supported;
 use egui::{Color32, Rect as ERect, TextureHandle};
 #[cfg(test)]
 use egui::{pos2, vec2};
@@ -133,9 +136,12 @@ pub struct LiquifyDialog {
     cached_scope: String,
     scope_dirty: bool,
     gpu: Option<std::sync::Arc<gpu::Preview>>,
+    /// CPU preview (proxy document), used when the GPU cannot run the resident path.
+    cpu: Option<Box<cpu::Preview>>,
+    /// Why the resident GPU preview is not used (`None` = it is).
+    gpu_error: Option<String>,
     gpu_dirty: bool,
     gpu_doc: Option<std::sync::Arc<photocraft_doc::Document>>,
-    gpu_error: Option<String>,
     gpu_damage: Option<Rect>,
     canvas: Rect,
     cell: f64,
@@ -202,6 +208,7 @@ impl LiquifyDialog {
             "scope": self.opts.scope,
             "layers": self.targets.iter().map(|id| id.0).collect::<Vec<_>>(),
             "gpuCached": self.gpu.is_some(),
+            "cpuPreview": self.cpu.is_some(),
             "gpuError": self.gpu_error,
             "tool": self.opts.tool,
             "size": self.opts.size,
@@ -210,6 +217,10 @@ impl LiquifyDialog {
             "meshSize": self.cell,
             "maxDisplacement": self.field.max_displacement(),
             "proxy": [self.proxy.w, self.proxy.h],
+            "cpuProxy": self.cpu.as_ref().map(|p| {
+                let [w, h] = p.size();
+                [w, h]
+            }),
             "dabMs": self.dab_ms,
             "fullResolutionPreview": self.gpu.is_some() || self.view_bounds.is_some(),
             "previewMs": self.preview_ms,
@@ -236,6 +247,12 @@ impl LiquifyDialog {
         self.gpu_damage = union_rect(self.gpu_damage, doc_rect.inflate((self.cell * 2.).ceil() as i32).intersect(&self.canvas));
         self.dirty = union(self.dirty, self.proxy.proxy_rect(doc_rect));
         self.view_dirty = union_rect(self.view_dirty, doc_rect);
+        if let Some(cpu) = &mut self.cpu {
+            cpu.mark(doc_rect.inflate((self.cell * 2.).ceil() as i32).intersect(&self.canvas));
+            if mask {
+                cpu.dirty_mask();
+            }
+        }
         self.mask_dirty |= mask;
     }
 
@@ -318,6 +335,9 @@ impl LiquifyDialog {
         // clean kept the pre-undo pixels on screen until the next zoom (#4100).
         self.view_dirty = self.view_bounds;
         self.mask_dirty = true;
+        if let Some(cpu) = &mut self.cpu {
+            cpu.mark_all();
+        }
         self.render_dirty();
     }
 
@@ -350,9 +370,10 @@ impl LiquifyDialog {
         self.rebuild();
     }
 
-    /// Re-renders the dirty proxy pixels into `out` (the texture upload happens in `show`).
+    /// Re-renders the dirty proxy pixels into `out` (the texture upload happens in `show`). The
+    /// CPU document preview is recomposited by the canvas from its own dirty rectangles.
     fn render_dirty(&mut self) {
-        if self.gpu.is_some() {
+        if self.gpu.is_some() || self.cpu.is_some() {
             return;
         }
         if let Some(r) = self.dirty {
@@ -443,6 +464,10 @@ impl LiquifyDialog {
     }
 
     fn upload(&mut self, ctx: &egui::Context) {
+        if self.gpu.is_none() && self.cpu.is_some() {
+            // The CPU preview document is drawn by the canvas; the dialog needs no proxy texture.
+            return;
+        }
         let (w, h) = (self.proxy.w, self.proxy.h);
         if self.gpu.is_none() {
             match (&mut self.tex, self.dirty.take()) {
@@ -541,12 +566,10 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     true
 }
 
-/// Opens the dialog on the active layer.
+/// Opens the dialog on the active layer. The resident GPU preview is used when the device can run
+/// it; otherwise (an old or software GPU, a lost device, or a failed preview build) the CPU proxy
+/// preview takes over, with every tool and every scope still working.
 pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
-    #[cfg(not(test))]
-    if app.gpu.as_ref().is_none_or(|gpu| !gpu.health().is_ok()) {
-        return Err("Liquify requires an available GPU canvas.".into());
-    }
     let st = app.session.active().ok_or("no document")?;
     let mut opts = LiquifyOpts::default();
     if let Some(saved) = app.session.prefs().dialogs.get(REMEMBERED) {
@@ -558,7 +581,11 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
     let cell = auto_cell(canvas);
-    let proxy = if app.gpu.is_some() {
+    // The GPU decides the mode; if it cannot run the resident preview, the proxy is built on the
+    // CPU and the dialog opens all the same.
+    let gpu_error = liquify_gpu_error(app);
+    let use_gpu = gpu_error.is_none();
+    let proxy = if use_gpu {
         ProxyImage::new(&Surface::new(photocraft_color::PixelFormat::RGBA32F), Rect::new(0, 0, 1, 1), 1)
     } else {
         ProxyImage::new(&surf, canvas, PROXY_SIDE)
@@ -572,9 +599,10 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
         cached_scope: "all".into(),
         scope_dirty: true,
         gpu: None,
+        cpu: None,
         gpu_dirty: true,
         gpu_doc: None,
-        gpu_error: None,
+        gpu_error,
         gpu_damage: None,
         canvas,
         cell,
@@ -618,7 +646,27 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
         return Err(error);
     }
     app.ui.tool = crate::state::Tool::Liquify;
+    // Say once why the preview is on the CPU: the tool still works, but slower on large images.
+    if let Some(reason) = app.distort.liquify.as_ref().and_then(|d| d.cpu.as_ref().and(d.gpu_error.clone())) {
+        app.ui.status = crate::i18n::fmt("Liquify preview is using the CPU: {reason}", &[("reason", &reason)]);
+        log::info!("Liquify preview on the CPU: {reason}");
+    }
     Ok(())
+}
+
+/// Why the resident GPU Liquify preview cannot run here (`None` when it can).
+fn liquify_gpu_error(app: &PhotocraftApp) -> Option<String> {
+    let gpu = app.gpu.as_ref()?;
+    if !gpu.health().is_ok() {
+        return Some("the GPU device is unavailable".into());
+    }
+    gpu_supported(gpu.render_state()).err()
+}
+
+/// Whether the open dialog is previewing on the CPU proxy rather than the resident GPU path.
+#[cfg(test)]
+pub(crate) fn uses_cpu_preview(app: &PhotocraftApp) -> bool {
+    app.distort.liquify.as_ref().is_some_and(|d| d.cpu.is_some())
 }
 
 fn scope_label(scope: &str) -> &'static str {
@@ -643,10 +691,6 @@ fn cached_mask(layer: &photocraft_doc::Layer, canvas: Rect) -> Option<Surface> {
 }
 
 fn refresh_scope(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result<(), String> {
-    #[cfg(not(test))]
-    if app.gpu.as_ref().is_none_or(|gpu| !gpu.health().is_ok()) {
-        return Err("Liquify requires an available GPU canvas.".into());
-    }
     let scope = app.distort.liquify.as_ref().ok_or("Liquify is not open")?.opts.scope.clone();
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
@@ -655,8 +699,14 @@ fn refresh_scope(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result
     // The dialog owns its display texture. The document canvas and Navigator can refresh
     // independently while the cached Liquify edit remains unchanged.
     doc.id = app.distort.liquify.as_ref().and_then(|d| d.gpu_doc.as_ref().map(|doc| doc.id)).unwrap_or_else(photocraft_doc::DocId::fresh);
+    let zoom = ctx.map_or(1.0, |_| crate::canvas::ViewXform::active(app).map_or(1.0, |xf| xf.zoom));
+    // The GPU path needs a healthy device whose capabilities cover the resident preview; when it
+    // does not, the CPU proxy takes over rather than refusing to open the tool.
+    let mut gpu_error = liquify_gpu_error(app);
+    let render_state = app.gpu.as_ref().filter(|_| gpu_error.is_none()).map(|r| r.render_state().clone());
     let d = app.distort.liquify.as_mut().ok_or("Liquify is not open")?;
-    let preview = if let Some(renderer) = &app.gpu {
+    let mut preview = None;
+    if let Some(rs) = render_state {
         let mut sources = Vec::new();
         for id in &targets {
             let layer = doc.layer_mut(*id).ok_or("missing target layer")?;
@@ -683,28 +733,33 @@ fn refresh_scope(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result
             // The compositor reads a resident replacement through its regular raster planner.
             layer.content = photocraft_doc::LayerContent::Raster(surface);
         }
-        Some(photocraft_color::convert::with_cmyk_space(photocraft_compose::cmyk_space(&doc).as_ref(), || {
-            gpu::Preview::new(renderer.render_state(), sources, doc.selection.as_ref(), canvas, &d.field)
-        })?)
+        match photocraft_color::convert::with_cmyk_space(photocraft_compose::cmyk_space(&doc).as_ref(), || {
+            gpu::Preview::new(&rs, sources, doc.selection.as_ref(), canvas, &d.field)
+        }) {
+            Ok(p) => preview = Some(p),
+            Err(error) => gpu_error = Some(error),
+        }
+    }
+    // CPU preview: the proxy document gets the same field; every target and every scope is
+    // previewed and committed through the engine, just like the resident path.
+    let cpu = if preview.is_none() {
+        let faithful = !photocraft_compose::proxy::proxy_faithful(&doc);
+        match cpu::Preview::new(&doc, &targets, canvas, zoom, faithful) {
+            Ok(p) => Some(Box::new(p)),
+            Err(error) => return Err(error),
+        }
     } else {
         None
     };
-    let source = if preview.is_none() {
-        let buffer = photocraft_compose::render(&doc, canvas);
-        let mut source = Surface::new(photocraft_color::PixelFormat::new(photocraft_color::ColorMode::Rgb, photocraft_color::SampleType::F32, true));
-        source.write_region(canvas, &buffer.px.iter().flat_map(|p| *p).collect::<Vec<_>>());
-        source
-    } else {
-        d.source.clone()
-    };
-    d.gpu_doc = preview.as_ref().map(|_| std::sync::Arc::new(doc));
-    d.gpu_error = None;
+    d.gpu_error = gpu_error;
     d.targets = targets;
     d.cached_scope = scope;
     d.scope_dirty = false;
-    d.source = source;
     d.gpu = preview;
+    d.cpu = cpu;
     if d.gpu.is_some() {
+        // The resident path records dabs as GPU work instead of editing the CPU field.
+        d.source = doc.layer(d.layer).and_then(|l| l.surface()).cloned().unwrap_or_else(|| d.source.clone());
         d.field = LiquifyField::new(d.canvas, d.cell);
         d.field.gpu_only = true;
         for stroke in &d.strokes {
@@ -713,11 +768,20 @@ fn refresh_scope(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result
         if let Some((stroke, _)) = &d.cur {
             d.field.apply_stroke(stroke);
         }
+        d.gpu_doc = Some(std::sync::Arc::new(doc));
+    } else {
+        // CPU: the field stays editable (dabs mutate it directly); rebuild it from the strokes.
+        d.field = LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes);
+        if let Some((stroke, _)) = &d.cur {
+            d.field.apply_stroke(stroke);
+        }
+        d.gpu_doc = None;
     }
     d.gpu_dirty = true;
     d.proxy = if d.gpu.is_some() {
         ProxyImage::new(&Surface::new(photocraft_color::PixelFormat::RGBA32F), Rect::new(0, 0, 1, 1), 1)
     } else {
+        // Kept for the dialog's own footer metrics; the canvas draws the CPU preview document.
         ProxyImage::new(&d.source, canvas, PROXY_SIDE)
     };
     d.out = vec![[0; 4]; d.proxy.w * d.proxy.h];
@@ -732,12 +796,43 @@ fn refresh_scope(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result
 }
 
 /// Keeps the brush settings for the next time Liquify opens, also after a restart.
+/// Whether the GPU can still run the resident preview. Out of line so the capability probe's
+/// frame stays off the canvas's call chain.
+#[inline(never)]
+fn gpu_healthy(app: &PhotocraftApp) -> bool {
+    app.gpu.as_ref().is_some_and(|gpu| gpu.health().is_ok() && gpu_supported(gpu.render_state()).is_ok())
+}
+
+/// Switches an open dialog from the resident GPU preview to the CPU proxy, keeping the recorded
+/// strokes (the field is rebuilt from them, since GPU dabs only queued ops).
+fn switch_to_cpu(app: &mut PhotocraftApp, ctx: Option<&egui::Context>) -> Result<(), String> {
+    let d = app.distort.liquify.as_mut().ok_or("Liquify is not open")?;
+    if d.cpu.is_some() {
+        return Ok(());
+    }
+    d.end();
+    // Flush any queued GPU dab into the CPU field by replaying the recorded strokes.
+    d.field = LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes);
+    d.field.gpu_only = false;
+    d.field.gpu_ops.clear();
+    d.gpu = None;
+    d.gpu_doc = None;
+    d.gpu_error = Some("CPU preview: the GPU preview is unavailable".into());
+    d.gpu_dirty = true;
+    d.scope_dirty = true;
+    if let Some(ctx) = ctx {
+        refresh_scope(app, Some(ctx))?;
+    }
+    Ok(())
+}
+
 fn remember(app: &mut PhotocraftApp, opts: &LiquifyOpts) {
     let v = opts.to_json();
     app.session.prefs.edit(|p| p.dialogs.insert(REMEMBERED.into(), v));
 }
 
-/// Present the resident edit in the active canvas without touching its normal display cache.
+/// Present the edit in the active canvas without touching the document: the resident GPU output,
+/// or the CPU proxy document (which the normal canvas path composites and caches).
 pub(crate) fn canvas_preview(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize) -> Option<std::sync::Arc<photocraft_doc::Document>> {
     if app.ui.tool != crate::state::Tool::Liquify || app.session.active_index() != Some(idx) {
         return None;
@@ -746,6 +841,20 @@ pub(crate) fn canvas_preview(app: &mut PhotocraftApp, ctx: &egui::Context, idx: 
         && let Err(error) = refresh_scope(app, Some(ctx))
     {
         crate::notices::error(app, error);
+        return None;
+    }
+    if app.distort.liquify.as_ref().is_some_and(|d| d.cpu.is_some()) {
+        cpu_canvas_preview(app, ctx);
+        return None;
+    }
+    // The device may have been lost or faulted since the dialog opened: switch to the CPU
+    // preview in place, keeping every recorded stroke and the editable field.
+    let healthy = gpu_healthy(app);
+    if !healthy && let Err(error) = switch_to_cpu(app, Some(ctx)) {
+        crate::notices::error(app, error);
+    }
+    if app.distort.liquify.as_ref().is_some_and(|d| d.cpu.is_some()) {
+        cpu_canvas_preview(app, ctx);
         return None;
     }
     let renderer = app.gpu.clone()?;
@@ -777,6 +886,31 @@ pub(crate) fn canvas_preview(app: &mut PhotocraftApp, ctx: &egui::Context, idx: 
     Some(doc)
 }
 
+/// The CPU preview's document, brought up to date with the field. The warped proxy is drawn by
+/// the canvas as an overlay ([`draw_cpu_preview`]).
+fn cpu_canvas_preview(app: &mut PhotocraftApp, ctx: &egui::Context) -> Option<std::sync::Arc<photocraft_doc::Document>> {
+    // Read everything that borrows `app` immutably first; the dialog is borrowed mutably below.
+    let st = app.session.active()?;
+    let doc = st.doc.clone();
+    let faithful = !photocraft_compose::proxy::proxy_faithful(&doc);
+    let zoom = crate::canvas::ViewXform::active(app).map_or(1.0, |xf| xf.zoom);
+    let (display, _) = crate::canvas::canvas_display(app, &doc, None);
+    let d = app.distort.liquify.as_mut()?;
+    if let Some((_, last)) = &d.cur {
+        let last = *last;
+        if d.opts.tool.is_stationary() && crate::gpu_canvas::now_ms() - d.last_dab > 33.0 {
+            d.extend(last, crate::gpu_canvas::now_ms());
+        }
+        ctx.request_repaint();
+    }
+    let started = crate::gpu_canvas::now_ms();
+    let targets = d.targets.clone();
+    let cpu = d.cpu.as_mut()?;
+    cpu.update(&d.field, &doc, &targets, faithful, display.as_deref(), ctx, zoom);
+    d.preview_ms = crate::gpu_canvas::now_ms() - started;
+    None
+}
+
 pub(crate) fn draw_gpu_overlay(app: &PhotocraftApp, painter: &egui::Painter, area: ERect, image: ERect) {
     if let Some(d) = &app.distort.liquify
         && let Some(gpu) = &d.gpu
@@ -799,6 +933,51 @@ fn restore_canvas(app: &PhotocraftApp, dialog: &LiquifyDialog) {
     }
 }
 
+/// Draws the CPU preview when the dialog is on it. A one-line entry point so `canvas_view`'s frame
+/// stays small (its stack is already near the test threads' limit).
+#[inline(never)]
+pub(crate) fn draw_cpu_preview_if_open(app: &mut PhotocraftApp, ctx: &egui::Context, painter: &egui::Painter, xf: &ViewXform) {
+    if app.distort.liquify.as_ref().is_some_and(|d| d.cpu.is_some()) {
+        draw_cpu_preview(app, ctx, painter, xf);
+    }
+}
+
+/// Draws the CPU preview over the canvas image (the warped proxy scaled into the document's place
+/// on screen) and the freeze mask. Kept out of line: `canvas_view`'s own frame is already large.
+#[inline(never)]
+pub(crate) fn draw_cpu_preview(app: &mut PhotocraftApp, ctx: &egui::Context, painter: &egui::Painter, xf: &ViewXform) {
+    let Some(d) = app.distort.liquify.as_mut().filter(|d| d.cpu.is_some()) else { return };
+    let field = d.field.clone();
+    let Some(cpu) = d.cpu.as_mut() else { return };
+    // The proxy covers the canvas; its four corners go through the view transform so rotation,
+    // flip and pixel-aspect correction land it exactly on the canvas image.
+    let c = d.canvas;
+    let corners = [
+        xf.to_screen(c.x0 as f32, c.y0 as f32),
+        xf.to_screen(c.x1 as f32, c.y0 as f32),
+        xf.to_screen(c.x1 as f32, c.y1 as f32),
+        xf.to_screen(c.x0 as f32, c.y1 as f32),
+    ];
+    let uvs = [egui::pos2(0.0, 0.0), egui::pos2(1.0, 0.0), egui::pos2(1.0, 1.0), egui::pos2(0.0, 1.0)];
+    let paint = |tex: egui::TextureId| {
+        let mut mesh = egui::Mesh::with_texture(tex);
+        for i in 0..4 {
+            mesh.vertices.push(egui::epaint::Vertex { pos: corners[i], uv: uvs[i], color: Color32::WHITE });
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(egui::Shape::mesh(mesh));
+    };
+    if let Some(tex) = cpu.texture() {
+        paint(tex);
+    }
+    if d.opts.show_mask
+        && let Some(tex) = cpu.mask_texture(&field, ctx)
+    {
+        paint(tex);
+    }
+}
+
 /// Cancel (button, Esc or the control channel): the document is untouched; the brush settings
 /// are kept.
 pub fn cancel(app: &mut PhotocraftApp) {
@@ -814,7 +993,6 @@ pub fn commit(app: &mut PhotocraftApp) {
         d.end();
     }
     if app.distort.liquify.as_ref().is_some_and(|d| d.scope_dirty)
-        && app.gpu.is_some()
         && let Err(error) = refresh_scope(app, None)
     {
         crate::notices::error(app, error);
@@ -841,8 +1019,8 @@ pub fn commit(app: &mut PhotocraftApp) {
         }
     }
     #[cfg(not(test))]
-    if d.gpu.is_none() || app.gpu.as_ref().is_none_or(|r| !r.health().is_ok()) {
-        crate::notices::error(app, "Liquify requires an available GPU canvas.".into());
+    if d.gpu.is_none() && d.cpu.is_none() {
+        crate::notices::error(app, "Liquify has no preview to commit.".into());
         app.distort.liquify = Some(d);
         return;
     }
@@ -851,8 +1029,7 @@ pub fn commit(app: &mut PhotocraftApp) {
         gpu.apply_ops(renderer.render_state(), &d.field, &ops, d.gpu_dirty);
         // Refresh tile flags after the final queued dab, then map native planes once.
         gpu.render_outputs(renderer.render_state(), None);
-        let result = gpu.commit_surfaces(renderer.render_state()).and_then(|(pixels, masks)| {
-            let document = app.session.active().ok_or("no document")?.doc.id;
+        let result = gpu.commit_surfaces(renderer.render_state()).and_then(|(pixels, masks)| {            let document = app.session.active().ok_or("no document")?.doc.id;
             app.session.stage_cached_transform(photocraft_engine::cached_transform::CachedCommit { document, pixels, masks }).map_err(|e| e.to_string())
         });
         if let Err(error) = result {
@@ -1144,27 +1321,20 @@ mod tests {
     }
 
     #[test]
-    fn zoomed_liquify_preview_uses_only_the_visible_full_resolution_crop() {
+    fn zoomed_liquify_preview_shows_full_resolution_pixels() {
         let ctx = egui::Context::default();
         let mut app = app_with_layer();
         open(&mut app, &ctx).unwrap();
-        let d = app.distort.liquify.as_mut().unwrap();
-        d.zoom = 2.0;
-        d.center = [60.0, 40.0];
-        d.update_view_preview(&ctx, ERect::from_min_size(pos2(0.0, 0.0), vec2(60.0, 40.0)));
-        assert_eq!(d.view_bounds, Some(Rect::new(45, 30, 75, 50)));
-        assert_eq!(d.view_out.len(), 30 * 20, "one preview texel per document pixel");
-        assert!(d.view_tex.is_some());
-
-        let before = d.view_out.clone();
-        let mut stroke = LiquifyStroke::new(LiquifyTool::ForwardWarp, 24.0);
-        stroke.points = vec![vec![50.0, 40.0, 1.0], vec![58.0, 40.0, 1.0]];
-        let dirty = d.field.stroke_segment(&stroke, [50.0, 40.0, 1.0], [58.0, 40.0, 1.0]);
-        d.mark(dirty, false);
-        d.render_dirty();
-        d.update_view_preview(&ctx, ERect::from_min_size(pos2(0.0, 0.0), vec2(60.0, 40.0)));
-        assert_ne!(d.view_out, before, "a brush update refreshes the visible source-resolution crop");
-        assert!(d.preview_ms.is_finite());
+        // The CPU proxy follows the view: at 100 % and beyond it is one proxy pixel per document
+        // pixel, so the brush works on source pixels however far the canvas is zoomed in.
+        assert_eq!(app.distort.liquify.as_ref().unwrap().cpu.as_ref().unwrap().scale(), 1);
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert_eq!(cpu::scale_for(d.canvas, 2.0, false), 1);
+        // Zoomed out on a large document the proxy shrinks, so a brush-sized warp stays cheap.
+        let big = Rect::new(0, 0, 16000, 16000);
+        assert!(cpu::scale_for(big, 0.1, false) > 1);
+        // Documents whose effects or vector masks do not scale stay full size.
+        assert_eq!(cpu::scale_for(big, 0.1, true), 1);
     }
 
     /// #418: the brush settings survive Cancel, OK and Esc, and come back the next time Liquify
@@ -1294,7 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_rerenders_the_proxy_before_the_next_texture_upload() {
+    fn undo_refreshes_the_visible_preview() {
         let ctx = egui::Context::default();
         let mut app = app_with_layer();
         open(&mut app, &ctx).unwrap();
@@ -1309,16 +1479,15 @@ mod tests {
         ] {
             pointer(&mut app, ev, egui::Modifiers::NONE);
         }
-
-        let before = app.distort.liquify.as_ref().unwrap().out.clone();
+        assert!(app.distort.liquify.as_ref().unwrap().cpu.is_some(), "no GPU in these tests: the CPU preview previews live");
         control(&mut app, &json!({"undo": true})).unwrap();
         let d = app.distort.liquify.as_ref().unwrap();
         assert_eq!(d.strokes.len(), 1);
-        assert_ne!(d.out, before, "undo must update the pixels shown by the existing texture");
-
-        let mut expected = vec![[0u8; 4]; d.proxy.w * d.proxy.h];
-        d.proxy.render(&d.field, [0, 0, d.proxy.w, d.proxy.h], &mut expected);
-        assert_eq!(d.out, expected, "dirty upload source must match the rebuilt field");
+        assert_eq!(LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes), d.field, "undo rebuilds the previewed field");
+        // The proxy document was marked for a full refresh, so the next frame redraws it.
+        let mut app = app;
+        canvas_preview(&mut app, &ctx, 0);
+        assert!(app.distort.liquify.as_ref().unwrap().cpu.as_ref().unwrap().texture().is_some(), "the preview texture follows the rebuilt field");
     }
 
     #[test]
@@ -1496,6 +1665,125 @@ mod tests {
         assert!(app.distort.liquify.is_none());
         assert_eq!(app.session.active().unwrap().history.past_len(), 2, "cancel records nothing");
     }
+
+    /// The CPU preview warps every target layer of a multi-layer scope, not just the active one,
+    /// and its pixels match what the engine commits for the same strokes.
+    #[test]
+    fn cpu_preview_warps_every_layer_and_matches_the_commit() {
+        let ctx = egui::Context::default();
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.session.execute("file.new", json!({"width": 120, "height": 80, "depth": 8})).unwrap();
+        for (name, color) in [("a", [1.0f32, 0.0, 0.0, 1.0]), ("b", [0.0f32, 0.0, 1.0, 1.0])] {
+            app.session.execute("layer.new.layer", json!({"name": name})).unwrap();
+            app.session
+                .edit("pixels", |doc, active| {
+                    doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(30, 20, 70, 60), &color);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        app.sync_views();
+        open(&mut app, &ctx).unwrap();
+        assert!(uses_cpu_preview(&app), "no GPU in these tests: the CPU preview is used");
+        control(&mut app, &json!({"scope": "all", "tool": "forwardWarp", "size": 40, "pressure": 100})).unwrap();
+        refresh_scope(&mut app, Some(&ctx)).unwrap();
+        assert!(app.distort.liquify.as_ref().unwrap().targets.len() >= 2, "every pixel layer is a target");
+
+        for ev in [
+            ToolEvent::Down { x: 40.0, y: 40.0, pressure: 1.0 },
+            ToolEvent::Move { x: 60.0, y: 40.0, pressure: 1.0 },
+            ToolEvent::Up { x: 60.0, y: 40.0 },
+        ] {
+            pointer(&mut app, ev, egui::Modifiers::NONE);
+        }
+        // Bring the preview up to date and read its warped pixels on the two painted layers.
+        canvas_preview(&mut app, &ctx, 0);
+        let before = app.session.active().unwrap().doc.clone();
+        let targets = app.distort.liquify.as_ref().unwrap().targets.clone();
+        let painted: Vec<_> = targets
+            .iter()
+            .copied()
+            .filter(|id| before.layer(*id).is_some_and(|l| l.name == "a" || l.name == "b"))
+            .collect();
+        assert_eq!(painted.len(), 2, "both painted layers are targets");
+        let preview_doc = app.distort.liquify.as_ref().unwrap().cpu.as_ref().unwrap().doc().clone();
+        for id in &painted {
+            assert_ne!(
+                preview_doc.layer(*id).and_then(|l| l.surface()),
+                before.layer(*id).and_then(|l| l.surface()),
+                "the CPU preview warps every target layer"
+            );
+        }
+
+        // Committing records the same strokes with one history step.
+        let history = app.session.active().unwrap().history.past_len();
+        control(&mut app, &json!({"commit": true})).unwrap();
+        assert!(app.distort.liquify.is_none());
+        assert_eq!(app.session.active().unwrap().history.past_len(), history + 1);
+        let after = app.session.active().unwrap().doc.clone();
+        for id in painted {
+            assert_ne!(after.layer(id).and_then(|l| l.surface()), before.layer(id).and_then(|l| l.surface()), "commit warps every target layer");
+        }
+    }
+
+    /// The tool opens without any GPU canvas at all (an old machine where the GPU path cannot
+    /// run), previews on the CPU, and OK still commits through the engine.
+    #[test]
+    fn liquify_opens_and_commits_without_a_gpu() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_layer();
+        assert!(app.gpu.is_none(), "the test app has no GPU canvas");
+        open(&mut app, &ctx).unwrap();
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert!(d.cpu.is_some(), "the CPU preview took over");
+        assert!(d.gpu.is_none());
+        for ev in [
+            ToolEvent::Down { x: 35.0, y: 40.0, pressure: 1.0 },
+            ToolEvent::Move { x: 60.0, y: 40.0, pressure: 1.0 },
+            ToolEvent::Up { x: 60.0, y: 40.0 },
+        ] {
+            pointer(&mut app, ev, egui::Modifiers::NONE);
+        }
+        // The preview shows the warp before OK.
+        canvas_preview(&mut app, &ctx, 0);
+        let d = app.distort.liquify.as_ref().unwrap();
+        let target = d.layer;
+        let original = app.session.active().unwrap().doc.layer(target).and_then(|l| l.surface()).cloned().unwrap();
+        let shown = d.cpu.as_ref().unwrap().doc().layer(target).and_then(|l| l.surface()).cloned().unwrap();
+        assert_ne!(shown, original, "the canvas shows the warped preview");
+        let history = app.session.active().unwrap().history.past_len();
+        control(&mut app, &json!({"commit": true})).unwrap();
+        assert!(app.distort.liquify.is_none(), "OK closes the tool");
+        assert_eq!(app.session.active().unwrap().history.past_len(), history + 1, "one history step");
+        let after = app.session.active().unwrap().doc.layer(target).and_then(|l| l.surface()).cloned().unwrap();
+        assert_ne!(after, original, "the commit warped the layer");
+    }
+
+    /// Switching to the CPU preview keeps the strokes recorded so far.
+    #[test]
+    fn switching_to_cpu_keeps_recorded_strokes() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_layer();
+        open(&mut app, &ctx).unwrap();
+        for ev in [ToolEvent::Down { x: 40.0, y: 40.0, pressure: 1.0 }, ToolEvent::Move { x: 55.0, y: 40.0, pressure: 1.0 }, ToolEvent::Up { x: 55.0, y: 40.0 }]
+        {
+            pointer(&mut app, ev, egui::Modifiers::NONE);
+        }
+        {
+            let d = app.distort.liquify.as_mut().unwrap();
+            d.cpu = None;
+            d.field = LiquifyField::new(d.canvas, d.cell);
+            d.field.gpu_only = true;
+            d.field.apply_stroke(&d.strokes[0]);
+        }
+        switch_to_cpu(&mut app, Some(&ctx)).unwrap();
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert!(d.cpu.is_some());
+        assert!(d.gpu.is_none());
+        assert_eq!(d.strokes.len(), 1);
+        assert_eq!(LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes), d.field, "the field is replayed from the strokes");
+        assert!(d.field.max_displacement() > 0.0);
+    }
 }
 
 #[cfg(test)]
@@ -1536,4 +1824,57 @@ mod cached_session_tests {
         assert!(d.gpu_dirty, "failed commit must restore its resident preview on the next frame");
         cancel(&mut app);
     }
+}
+
+#[cfg(test)]
+mod cpu_tests {
+    use super::*;
+    use super::cpu::scale_for;
+
+    /// The CPU preview warps the same pixels the engine's `filter.liquify` produces on a proxy:
+    /// the preview and the commit agree up to the proxy's resolution.
+    #[test]
+    fn proxy_scale_stays_full_resolution_at_100_percent() {
+        // Documents within the preview budget are full resolution at 100 % and closer.
+        let canvas = Rect::new(0, 0, 1600, 1000);
+        assert_eq!(scale_for(canvas, 1.0, false), 1, "100 %: full resolution");
+        assert_eq!(scale_for(canvas, 2.0, false), 1, "zoomed in: full resolution");
+        assert_eq!(scale_for(canvas, 0.5, false), 2);
+        assert!(scale_for(canvas, 0.1, false) > 2, "zoomed out: a small proxy");
+        assert_eq!(scale_for(canvas, 0.1, true), 1, "effects do not scale");
+        // A big document is limited by the texture budget and side, never above `k = 1`.
+        let big = Rect::new(0, 0, 6000, 4000);
+        assert!(scale_for(big, 1.0, false) > 1);
+        assert_eq!(scale_for(Rect::new(0, 0, 30000, 100), 1.0, false), 8, "texture side limit");
+    }
+
+    /// A dab on the CPU preview changes the proxy document's pixels where it was drawn, and the
+    /// drawn proxy is what the canvas shows.
+    #[test]
+    fn a_dab_updates_the_proxy_document() {
+        let mut doc = photocraft_doc::Document::new("t", photocraft_doc::Size::new(80, 60), photocraft_color::ColorMode::Rgb, photocraft_color::SampleType::U8);
+        let mut surface = Surface::new(photocraft_color::PixelFormat::RGBA32F);
+        for y in 0..60 {
+            for x in 0..80 {
+                surface.write_pixel(x, y, &[(x as f32) / 80.0, (y as f32) / 60.0, 0.5, 1.0]);
+            }
+        }
+        let layer = photocraft_doc::Layer::new("l", photocraft_doc::LayerContent::Raster(surface));
+        let id = layer.id;
+        doc.layers = vec![layer];
+        let canvas = doc.bounds();
+        let mut preview = cpu::Preview::new(&doc, &[id], canvas, 1.0, false).unwrap();
+        let initial = preview.doc().layer(id).and_then(|l| l.surface()).unwrap().clone();
+        let mut field = LiquifyField::new(canvas, 2.0);
+        let mut stroke = LiquifyStroke::new(LiquifyTool::ForwardWarp, 30.0);
+        stroke.points = vec![vec![30.0, 30.0, 1.0], vec![45.0, 30.0, 1.0]];
+        let dirty = field.apply_stroke(&stroke);
+        preview.mark(dirty);
+        preview.update(&field, &doc, &[id], false, None, &egui::Context::default(), 1.0);
+        let after = preview.doc().layer(id).and_then(|l| l.surface()).unwrap();
+        assert_ne!(after, &initial, "the dab warped the proxy document");
+        let changed = (0..60).any(|y| (0..80).any(|x| after.sample_channel(x, y, 0) != initial.sample_channel(x, y, 0)));
+        assert!(changed, "and the change is where the brush was drawn");
+    }
+
 }

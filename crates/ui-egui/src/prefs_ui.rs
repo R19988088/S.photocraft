@@ -977,6 +977,9 @@ fn preference_values(p: &prefs::Preferences) -> Map<String, Value> {
     if let Some(v) = tools.and_then(|t| t.get("pressureCurve")) {
         tablet.insert("pressureCurve".into(), v.clone());
     }
+    if let Some(v) = tools.and_then(|t| t.get("tabletBackend")) {
+        tablet.insert("tabletBackend".into(), v.clone());
+    }
     out.insert("tablet".into(), Value::Object(tablet));
     out
 }
@@ -1625,6 +1628,17 @@ fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, query: &str) 
 fn tablet_fields(ui: &mut egui::Ui, obj: &mut Map<String, Value>, lang: crate::i18n::Lang, pressure_peak: Option<f32>) {
     let t = Tokens::get(ui.ctx());
     ui.set_max_width(320.0);
+    if cfg!(target_os = "windows") {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tl!("Tablet input mode")).color(t.text_dim).strong());
+            let options = [("ink", tl!("Ink")), ("winTab", tl!("WinTab"))];
+            let mut value = obj.get("tabletBackend").and_then(Value::as_str).unwrap_or("ink").to_string();
+            let pairs: Vec<(String, &str)> = options.iter().map(|(v, label)| ((*v).to_string(), *label)).collect();
+            crate::widgets::dropdown(ui, "pref-tablet-backend", &mut value, &pairs, 172.0);
+            obj.insert("tabletBackend".into(), json!(value));
+        });
+        ui.add_space(6.0);
+    }
     let mut row = |key: &str, label: &str, range: std::ops::RangeInclusive<f64>, scale: f64, suffix: &str| {
         ui.horizontal(|ui| {
             ui.add_sized([107.0, 28.0], egui::Label::new(RichText::new(tl!(label)).color(t.text_dim).strong()).halign(egui::Align::Min));
@@ -2526,7 +2540,7 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
                 && let Some(Value::Object(tablet)) = root.remove("tablet")
                 && let Some(Value::Object(tools)) = root.get_mut("tools")
             {
-                for key in ["useTabletPressure", "pressureCurve"] {
+                for key in ["useTabletPressure", "pressureCurve", "tabletBackend"] {
                     if let Some(v) = tablet.get(key) {
                         tools.insert(key.into(), v.clone());
                     }

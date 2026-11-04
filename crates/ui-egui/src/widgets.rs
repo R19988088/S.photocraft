@@ -71,8 +71,8 @@ pub fn card(ui: &mut Ui, id: &str, tabs: &[&str], selected: &mut usize, body: im
 pub struct CardResponse {
     /// The tab strip background: drag to move the group, double-click to collapse it.
     pub strip: Response,
-    /// The panel menu button (hamburger in Pro, ellipsis in Studio).
-    pub menu: Response,
+    /// The visible group collapse/expand button, replacing the panel menu button.
+    pub collapse: Response,
     /// A tab was clicked or chosen from the overflow menu.
     pub tab_clicked: bool,
     /// A tab was double-clicked (Photoshop collapses the group).
@@ -94,10 +94,10 @@ pub struct CardResponse {
 }
 
 impl CardResponse {
-    fn new(strip: Response, menu: Response, tabs: crate::tab_strip::StripOut) -> Self {
+    fn new(strip: Response, collapse: Response, tabs: crate::tab_strip::StripOut) -> Self {
         CardResponse {
             strip,
-            menu,
+            collapse,
             tab_clicked: tabs.clicked,
             tab_double_clicked: tabs.double_clicked,
             tab_context: tabs.context,
@@ -139,18 +139,25 @@ pub fn card_ex(
             // Registered before the tabs so they keep their clicks; drags fall through to it.
             let strip_rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 22.0));
             let strip = ui.interact(strip_rect, ui.id().with((id, "strip")), Sense::click_and_drag());
-            // Pill tabs left of the menu button; they elide or overflow into a chevron (#151).
+            // Pill tabs left of the collapse button; they elide or overflow into a chevron (#151).
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-            let tip = crate::i18n::fmt(tl!("{name} options"), &[("name", tl!(tabs.get(*selected).copied().unwrap_or(id)))]);
-            let menu_rect = Rect::from_min_max(pos2(row.right() - 22.0, row.top() + 1.0), pos2(row.right(), row.bottom() - 1.0));
-            let menu = crate::icons::button(&mut ui.new_child(egui::UiBuilder::new().max_rect(menu_rect)), "ellipsis", 22.0, false, &tip);
-            let area = Rect::from_min_max(row.min, pos2((menu_rect.left() - 4.0).max(row.left()), row.bottom()));
+            let toggle_rect = Rect::from_min_max(pos2(row.right() - 22.0, row.top() + 1.0), pos2(row.right(), row.bottom() - 1.0));
+            let collapse = ui.add_enabled_ui(reorderable, |ui| {
+                crate::icons::button(
+                    &mut ui.new_child(egui::UiBuilder::new().max_rect(toggle_rect)),
+                    if collapsed { "chevron-right" } else { "chevron-down" },
+                    22.0,
+                    false,
+                    if collapsed { "Expand Panel Group" } else { "Collapse Panel Group" },
+                )
+            }).inner;
+            let area = Rect::from_min_max(row.min, pos2((toggle_rect.left() - 4.0).max(row.left()), row.bottom()));
             let tabs_out = crate::tab_strip::pill_tabs(ui, ui.id().with((id, "tabs")), area, tabs, selected, reorderable);
             if !collapsed {
                 ui.add_space(6.0);
                 body(ui, *selected);
             }
-            CardResponse::new(strip, menu, tabs_out)
+            CardResponse::new(strip, collapse, tabs_out)
         })
         .inner;
     ui.add_space(6.0);
@@ -187,7 +194,7 @@ pub fn panel_footer<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     add(&mut bar_ui)
 }
 
-/// Photoshop-grammar panel group: dark tab strip with flat tabs, flat body, hamburger menu.
+/// Photoshop-grammar panel group: dark tab strip with flat tabs and a collapse button.
 fn pro_panel(
     ui: &mut Ui,
     id: &str,
@@ -205,15 +212,18 @@ fn pro_panel(
     let strip_resp = ui.interact(strip, ui.id().with((id, "strip")), Sense::click_and_drag());
     let rounding = if collapsed { CornerRadius::same(3) } else { CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 } };
     ui.painter().rect_filled(strip, rounding, t.tab_strip);
-    // Panel menu (hamburger); the tabs stay left of it, eliding or overflowing (#151).
-    let menu = Rect::from_center_size(pos2(strip.right() - 14.0, strip.center().y), vec2(20.0, 18.0));
-    let tabs_out = crate::tab_strip::pro_tabs(ui, ui.id().with((id, "tabs")), strip, menu.left(), tabs, selected, collapsed, reorderable);
-    let mresp = ui.interact(menu, ui.id().with((id, "menu")), Sense::click());
-    let c = if mresp.hovered() { t.text } else { t.text_faint };
-    for k in 0..3 {
-        let y = menu.center().y - 3.5 + k as f32 * 3.5;
-        ui.painter().line_segment([pos2(menu.center().x - 5.0, y), pos2(menu.center().x + 5.0, y)], Stroke::new(1.0, c));
-    }
+    // The collapse button occupies the former hamburger button's position.
+    let toggle_rect = Rect::from_center_size(pos2(strip.right() - 14.0, strip.center().y), vec2(20.0, 20.0));
+    let tabs_out = crate::tab_strip::pro_tabs(ui, ui.id().with((id, "tabs")), strip, toggle_rect.left(), tabs, selected, collapsed, reorderable);
+    let collapse = ui.add_enabled_ui(reorderable, |ui| {
+        crate::icons::button(
+            &mut ui.new_child(egui::UiBuilder::new().max_rect(toggle_rect)),
+            if collapsed { "chevron-right" } else { "chevron-down" },
+            20.0,
+            false,
+            if collapsed { "Expand Panel Group" } else { "Collapse Panel Group" },
+        )
+    }).inner;
     // Body.
     if !collapsed {
         egui::Frame::NONE.fill(t.card).corner_radius(CornerRadius { nw: 0, ne: 0, sw: 3, se: 3 }).inner_margin(body_margin(true)).show(ui, |ui| {
@@ -222,7 +232,7 @@ fn pro_panel(
         });
     }
     ui.add_space(2.0);
-    CardResponse::new(strip_resp, mresp, tabs_out)
+    CardResponse::new(strip_resp, collapse, tabs_out)
 }
 
 /// The panel menu button (hamburger in Pro, ellipsis in Studio), matching the dock and cards.

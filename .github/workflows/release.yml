@@ -1,6 +1,9 @@
-name: Release 0.23.5
+name: Release 0.23.6
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v0.23.6'
 permissions:
   contents: write
 jobs:
@@ -11,21 +14,22 @@ jobs:
         include:
           - os: windows-latest
             platform: windows-x64
-            artifact: photocraft-0.23.5-windows-x64-portable.zip
+            artifact: photocraft-0.23.6-windows-x64-portable.zip
           - os: macos-15
             platform: macos-arm64
-            artifact: photocraft-0.23.5-macos-aarch64.dmg
+            artifact: photocraft-0.23.6-macos-aarch64.dmg
+          - os: macos-15
+            platform: macos-x64
+            artifact: photocraft-0.23.6-macos-x86_64.dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: '0.23.5'
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.95.0'
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-0.23.5-${{ matrix.platform }}
+          key: release-0.23.6-${{ matrix.platform }}
           cache-on-failure: true
       - name: Build Windows portable
         if: runner.os == 'Windows'
@@ -35,17 +39,26 @@ jobs:
         if: runner.os == 'Windows'
         run: python packaging/windows/check-pdf-imports.py target/x86_64-pc-windows-msvc/release/photocraft.exe target/x86_64-pc-windows-msvc/release/photocraft-cli.exe
       - name: Build Apple Silicon DMG
-        if: runner.os == 'macOS'
+        if: matrix.platform == 'macos-arm64'
         shell: bash
         run: |
           rustup target add aarch64-apple-darwin
           bash packaging/macos/package.sh --arch aarch64
           lipo target/macos-package/PhotoCraft.app/Contents/MacOS/PhotoCraft -verify_arch arm64
           codesign --verify --strict target/macos-package/PhotoCraft.app
-          hdiutil verify dist/release/photocraft-0.23.5-macos-aarch64.dmg
+          hdiutil verify dist/release/photocraft-0.23.6-macos-aarch64.dmg
+      - name: Build Intel DMG
+        if: matrix.platform == 'macos-x64'
+        shell: bash
+        run: |
+          rustup target add x86_64-apple-darwin
+          bash packaging/macos/package.sh --arch x86_64
+          lipo target/macos-package/PhotoCraft.app/Contents/MacOS/PhotoCraft -verify_arch x86_64
+          codesign --verify --strict target/macos-package/PhotoCraft.app
+          hdiutil verify dist/release/photocraft-0.23.6-macos-x86_64.dmg
       - uses: actions/upload-artifact@v4
         with:
-          name: photocraft-0.23.5-${{ matrix.platform }}
+          name: photocraft-0.23.6-${{ matrix.platform }}
           path: dist/release/${{ matrix.artifact }}
           if-no-files-found: error
   publish:
@@ -56,12 +69,16 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: Publish 0.23.5 packages
+      - name: Publish 0.23.6 packages
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          test -s artifacts/photocraft-0.23.5-windows-x64-portable.zip
-          test -s artifacts/photocraft-0.23.5-macos-aarch64.dmg
-          gh release view 0.23.5 >/dev/null 2>&1 || gh release create 0.23.5 --verify-tag --title 'PhotoCraft 0.23.5' --notes '基于 0.23 的独立 GPU 缓存液化工具。Windows x64 ZIP 便携版；Apple Silicon macOS DMG（ad-hoc 签名，未公证）。'
-          gh release upload 0.23.5 artifacts/* --clobber
+          ls -lh artifacts
+          test -s artifacts/photocraft-0.23.6-windows-x64-portable.zip
+          test -s artifacts/photocraft-0.23.6-macos-aarch64.dmg
+          test -s artifacts/photocraft-0.23.6-macos-x86_64.dmg
+          gh release view v0.23.6 >/dev/null 2>&1 \
+            || gh release create v0.23.6 --verify-tag --title 'PhotoCraft 0.23.6' \
+                 --notes '液化工具支持无 GPU 或低配置 GPU 的机器：检测到 GPU 能力不足时自动切换到 CPU 实时预览，单层、图层组与全部图层均可实时液化。Windows x64 便携版，macOS Apple Silicon 与 Intel 双版本 DMG（ad-hoc 签名，未公证）。'
+          gh release upload v0.23.6 artifacts/* --clobber

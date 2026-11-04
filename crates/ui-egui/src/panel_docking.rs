@@ -1149,33 +1149,6 @@ fn panel_active(layout: &Layout<String>, panel: &str) -> bool {
     layout.floating.iter().any(|g| g.panels.get(g.active).is_some_and(|p| p == panel))
 }
 
-/// Extra legacy menu choices use the same commands as the customized renderer.
-pub(crate) fn legacy_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui, label: &str) {
-    let Some(panel) = normalize(label) else { return };
-    let locked = app.session.prefs().workspace_locked;
-    ui.add_enabled_ui(!locked, |ui| {
-        if ui.button(tl!("Float Panel")).clicked() {
-            if let Err(error) = app.run("window.panel.float", json!({"panel":panel})) {
-                app.ui.status = error;
-            }
-            ui.close();
-        }
-        ui.menu_button(tl!("Group with"), |ui| {
-            for &(anchor, label, _) in PANELS {
-                if anchor != panel && ui.button(tl!(label)).clicked() {
-                    let result = app
-                        .run("window.panel.activate", json!({"panel":anchor}))
-                        .and_then(|_| app.run("window.panel.move", json!({"panel":panel,"anchor":anchor})));
-                    if let Err(error) = result {
-                        app.ui.status = error;
-                    }
-                    ui.close();
-                }
-            }
-        });
-    });
-}
-
 // A closed group forms a bounded chain of hidden tab neighbors. Restore just the requested
 // panel at the first surviving return position, then let the remaining tabs rejoin it.
 fn restore_hidden(layout: &mut Layout<String>, hidden: &mut std::collections::BTreeMap<String, craft_ui::docking::Location<String>>, panel: &str) {

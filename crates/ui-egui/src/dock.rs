@@ -459,12 +459,12 @@ fn auto_collapse_peek(app: &mut PhotocraftApp, ctx: &egui::Context) {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StripRects {
     pub group: Group,
-    /// The area accepting a tab drop, excluding the group menu.
+    /// The area accepting a tab drop, excluding the collapse button.
     pub area: Rect,
     /// `(tab index, rect)` of the tabs on the strip (the others are in the chevron menu).
     pub tabs: Vec<(usize, Rect)>,
-    /// The panel menu button.
-    pub menu: Rect,
+    /// The collapse button.
+    pub collapse: Rect,
     /// The » overflow button, when some tabs didn't fit.
     pub chevron: Option<Rect>,
 }
@@ -563,11 +563,14 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
         }
         strips.push(StripRects {
             group: g,
-            area: Rect::from_min_max(pos2(rect.left(), resp.menu.rect.top()), pos2(resp.menu.rect.left(), resp.menu.rect.bottom())),
+            area: Rect::from_min_max(pos2(rect.left(), resp.collapse.rect.top()), pos2(resp.collapse.rect.left(), resp.collapse.rect.bottom())),
             tabs: resp.tabs.iter().filter_map(|(i, r)| indices.get(*i).map(|original| (*original, *r))).collect(),
-            menu: resp.menu.rect,
+            collapse: resp.collapse.rect,
             chevron: resp.chevron,
         });
+        if resp.collapse.clicked() {
+            actions.push(Action::ToggleCollapse(g));
+        }
         // The strip uses visible indices; dockTabs and the panel bodies use original indices.
         if let Some(&picked) = indices.get(sel)
             && picked != before
@@ -625,47 +628,6 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
         if dragging == Some(g) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
-        egui::Popup::menu(&resp.menu).show(|ui| {
-            crate::widgets::style_spectrum_popup_menu(ui);
-            ui.set_min_width(170.0);
-            if tabs.get(sel) == Some(&"Color") {
-                crate::color_panel::menu(app, ui);
-                ui.separator();
-            }
-            if tabs.get(sel) == Some(&"Layers") {
-                crate::layer_row_ui::panel_menu(app, ui);
-                ui.separator();
-            }
-            if tabs.get(sel) == Some(&"Swatches") {
-                crate::swatches_ui::panel_menu(app, ui);
-                ui.separator();
-            }
-            if tabs.get(sel) == Some(&"Brush Settings") {
-                crate::brush_panel::panel_menu(app, ui);
-                ui.separator();
-            }
-            if tabs.get(sel) == Some(&"Actions") {
-                crate::actions::panel_menu(app, ui);
-                ui.separator();
-            }
-            if let Some(label) = tabs.get(sel) {
-                crate::panel_docking::legacy_menu(app, ui, label);
-            }
-            let pos = order.iter().position(|x| *x == g).unwrap_or(0);
-            if ui.add_enabled(!locked && pos > 0, egui::Button::new(tl!("Move Group Up"))).clicked() {
-                actions.push(Action::Move(g, order.get(pos.saturating_sub(1)).copied()));
-                ui.close();
-            }
-            if ui.add_enabled(!locked && pos + 1 < order.len(), egui::Button::new(tl!("Move Group Down"))).clicked() {
-                actions.push(Action::Move(g, order.get(pos + 2).copied()));
-                ui.close();
-            }
-            ui.separator();
-            if ui.button(tl!("Close Tab Group")).clicked() {
-                actions.push(Action::Close(g));
-                ui.close();
-            }
-        });
         // Splitter in the gap below this group: resizes it, pushing the neighbouring groups.
         if i + 1 < rects.len() && !collapsed && rects.iter().skip(i + 1).any(|(n, _)| !app.ui.dock.is_collapsed(*n)) {
             let gap = Rect::from_min_size(pos2(rect.left(), rect.bottom()), vec2(rect.width(), GAP)).expand2(vec2(0.0, 2.0));
