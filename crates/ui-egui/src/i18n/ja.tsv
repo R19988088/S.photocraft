@@ -3909,8 +3909,14 @@ curves	Smooth	スムーズ
 	Increase Brush Hardness	ブラシの硬さを上げる
 
 	Tablet	ペンタブレット
+	Tablet…	ペンタブレット…
+	Tablet input mode	入力モード
+	Ink	インク
+	WinTab	WinTab
 
 	Tablet pressure	数位板压感
+	Tablet backend	入力モード
+	Win tab	WinTab
 
 	Anchor Delay	アンカー: 遅延
 	Anchor Smooth	アンカー: 滑らかさ

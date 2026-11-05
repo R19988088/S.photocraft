@@ -2627,6 +2627,10 @@ cameraRaw	Color	Kleur
 	Keyboard	Toetsenbord
 	Mouse	Muis
 	Tablet	Tekentablet
+	Tablet…	Tekentablet…
+	Tablet input mode	Invoermodus
+	Ink	Inkt
+	WinTab	WinTab
 	Display	Beeldscherm
 	Panel	Paneel
 	Hide Grid	Raster verbergen
@@ -3992,6 +3996,8 @@ curves	Smooth	Vloeiend maken
 	Increase Brush Hardness	Penseelhardheid verhogen
 
 	Tablet pressure	数位板压感
+	Tablet backend	Invoermodus
+	Win tab	WinTab
 
 	Anchor Delay	Anker: Vertraging
 	Anchor Smooth	Anker: Vloeiend maken

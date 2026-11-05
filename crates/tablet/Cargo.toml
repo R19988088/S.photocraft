@@ -3,7 +3,7 @@ name = "photocraft-tablet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Pen tablet pressure, tilt, rotation and eraser end on macOS (AppKit) and Linux X11 (XInput2)"
+description = "Pen tablet pressure, tilt, rotation and eraser end on macOS (AppKit), Linux X11 (XInput2) and Windows (WinTab)"
 
 # The one isolated `unsafe` helper crate (craftrules never-crash, AGENTS.md): the AppKit event
 # monitor needs Objective-C interop. Only `src/macos.rs` allows `unsafe`; everything else is
@@ -22,6 +22,11 @@ objc2 = "=0.6.4"
 block2 = "=0.6.2"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSGeometry"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSEvent", "NSView", "NSWindow", "NSApplication"] }
+
+# The Windows driver's wintab32.dll, loaded at runtime (it ships with the tablet driver,
+# not Windows). Already in Cargo.lock; pinned exactly: review the diff before bumping.
+[target.'cfg(target_os = "windows")'.dependencies]
+libloading = "=0.8.9"
 
 # Pure-Rust X11 client (no unsafe in the RustConnection path we use).
 [target.'cfg(target_os = "linux")'.dependencies]

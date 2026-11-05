@@ -2855,8 +2855,14 @@ curves	Smooth	平滑
 	Increase Brush Hardness	增大画笔硬度
 
 	Tablet	数位板
+	Tablet…	数位板…
+	Tablet input mode	输入模式
+	Ink	墨水
+	WinTab	WinTab
 
 	Tablet pressure	数位板压感
+	Tablet backend	输入模式
+	Win tab	WinTab
 	Grain Density	颗粒密度
 	Density Jitter	密度抖动
 	Wet Edge Mode	湿边模式

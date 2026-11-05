@@ -3248,6 +3248,10 @@ layerLabel	No Color	Sem cor
 	Keyboard	Teclado
 	Mouse	Mouse
 	Tablet	Mesa digitalizadora
+	Tablet…	Mesa digitalizadora…
+	Tablet input mode	Modo de entrada
+	Ink	Tinta
+	WinTab	WinTab
 	Display	Monitor
 	Panel	Painel
 	Hide Grid	Ocultar grade
@@ -4022,6 +4026,8 @@ layerLabel	No Color	Sem cor
 	Increase Brush Hardness	Aumentar dureza do pincel
 
 	Tablet pressure	数位板压感
+	Tablet backend	Modo de entrada
+	Win tab	WinTab
 
 	Anchor Delay	Âncora: Atraso
 	Anchor Smooth	Âncora: Suavização

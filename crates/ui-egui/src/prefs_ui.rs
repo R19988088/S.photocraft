@@ -1425,7 +1425,7 @@ fn export_field_visible(obj: &Map<String, Value>, key: &str) -> bool {
 
 /// The pause that bundles arrow-key nudges means nothing with Bundle Arrow-Key Nudges off (#2259).
 fn tools_field_visible(obj: &Map<String, Value>, key: &str) -> bool {
-    !matches!(key, "useTabletPressure" | "pressureCurve" | "tabletPressure")
+    !matches!(key, "useTabletPressure" | "pressureCurve" | "tabletPressure" | "tabletBackend")
         && (key != "nudgeBundlePauseMs" || obj.get("bundleNudges").and_then(Value::as_bool) != Some(false))
 }
 
@@ -1628,13 +1628,17 @@ fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, query: &str) 
 fn tablet_fields(ui: &mut egui::Ui, obj: &mut Map<String, Value>, lang: crate::i18n::Lang, pressure_peak: Option<f32>) {
     let t = Tokens::get(ui.ctx());
     ui.set_max_width(320.0);
+    // The pen input source where a pen arrives two ways: WinTab (the tablet driver's API, with
+    // tilt, rotation and the eraser end) or Ink (winit's WM_POINTER path, pressure only).
     if cfg!(target_os = "windows") {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(tl!("Tablet input mode")).color(t.text_dim).strong());
-            let options = [("ink", tl!("Ink")), ("winTab", tl!("WinTab"))];
-            let mut value = obj.get("tabletBackend").and_then(Value::as_str).unwrap_or("ink").to_string();
-            let pairs: Vec<(String, &str)> = options.iter().map(|(v, label)| ((*v).to_string(), *label)).collect();
-            crate::widgets::dropdown(ui, "pref-tablet-backend", &mut value, &pairs, 172.0);
+            ui.add_sized([107.0, 28.0], egui::Label::new(RichText::new(tl!("Tablet input mode")).color(t.text_dim).strong()).halign(egui::Align::Min));
+            let mut value = obj.get("tabletBackend").and_then(Value::as_str).unwrap_or("winTab").to_string();
+            for (v, label) in [("winTab", tl!("WinTab")), ("ink", tl!("Ink"))] {
+                if ui.selectable_label(value == v, label).clicked() {
+                    value = v.to_string();
+                }
+            }
             obj.insert("tabletBackend".into(), json!(value));
         });
         ui.add_space(6.0);

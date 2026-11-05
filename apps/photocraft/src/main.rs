@@ -71,8 +71,9 @@ mod services;
 // macOS gets one instance from LaunchServices (open-documents Apple events).
 #[cfg(any(not(target_os = "macos"), test))]
 mod single_instance;
-// Windows gets pen pressure from winit (WM_POINTER); the web runner has its own listener.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+// Windows' WinTab reader and the web runner have their own pen listeners; the module holds both
+// the platform readers and the samples' mapping into the UI's stylus feed.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
 mod tablet;
 mod ui_state;
 mod window_frame;
@@ -862,6 +863,16 @@ fn main() -> eframe::Result {
             }
             #[cfg(target_os = "linux")]
             tablet::spawn_x11(&app.stylus.feed, display);
+            // Windows: the WinTab reader polls the tablet driver's queue each frame while
+            // Preferences › Tools › Tablet input mode is WinTab (the default); the context opens
+            // and closes as the mode changes. Windows Ink stays the source in Ink mode.
+            #[cfg(target_os = "windows")]
+            {
+                let feed = app.stylus.feed.clone();
+                let hwnd = tablet::window_handle(cc);
+                let mut monitor = None;
+                app.services.tablet_poll = Some(Box::new(move |wintab| tablet::poll_wintab(&mut monitor, wintab, hwnd, &feed)));
+            }
             // Paths on the command line (Linux/Windows file associations, `photocraft a.psd`).
             app.open_paths(&files);
             if !unreadable_paths.is_empty() {

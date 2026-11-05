@@ -28,11 +28,11 @@ HDR display to verify.
 
 | Feature | Photoshop | macOS | Windows | Linux X11 | Linux Wayland | Web |
 |---|---|---|---|---|---|---|
-| Pressure | yes | yes (AppKit monitor) | yes (WM_POINTER), jumpy (#2046) | yes (XInput2) | via Xwayland only; GNOME 50 pen doesn't click (#2622), KDE (#2297) | yes |
-| Tilt | yes | yes | **no** | yes | no | yes |
-| Barrel rotation | yes | yes (not applied to tip angle, #1301) | no | partial | no | yes (twist) |
-| Eraser end | yes | yes | no (#2285) | partial | no | partial |
-| WinTab driver mode | yes | – | no | – | – | – |
+| Pressure | yes | yes (AppKit monitor) | yes (WinTab, or WM_POINTER) | yes (XInput2) | via Xwayland only; GNOME 50 pen doesn't click (#2622), KDE (#2297) | yes |
+| Tilt | yes | yes | yes (WinTab mode) | yes | no | yes |
+| Barrel rotation | yes | yes (not applied to tip angle, #1301) | yes (WinTab mode) | partial | no | yes (twist) |
+| Eraser end | yes | yes | yes (WinTab mode) | partial | no | partial |
+| WinTab driver mode | yes | – | yes (Preferences › Tablet, the default; Ink keeps WM_POINTER) | – | – | – |
 | Pressure curve | Windows Ink / driver | global curve in Preferences (#2195) | same | same | same | same |
 
 ## Displays and colour

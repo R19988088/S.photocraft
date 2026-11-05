@@ -9,6 +9,11 @@
 //!   winit drops the pen's tilt and rotation, so those stay 0, and reports pressure 0 (a tap
 //!   lighter than the pen's first pressure level) as no force, which [`Stylus::update`] reads as
 //!   pressure 0 once it knows a pen is in use.
+//! - **Windows, WinTab mode** (Preferences › Tablet, the default): the desktop app opens a WinTab
+//!   context through the tablet driver and polls its queue each frame (the
+//!   `photocraft-tablet` crate), writing pressure, tilt, rotation and the eraser end into the
+//!   [`StylusFeed`]. [`Stylus::external_pen`] then ignores the `WM_POINTER` force for the same pen
+//!   (it carries none of the other fields), while a finger on a touch screen keeps working.
 //! - **Web**: eframe forwards touch force but not pen pointer events, so the web runner listens
 //!   to `pointerdown`/`pointermove` itself and writes `pressure`, `tiltX`, `tiltY`, `twist` and
 //!   the eraser button of `pointerType == "pen"` events into the [`StylusFeed`].
@@ -167,6 +172,10 @@ pub struct Stylus {
     touch_pen: bool,
     /// The contact ended this frame: keep its force for this frame's last tool events, clear next frame.
     lifted: bool,
+    /// A platform reader outside the feed owns the pen this session (Windows WinTab). Its samples
+    /// are authoritative then: winit's `WM_POINTER` touch force describes the same pen from a
+    /// different source and would otherwise overwrite each frame's pressure.
+    pub external_pen: bool,
     /// This frame's pen samples, oldest first (the feed's queue and the touch forces).
     frame: Vec<PenSample>,
     /// The last pen sample of an earlier frame: where this frame's interpolation starts.
@@ -211,6 +220,7 @@ impl Default for Stylus {
             contacts: Vec::new(),
             touch_pen: false,
             lifted: false,
+            external_pen: false,
             frame: Vec::new(),
             prev: None,
             current: None,
@@ -262,6 +272,10 @@ impl Stylus {
         self.frame = self.feed.drain();
         self.current = None;
         for e in events {
+            // With another reader owning the pen (WinTab), winit's touch force describes the same
+            // pen a second time and would overwrite the reader's pressure each frame. Contacts are
+            // still tracked (a held pen stays no right click), but they carry no pressure sample.
+            let external = self.external_pen;
             if let egui::Event::Touch { id, phase, force, .. } = e {
                 let force = force.filter(|f| f.is_finite()).map(|f| f.clamp(0.0, 1.0));
                 match phase {
@@ -283,6 +297,13 @@ impl Stylus {
                         // screen) reports a force.
                         if !down || force.is_some() {
                             self.touch_pen = true;
+                        } else if external {
+                            // The reader owns pen contacts: this force-less contact is a finger,
+                            // and it keeps its full pressure.
+                            self.touch_pen = false;
+                        }
+                        if external && force.is_some() {
+                            continue;
                         }
                         // Windows reports a pen pressed lighter than its first pressure level with
                         // no force at all (winit maps pressure 0 to `None`): a light tap is
@@ -330,6 +351,10 @@ impl Stylus {
         }
         let s = if self.native_active {
             self.current.or(self.native_last)
+        } else if self.external_pen {
+            // The platform reader (WinTab) is the pen's only source: no touch fallback, which
+            // would report a finger or a stale contact as the pen.
+            self.current.or_else(|| self.latest())
         } else {
             self.current.or_else(|| self.latest()).or(self.touch.map(|pressure| PenSample { pressure, ..Default::default() }))
         }?;

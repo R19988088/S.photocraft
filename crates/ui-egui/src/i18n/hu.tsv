@@ -3591,6 +3591,10 @@ cameraRaw	Yellow	Sárga
 	Switched to CPU rendering	Átváltás CPU-s megjelenítésre
 	System	Rendszer
 	Tablet	Rajztábla
+	Tablet…	Rajztábla…
+	Tablet input mode	Beviteli mód
+	Ink	Tinta
+	WinTab	WinTab
 	Taper	Elvékonyodás
 	Target	Cél
 	Text file	Szövegfájl
@@ -4151,6 +4155,8 @@ cameraRaw	Yellow	Sárga
 	Increase Brush Hardness	Ecsetkeménység növelése
 
 	Tablet pressure	数位板压感
+	Tablet backend	Beviteli mód
+	Win tab	WinTab
 
 	Anchor Delay	Horgony: Késleltetés
 	Anchor Smooth	Horgony: Simítás

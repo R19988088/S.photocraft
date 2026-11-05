@@ -451,6 +451,12 @@ pub type CapsLockFn = Box<dyn FnMut() -> bool>;
 /// Keeps an undecorated window's OS frame from offsetting its content and pointer (#2246).
 /// Called once per frame; `None` when the window is decorated or the platform needs no fixing.
 pub type WindowFrameFn = Box<dyn FnMut()>;
+/// Reads the Windows tablet's packets for this frame (WinTab input mode), with whether that mode
+/// is on. Returns whether the WinTab reader is running: while it is, the pen's pressure comes from
+/// it, not from winit's `WM_POINTER` touch force. Called once per frame from `raw_input_hook`,
+/// before the frame's pointer events reach the UI; `None` when the shell has no WinTab reader
+/// (every non-Windows build).
+pub type TabletPollFn = Box<dyn FnMut(bool) -> bool>;
 /// The caption buttons' current style ([`Services::caption_style`]).
 pub type CaptionStyleFn = Box<dyn Fn(&egui::Context) -> CaptionStyle>;
 
@@ -542,6 +548,9 @@ pub struct Services {
     /// (Windows custom title bar, #2246). Called once per frame; `None` when the window is
     /// decorated or the platform needs no fixing.
     pub window_frame: Option<WindowFrameFn>,
+    /// Reads the Windows tablet's WinTab packets each frame (Preferences › Tools › Tablet input
+    /// mode). `None` where the platform has no WinTab reader.
+    pub tablet_poll: Option<TabletPollFn>,
     /// How the custom title bar's caption buttons look and where they sit (Linux: the desktop's
     /// style and button layout). Read every frame, with the context to wake when it changes;
     /// `None` keeps Windows' buttons at the right end.
@@ -2029,6 +2038,12 @@ impl eframe::App for PhotocraftApp {
         // (maximize, restore, …): take it off again before the frame is laid out (#2246).
         if let Some(window_frame) = self.services.window_frame.as_mut() {
             window_frame();
+        }
+        // The WinTab reader drains the tablet driver's queue: the pen samples of this frame must be
+        // current before egui sees the pointer moves they describe. While it runs, winit's touch
+        // force for the same pen is ignored (the reader also carries tilt and the eraser end).
+        if let Some(tablet_poll) = self.services.tablet_poll.as_mut() {
+            self.stylus.external_pen = tablet_poll(self.session.prefs().tools.tablet_backend == photocraft_engine::prefs::TabletBackend::WinTab);
         }
         // Native menu key equivalents become the key presses they were (see `native_menu`).
         if let Some(menu) = self.services.native_menu.as_mut() {

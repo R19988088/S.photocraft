@@ -2840,8 +2840,14 @@ curves	Smooth	平滑
 	Increase Brush Hardness	提高筆刷硬度
 
 	Tablet	數位板
+	Tablet…	數位板…
+	Tablet input mode	輸入模式
+	Ink	墨水
+	WinTab	WinTab
 
 	Tablet pressure	数位板压感
+	Tablet backend	輸入模式
+	Win tab	WinTab
 
 	Pressure for Flow	用壓感控制流量
 

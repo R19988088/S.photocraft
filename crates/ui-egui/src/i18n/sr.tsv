@@ -3265,6 +3265,10 @@ layerLabel	No Color	Bez boje
 	Keyboard	Tastatura
 	Mouse	Miš
 	Tablet	Таблет
+	Tablet…	Таблет…
+	Tablet input mode	Režim unosa
+	Ink	Mastilo
+	WinTab	WinTab
 	Display	Ekran
 	Panel	Panel
 	Hide Grid	Sakrij mrežu
@@ -4305,6 +4309,8 @@ shape	Appearance	Izgled
 	Increase Brush Hardness	Povećaj tvrdoću četkice
 
 	Tablet pressure	数位板压感
+	Tablet backend	Režim unosa
+	Win tab	WinTab
 
 	Anchor Delay	Sidro: Kašnjenje
 	Anchor Smooth	Sidro: Uglađivanje

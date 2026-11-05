@@ -54,8 +54,10 @@ choice!(
 choice!(TypeUnit { Points = "points", Pixels = "pixels", Millimeters = "mm" } default Points);
 choice!(PointSize { PostScript = "postScript", Traditional = "traditional" } default PostScript);
 choice!(
-    /// Windows pen input source. Ink is the system WM_POINTER path; WinTab is the legacy tablet API.
-    TabletBackend { Ink = "ink", WinTab = "winTab" } default Ink
+    /// Windows pen input source. WinTab is the tablet driver's API, which also carries tilt,
+    /// rotation and the eraser end; Ink is the system WM_POINTER path (pressure only, but no
+    /// driver needed).
+    TabletBackend { WinTab = "winTab", Ink = "ink" } default WinTab
 );
 choice!(Interpolation { BicubicAutomatic = "bicubicAutomatic", Nearest = "nearestNeighbor", Bilinear = "bilinear", Bicubic = "bicubic", BicubicSmoother = "bicubicSmoother", BicubicSharper = "bicubicSharper", PreserveDetails = "preserveDetails" } default BicubicAutomatic);
 choice!(ColorPicker { Adobe = "adobe", System = "system" } default Adobe);
@@ -2514,6 +2516,7 @@ pub fn specs() -> Vec<CommandSpec> {
         section!("edit.preferences.workspace", "Workspace…"),
         section!("edit.preferences.tools", "Tools…"),
         section!("edit.preferences.painting", "Painting…"),
+        section!("edit.preferences.tablet", "Tablet…"),
         section!("edit.preferences.historyLog", "History Log…"),
         section!("edit.preferences.fileHandling", "File Handling…"),
         section!("edit.preferences.export", "Export…"),

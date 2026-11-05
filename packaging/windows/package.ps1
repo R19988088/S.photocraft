@@ -5,7 +5,8 @@
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
     photocraft-<version>-windows-<arch>.msi            per-machine installer (WiX v5)
-    photocraft-<version>-windows-<arch>-portable.zip   photocraft.exe + photocraft-cli.exe + portable.txt
+    photocraft-<version>-windows-<arch>-portable.zip   photocraft.exe + portable.txt
+                                                       (with -NoCli; photocraft-cli.exe otherwise)
 
   The binaries link the C runtime statically (+crt-static), so neither the MSI nor the portable
   zip needs the Visual C++ redistributable. Signing is delegated to sign.ps1 (skipped with a
@@ -19,13 +20,18 @@
   pwsh packaging/windows/package.ps1 -Arch x64
   pwsh packaging/windows/package.ps1 -Arch x86 -SkipBuild
   pwsh packaging/windows/package.ps1 -Arch arm64     # cross-compiled; needs the MSVC ARM64 build tools
+  pwsh packaging/windows/package.ps1 -Arch x64 -PortableOnly -NoCli   # app-only portable zip
 #>
 param(
   [ValidateSet('x64', 'x86', 'arm64')] [string] $Arch = 'x64',
   [switch] $SkipBuild,
-  [switch] $PortableOnly
+  [switch] $PortableOnly,
+  # Leave photocraft-cli out of the build and the portable zip (app only).
+  [switch] $NoCli
 )
 $ErrorActionPreference = 'Stop'
+# The MSI's component list names photocraft-cli.exe, so an app-only build can't produce one.
+if ($NoCli -and -not $PortableOnly) { throw '-NoCli needs -PortableOnly: the MSI installs photocraft-cli.exe' }
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
 function Invoke-Native([string] $What, [scriptblock] $Block) {
@@ -64,22 +70,25 @@ if (-not $SkipBuild) {
   [Environment]::SetEnvironmentVariable($flagVar, '-C target-feature=+crt-static')
   # Fail the build (rather than warn) if the icon/VERSIONINFO can't be embedded.
   $env:PHOTOCRAFT_REQUIRE_WINRES = '1'
-  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p photocraft -p photocraft-cli --features heif --target $Target }
+  $Packages = if ($NoCli) { @('-p', 'photocraft') } else { @('-p', 'photocraft', '-p', 'photocraft-cli') }
+  Invoke-Native "cargo build ($Target)" { cargo build --release --locked @Packages --features heif --target $Target }
 }
 
 $Bin = Join-Path $TargetDir "$Target\release"
 
-# Check both binaries' PE headers before packaging. Machine (COFF header) must match -Arch, so an
-# x64 build can never ship labelled arm64. Subsystem (optional header): 2 = Windows GUI, 3 = console.
-# The app must be GUI (no console window opens with it); the CLI must stay console so its output
-# reaches the terminal.
+# Check each packaged binary's PE header before packaging. Machine (COFF header) must match
+# -Arch, so an x64 build can never ship labelled arm64. Subsystem (optional header): 2 = Windows
+# GUI, 3 = console. The app must be GUI (no console window opens with it); the CLI must stay
+# console so its output reaches the terminal.
 function Get-PeHeader([string] $Path) {
   $bytes = [System.IO.File]::ReadAllBytes($Path)
   $pe = [BitConverter]::ToInt32($bytes, 0x3C)
   return @{ Machine = [BitConverter]::ToUInt16($bytes, $pe + 4); Subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C) }
 }
 $Machine = switch ($Arch) { 'x64' { 0x8664 } 'x86' { 0x14C } 'arm64' { 0xAA64 } }
-foreach ($check in @(@('photocraft.exe', 2), @('photocraft-cli.exe', 3))) {
+$Binaries = @(@('photocraft.exe', 2))
+if (-not $NoCli) { $Binaries += , @('photocraft-cli.exe', 3) }
+foreach ($check in $Binaries) {
   $h = Get-PeHeader (Join-Path $Bin $check[0])
   if ($h.Machine -ne $Machine) { throw "$($check[0]) is for machine 0x$('{0:X}' -f $h.Machine), expected 0x$('{0:X}' -f $Machine) ($Arch)" }
   if ($h.Subsystem -ne $check[1]) { throw "$($check[0]) has PE subsystem $($h.Subsystem), expected $($check[1])" }
@@ -88,9 +97,11 @@ foreach ($check in @(@('photocraft.exe', 2), @('photocraft-cli.exe', 3))) {
 $Stage = Join-Path $TargetDir "windows-package\$Arch"
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-Copy-Item (Join-Path $Bin 'photocraft.exe'), (Join-Path $Bin 'photocraft-cli.exe') $Stage
+$Staged = @('photocraft.exe')
+if (-not $NoCli) { $Staged += 'photocraft-cli.exe' }
+Copy-Item ($Staged | ForEach-Object { Join-Path $Bin $_ }) $Stage
 
-& (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'photocraft.exe') (Join-Path $Stage 'photocraft-cli.exe')
+& (Join-Path $PSScriptRoot 'sign.ps1') ($Staged | ForEach-Object { Join-Path $Stage $_ })
 
 # ---- MSI ---------------------------------------------------------------------------------------
 if (-not $PortableOnly) {
@@ -178,10 +189,12 @@ Compress-Archive -Path $Portable -DestinationPath $Zip
 # Smoke-test the CLI when this machine can run it. An ARM64 build made on an x64 runner can't run
 # here; .github/workflows/windows-arm64.yml installs and runs it on ARM64 instead.
 $HostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-if ($Arch -ne 'arm64' -or $HostArch -eq 'arm64') {
+if ($NoCli) {
+  Write-Output 'skipping photocraft-cli --version: -NoCli'
+} elseif ($Arch -ne 'arm64' -or $HostArch -eq 'arm64') {
   Invoke-Native 'photocraft-cli --version' { & (Join-Path $Stage 'photocraft-cli.exe') --version }
 } else {
   Write-Output "skipping photocraft-cli --version: an $Arch build doesn't run on this $HostArch machine"
 }
-if ($PortableOnly) { Get-Item $Zip | Format-Table Name, Length }
+if ($NoCli -or $PortableOnly) { Get-Item $Zip | Format-Table Name, Length }
 else { Get-Item $Msi, $Zip | Format-Table Name, Length }

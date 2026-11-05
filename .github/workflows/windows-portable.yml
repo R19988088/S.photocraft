@@ -1,0 +1,72 @@
+name: Windows portable (app only)
+
+# The app-only portable build: photocraft.exe + portable.txt, no photocraft-cli.exe and no MSI.
+# Settings, presets and recovery autosaves then live in PhotoCraftData beside the exe.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'crates/tablet/**'
+      - 'apps/photocraft/**'
+      - 'crates/**'
+      - 'packaging/windows/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/windows-portable.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $inPkg = $false
+          foreach ($line in Get-Content Cargo.toml) {
+            if ($line -match '^\s*\[') { $inPkg = ($line.Trim() -eq '[workspace.package]'); continue }
+            if ($inPkg -and $line -match '^\s*version\s*=\s*"([^"]+)"') { "version=$($Matches[1])" >> $env:GITHUB_OUTPUT; break }
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-portable-app-only-${{ steps.version.outputs.version }}
+          cache-on-failure: true
+
+      # App only: no -p photocraft-cli, so the CLI is neither built nor checked nor zipped.
+      - name: Build portable zip
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Arch x64 -PortableOnly -NoCli
+
+      - name: Verify no CLI in the zip
+        shell: pwsh
+        run: |
+          $zip = "dist/release/photocraft-${{ steps.version.outputs.version }}-windows-x64-portable.zip"
+          if (-not (Test-Path $zip)) { throw "missing $zip" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $names = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip)).Entries |
+            ForEach-Object { Split-Path $_.FullName -Leaf }
+          Write-Output ($names -join ', ')
+          if ($names -contains 'photocraft-cli.exe') { throw 'photocraft-cli.exe is in the portable zip' }
+          if ($names -notcontains 'photocraft.exe') { throw 'photocraft.exe is missing from the portable zip' }
+          if ($names -notcontains 'portable.txt') { throw 'portable.txt is missing from the portable zip' }
+
+      - name: Verify PDF imports
+        run: python packaging/windows/check-pdf-imports.py target/x86_64-pc-windows-msvc/release/photocraft.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photocraft-${{ steps.version.outputs.version }}-windows-x64-portable-app-only
+          path: dist/release/photocraft-${{ steps.version.outputs.version }}-windows-x64-portable.zip
+          if-no-files-found: error

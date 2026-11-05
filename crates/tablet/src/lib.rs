@@ -11,6 +11,11 @@
 //!   raw events on the root window and maps the tablet device's valuators ("Abs Pressure",
 //!   "Abs Tilt X/Y", "Abs Rotary Z") to samples. Raw events reach every client that asks, also
 //!   while winit holds the pointer grab of a drag. No `unsafe`.
+//! - **Windows** ([`windows::Monitor`]): winit forwards `WM_POINTER` force but no tilt, rotation
+//!   or eraser end, so when the user picks the WinTab input mode the app opens a WinTab context
+//!   on its window through the driver's `wintab32.dll` (loaded at runtime; `windows.rs` is the
+//!   second module that allows `unsafe`) and polls its packet queue each frame. [`wintab`] maps
+//!   the packets and is tested on every platform.
 //! - **Wayland**: not covered. The `zwp_tablet_v2` protocol has to be bound on winit's own
 //!   `wl_display` connection (the tablet events name winit's `wl_surface`), which needs
 //!   `unsafe` foreign-display interop, and binding it makes compositors stop emulating the
@@ -27,12 +32,15 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod appkit;
+pub mod wintab;
 pub mod xi;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod x11;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 /// One pen reading. Tilt is in degrees (-90..90, W3C Pointer Events convention: +x tilts to the
 /// right, +y towards the user), rotation in degrees 0..360 (clockwise).

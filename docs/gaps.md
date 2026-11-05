@@ -236,11 +236,11 @@ what an agent can't finish alone.
 ## Hardware gaps
 
 ### G12. Pen tablets and display hardware
-- **Missing:** tilt and rotation on Windows (pressure only, via WM_POINTER; no WinTab); native
-  Wayland tablet-v2 (#79; the pen does not click on GNOME 50, #2622, KDE #2297); eraser end on
-  flipped Wacom pens (#2285); HDR/EDR output (Photoshop has "Precise Color Management for HDR
-  Display"); monitor profile detection off macOS and live profile changes; Touch Bar (macOS
-  Intel only, low value); 3D mice.
+- **Missing:** native Wayland tablet-v2 (#79; the pen does not click on GNOME 50, #2622, KDE
+  #2297); eraser end on flipped Wacom pens (#2285); HDR/EDR output (Photoshop has "Precise
+  Color Management for HDR Display"); monitor profile detection off macOS and live profile
+  changes; Touch Bar (macOS Intel only, low value); 3D mice. Windows reads tilt, rotation and the
+  eraser end through WinTab (Preferences › Tablet, the default; Ink keeps WM_POINTER).
 - **Detail:** [`hardware-parity.md`](hardware-parity.md).
 - **Estimate:** 80–150 h. **Human:** tablets and HDR displays to test on.
 

@@ -3232,8 +3232,14 @@ curves	Smooth	Glätten
 	Replace it with this document, or cancel and use File › Save As to keep both.	Ersetze die Datei durch dieses Dokument oder brich ab und nutze Datei › Speichern unter, um beide zu behalten.
 
 	Tablet	Grafiktablett
+	Tablet…	Grafiktablett…
+	Tablet input mode	Eingabemodus
+	Ink	Tinte
+	WinTab	WinTab
 
 	Tablet pressure	数位板压感
+	Tablet backend	Eingabemodus
+	Win tab	WinTab
 
 	Anchor Delay	Anker: Verzögerung
 	Anchor Smooth	Anker: Glättung

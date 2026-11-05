@@ -3390,6 +3390,10 @@ cameraData	Lens	Objektiv
 	Switch Foreground and Background Colors	Prohodit barvy popředí a pozadí
 	Symbols	Symboly
 	Tablet	Tablet
+	Tablet…	Tableta…
+	Tablet input mode	Režim vstupu
+	Ink	Inkoust
+	WinTab	WinTab
 	Taper	Zúžení
 	Target	Cíl
 	Target X	Cíl X
@@ -3840,6 +3844,8 @@ navigator	Zoom	Zvětšení
 	Increase Brush Hardness	Zvýšit tvrdost štětce
 
 	Tablet pressure	数位板压感
+	Tablet backend	Režim vstupu
+	Win tab	WinTab
 
 	Anchor Delay	Kotva: Zpoždění
 	Anchor Smooth	Kotva: Vyhlazení

@@ -3940,8 +3940,14 @@ curves	Smooth	Згладити
 	This fill layer must be rasterized before proceeding. Its fill content will no longer be editable. Rasterize the layer?	Щоб продовжити, потрібно растеризувати цей шар заливки. Після цього його заливку більше не можна буде редагувати. Растеризувати шар?
 
 	Tablet	Планшет
+	Tablet…	Планшет…
+	Tablet input mode	Режим введення
+	Ink	Чорнило
+	WinTab	WinTab
 
 	Tablet pressure	数位板压感
+	Tablet backend	Режим введення
+	Win tab	WinTab
 
 	Anchor Delay	Якір: Затримка
 	Anchor Smooth	Якір: Згладжування

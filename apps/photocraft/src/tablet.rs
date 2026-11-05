@@ -1,10 +1,11 @@
-//! Pen tablet pressure, tilt, rotation and eraser end on macOS and Linux X11 (issue #79).
+//! Pen tablet pressure, tilt, rotation and eraser end on macOS, Linux X11 and Windows (issue #79).
 //!
-//! winit 0.30 drops tablet data on both, so `photocraft-tablet` reads it beside winit (an AppKit
-//! local event monitor; XInput2 raw events on a second X connection) and this module writes each
-//! sample into the UI's [`StylusFeed`], where the canvas reads it exactly like the web runner's
-//! Pointer Events and automation's simulated pen. Windows needs nothing here: winit forwards
-//! `WM_POINTER` pressure as touch force.
+//! winit 0.30 drops tablet data, so `photocraft-tablet` reads it beside winit (an AppKit
+//! local event monitor; XInput2 raw events on a second X connection; the WinTab driver's packet
+//! queue) and this module writes each sample into the UI's [`StylusFeed`], where the canvas reads
+//! it exactly like the web runner's Pointer Events and automation's simulated pen. On Windows the
+//! WinTab reader is the default (Preferences › Tablet › Tablet input mode); the Ink choice keeps
+//! winit's `WM_POINTER` touch force, which has pressure but no tilt, rotation or eraser end.
 //!
 //! Wayland compositors give a pen only to clients that bind the tablet protocol
 //! (`zwp_tablet_v2`), which winit 0.30 doesn't (and binding it on winit's connection needs
@@ -24,9 +25,57 @@ pub fn pen_sample(s: Sample) -> PenSample {
 }
 
 /// Writes tablet samples into `feed` (`None` = a mouse).
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub fn sink(feed: StylusFeed) -> impl Fn(Option<Sample>) + Send + 'static {
     move |s| feed.set(s.map(pen_sample))
+}
+
+/// The app window's raw handle, for the WinTab context.
+#[cfg(target_os = "windows")]
+pub fn window_handle(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    use eframe::wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+/// Open a WinTab context on `hwnd` when that mode is selected. Keep the result for as long as
+/// the mode stays on: [`poll_wintab`] drops it when the user switches to Ink, so the pen then
+/// comes through `WM_POINTER` again.
+#[cfg(target_os = "windows")]
+pub fn install_wintab(hwnd: isize, feed: &StylusFeed) -> Option<photocraft_tablet::windows::Monitor> {
+    match photocraft_tablet::windows::Monitor::open(hwnd, sink(feed.clone())) {
+        Ok(m) => {
+            log::info!("tablet: WinTab input mode (pressure, tilt, rotation and the eraser end)");
+            Some(m)
+        }
+        Err(e) => {
+            log::warn!("{e}; pens paint through Windows Ink (no tilt or eraser end)");
+            None
+        }
+    }
+}
+
+/// Poll the WinTab monitor each frame, opening and closing it as the mode changes. Returns
+/// whether the reader is running (its samples then replace winit's touch force).
+#[cfg(target_os = "windows")]
+pub fn poll_wintab(monitor: &mut Option<photocraft_tablet::windows::Monitor>, want: bool, hwnd: Option<isize>, feed: &StylusFeed) -> bool {
+    match (want, monitor.is_some()) {
+        (true, false) => *monitor = hwnd.and_then(|h| install_wintab(h, feed)),
+        (false, true) => {
+            *monitor = None;
+            log::info!("tablet: Windows Ink input mode");
+        }
+        _ => {}
+    }
+    match monitor.as_mut() {
+        Some(m) => {
+            m.poll();
+            true
+        }
+        None => false,
+    }
 }
 
 /// Install the AppKit tablet monitor (main thread, once winit created the shared application:
@@ -260,6 +309,27 @@ mod tests {
         });
         assert!(heavy_w > light_w * 2.0, "width responds: {light_w} → {heavy_w}");
         assert!(heavy_dark > light_dark + 0.3, "opacity responds: {light_dark} → {heavy_dark}");
+    }
+
+    /// WinTab packets (Windows' driver path) through the same pipeline: the raw packet fields →
+    /// `wintab::sample` → this module's sink → the feed → the canvas. A light-to-heavy stroke must
+    /// thicken and darken, and the eraser end must be reported as such.
+    #[test]
+    fn wintab_tablet_pressure_drives_stroke_width_and_opacity() {
+        use photocraft_tablet::wintab::{self, Axis, RawPacket};
+        let pressure = Axis { min: 0, max: 1023 };
+        let mut packet = RawPacket { cursor: 1, buttons: 1, pressure: 0, orientation: [0, 900, 0] };
+        let (light_dark, light_w, heavy_dark, heavy_w) = pressure_stroke(|p| {
+            packet.pressure = (f32::from(p) * 1023.0).round() as u32;
+            Some(wintab::sample(&packet, pressure, false))
+        });
+        assert!(heavy_w > light_w * 2.0, "width responds: {light_w} → {heavy_w}");
+        assert!(heavy_dark > light_dark + 0.3, "opacity responds: {light_dark} → {heavy_dark}");
+        // The eraser end, straight from the cursor type; a lifted pen carries no pressure.
+        packet.buttons = 1;
+        assert!(wintab::sample(&packet, pressure, wintab::eraser(2, Some(0x080A))).eraser);
+        packet.buttons = 0;
+        assert_eq!(wintab::sample(&packet, pressure, false).pressure, 0.0);
     }
 
     /// `/proc/bus/input/devices` of a laptop with a Wacom Intuos Pro attached (64-bit longs: the

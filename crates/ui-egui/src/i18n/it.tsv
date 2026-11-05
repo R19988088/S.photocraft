@@ -3305,6 +3305,10 @@ layerLabel	No Color	Nessun colore
 	Keyboard	Tastiera
 	Mouse	Mouse
 	Tablet	Tavoletta
+	Tablet…	Tavoletta…
+	Tablet input mode	Modalità di input
+	Ink	Inchiostro
+	WinTab	WinTab
 	Display	Monitor
 	Panel	Pannello
 	Hide Grid	Nascondi griglia
@@ -4349,6 +4353,8 @@ shape	Appearance	Aspetto
 	Replace it with this document, or cancel and use File › Save As to keep both.	Sostituiscilo con questo documento, oppure annulla e usa File › Salva con nome per tenerli entrambi.
 
 	Tablet pressure	数位板压感
+	Tablet backend	Modalità di input
+	Win tab	WinTab
 
 	Anchor Delay	Ancora: Ritardo
 	Anchor Smooth	Ancora: Levigatura

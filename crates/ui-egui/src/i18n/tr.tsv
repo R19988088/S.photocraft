@@ -2597,6 +2597,10 @@ cameraRaw	Color	Renk
 	Keyboard	Klavye
 	Mouse	Fare
 	Tablet	Tablet
+	Tablet…	Tablet…
+	Tablet input mode	Giriş modu
+	Ink	Mürekkep
+	WinTab	WinTab
 	Display	Ekran
 	Panel	Paneli
 	Hide Grid	Izgarayı Gizle
@@ -3962,6 +3966,8 @@ cameraData	Lens	Lens
 	Increase Brush Hardness	Fırça sertliğini artır
 
 	Tablet pressure	数位板压感
+	Tablet backend	Giriş modu
+	Win tab	WinTab
 
 	Anchor Delay	Çapa: Gecikme
 	Anchor Smooth	Çapa: Düzgünleştirme

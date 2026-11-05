@@ -677,6 +677,10 @@
 	Keyboard	Πληκτρολόγιο
 	Mouse	Ποντίκι
 	Tablet	Ταμπλέτα
+	Tablet…	Ταμπλέτα…
+	Tablet input mode	Λειτουργία εισόδου
+	Ink	Μελάνι
+	WinTab	WinTab
 	Display	Οθόνη
 	Panel	Πλαίσιο
 	Hide Grid	Απόκρυψη πλέγματος
@@ -3932,6 +3936,8 @@ curves	Smooth	Εξομάλυνση
 	Increase Brush Hardness	Αύξηση σκληρότητας πινέλου
 
 	Tablet pressure	数位板压感
+	Tablet backend	Λειτουργία εισόδου
+	Win tab	WinTab
 
 	Anchor Delay	Άγκυρα: Καθυστέρηση
 	Anchor Smooth	Άγκυρα: Εξομάλυνση
