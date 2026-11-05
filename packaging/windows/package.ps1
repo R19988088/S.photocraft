@@ -86,7 +86,10 @@ function Get-PeHeader([string] $Path) {
   return @{ Machine = [BitConverter]::ToUInt16($bytes, $pe + 4); Subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C) }
 }
 $Machine = switch ($Arch) { 'x64' { 0x8664 } 'x86' { 0x14C } 'arm64' { 0xAA64 } }
-$Binaries = @(@('photocraft.exe', 2))
+# `, @(...)` keeps each (name, subsystem) pair a nested array; `@(@(...))` would flatten it when
+# there is only one pair (the app-only build), leaving strings to index.
+$Binaries = @()
+$Binaries += , @('photocraft.exe', 2)
 if (-not $NoCli) { $Binaries += , @('photocraft-cli.exe', 3) }
 foreach ($check in $Binaries) {
   $h = Get-PeHeader (Join-Path $Bin $check[0])
