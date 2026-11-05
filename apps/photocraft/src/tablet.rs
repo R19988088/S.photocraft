@@ -58,7 +58,9 @@ pub fn install_wintab(hwnd: isize, feed: &StylusFeed) -> Option<photocraft_table
 }
 
 /// Poll the WinTab monitor each frame, opening and closing it as the mode changes. Returns
-/// whether the reader is running (its samples then replace winit's touch force).
+/// whether WinTab is really feeding the pen: only then are its samples used instead of winit's
+/// touch force. A context that opens but never queues a packet (a driver that refuses system
+/// contexts, a pen on another tablet) must not switch off the Ink path's pressure.
 #[cfg(target_os = "windows")]
 pub fn poll_wintab(monitor: &mut Option<photocraft_tablet::windows::Monitor>, want: bool, hwnd: Option<isize>, feed: &StylusFeed) -> bool {
     match (want, monitor.is_some()) {
@@ -70,10 +72,7 @@ pub fn poll_wintab(monitor: &mut Option<photocraft_tablet::windows::Monitor>, wa
         _ => {}
     }
     match monitor.as_mut() {
-        Some(m) => {
-            m.poll();
-            true
-        }
+        Some(m) => m.poll(),
         None => false,
     }
 }

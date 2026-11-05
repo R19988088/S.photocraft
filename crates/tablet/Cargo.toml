@@ -25,8 +25,11 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std
 
 # The Windows driver's wintab32.dll, loaded at runtime (it ships with the tablet driver,
 # not Windows). Already in Cargo.lock; pinned exactly: review the diff before bumping.
+# `log` says why a context that opened produces no packets (Windows only, so the other
+# platforms' dependency lists are unchanged).
 [target.'cfg(target_os = "windows")'.dependencies]
 libloading = "=0.8.9"
+log = { workspace = true }
 
 # Pure-Rust X11 client (no unsafe in the RustConnection path we use).
 [target.'cfg(target_os = "linux")'.dependencies]

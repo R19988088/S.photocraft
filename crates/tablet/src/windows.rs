@@ -38,6 +38,10 @@ pub struct Monitor {
     last_packet: Instant,
     /// Pen samples were reported: winit's touch force for the same pen must then be ignored.
     pen: bool,
+    /// A packet has arrived at some point: WinTab really is feeding this pen (see [`Self::poll`]).
+    seen_packets: bool,
+    /// When the "no packets yet" warning was last printed, so it repeats at most every 2 s.
+    waiting_since: Instant,
     callback: Box<dyn Fn(Option<Sample>)>,
 }
 
@@ -47,14 +51,20 @@ pub struct Monitor {
 /// WTI_DEVICES + device, DVC_NPRESSURE.
 const WTI_DEVICES: u32 = 100;
 const DVC_NPRESSURE: u32 = 15;
+/// WTI_DEVICES + device, DVC_NAME (the tablet's name, for the log).
+const DVC_NAME: u32 = 1;
 /// WTI_CURSORS + cursor, CSR_TYPE.
 const WTI_CURSORS: u32 = 200;
 const CSR_TYPE: u32 = 20;
-/// WTI_DEFSYSCTX: the driver's default *system cursor* context. It keeps the pen moving the
-/// pointer as usual; the packets still reach us by polling.
-const WTI_DEFSYSCTX: u32 = 4;
-/// CXO_SYSTEM: the context is the system cursor's. A default system context already asks for it.
+/// WTI_DEFCONTEXT: the driver's default *application* context. The system-cursor context
+/// (`WTI_DEFSYSCTX`) is the one Windows itself drives; opening our own copy of it is refused or
+/// silently never queues packets on several drivers, which is why pens looked dead.
+const WTI_DEFCONTEXT: u32 = 3;
+/// CXO_SYSTEM: the context drives the system cursor.
 const CXO_SYSTEM: u32 = 0x0001;
+/// CXO_MESSAGES: post `WT_PACKET` to the window. Not wanted: the queue is polled, which keeps
+/// winit's window procedure untouched.
+const CXO_MESSAGES: u32 = 0x0004;
 
 /// `LOGCONTEXTW` (`wintab.h`). The name is 40 `WCHAR`s; it is left empty and never read.
 #[repr(C)]
@@ -126,6 +136,11 @@ const PACKETS_PER_CALL: i32 = 128;
 /// The packet queue requested: a few frames of a 1000 Hz pen, so a slow frame loses nothing.
 const QUEUE_SIZE: i32 = 1024;
 
+/// A WinTab context counts as the pen's source only while packets are this recent. A context
+/// that opens but never queues (a driver that won't share it) or stops queueing must leave
+/// pressure to winit's `WM_POINTER` path, or both sources end up switched off.
+const HOLD_SECS: f64 = 2.0;
+
 impl Monitor {
     /// Open a WinTab context on `hwnd`. `callback` gets `Some(sample)` for each pen packet and
     /// `None` once the pen leaves range. Call on the thread that owns the window.
@@ -134,7 +149,7 @@ impl Monitor {
         // only way to reach WinTab; the signatures below match wintab.h (all Win32 stdcall).
         let lib = unsafe { Library::new("wintab32.dll") }.map_err(|e| Error::Unsupported(format!("wintab32.dll is not installed ({e})")))?;
         // SAFETY: symbols keep the library alive (`_lib`); the function types are wintab.h's.
-        let (info, open, close, packets_get, queue_size_set) = unsafe {
+        let (info, open, close, packets_get, queue_size_set, enable, overlap) = unsafe {
             let info: unsafe extern "system" fn(u32, u32, *mut c_void) -> u32 = match lib.get(b"WTInfoW\0") {
                 Ok(f) => *f,
                 Err(_) => *lib.get(b"WTInfoA\0").map_err(|e| Error::Platform(format!("WTInfo: {e}")))?,
@@ -148,11 +163,14 @@ impl Monitor {
                 *lib.get(b"WTPacketsGet\0").map_err(|e| Error::Platform(format!("WTPacketsGet: {e}")))?;
             let queue_size_set: unsafe extern "system" fn(*mut c_void, i32) -> i32 =
                 *lib.get(b"WTQueueSizeSet\0").map_err(|e| Error::Platform(format!("WTQueueSizeSet: {e}")))?;
-            (info, open, close, packets_get, queue_size_set)
+            // Optional: a context opens disabled on some drivers and needs WTEnable(1).
+            let enable: Option<unsafe extern "system" fn(*mut c_void, i32) -> i32> = lib.get(b"WTEnable\0").ok().map(|f| *f);
+            let overlap: Option<unsafe extern "system" fn(*mut c_void, i32) -> i32> = lib.get(b"WTOverlap\0").ok().map(|f| *f);
+            (info, open, close, packets_get, queue_size_set, enable, overlap)
         };
         let mut lc = LogContext::default();
         // SAFETY: `lc` is a `LOGCONTEXTW` this crate lays out; the driver fills it.
-        let size = unsafe { info(WTI_DEFSYSCTX, 0, (&raw mut lc).cast()) };
+        let size = unsafe { info(WTI_DEFCONTEXT, 0, (&raw mut lc).cast()) };
         if size == 0 {
             return Err(Error::Unsupported("no WinTab default context (no tablet driver)".into()));
         }
@@ -161,22 +179,52 @@ impl Monitor {
         // SAFETY: `axis` is a `DVC_NPRESSURE` `AXIS`.
         let axis_size = unsafe { info(WTI_DEVICES + lc.device, DVC_NPRESSURE, (&raw mut axis).cast()) };
         let pressure = if axis_size == 0 { Axis { min: 0, max: 1023 } } else { Axis { min: axis.min, max: axis.max } };
-        // Keep CXO_SYSTEM: the pen must still move the pointer, so winit keeps delivering the
-        // pointer events whose positions these samples belong to. No CXO_MESSAGES: the queue is
-        // polled instead, which leaves winit's window procedure alone.
+        // Input extents, so the log can tell a wrong device from a wrong axis.
+        let (in_ext, out_ext) = (lc.in_ext, lc.out_ext);
+        // Keep CXO_SYSTEM (the pen still moves the pointer, so winit keeps delivering the
+        // positions these samples belong to) and CXO_MESSAGES off (the queue is polled).
+        // CXO_SYSTEM must be asked for explicitly: a default context does not set it.
         lc.options |= CXO_SYSTEM;
-        lc.options &= !0x0004;
+        lc.options &= !CXO_MESSAGES;
         lc.pkt_data = wintab::packet_mask();
         lc.move_mask = lc.pkt_data;
         lc.pkt_mode = 0;
         let hwnd = hwnd as *mut c_void;
         // SAFETY: `hwnd` is this app's live window and `lc` a filled `LOGCONTEXTW`.
-        let ctx = unsafe { open(hwnd, &raw mut lc, 1) };
+        let ctx = unsafe { open(hwnd, &raw mut lc, 0) };
         if ctx.is_null() {
             return Err(Error::Platform("WinTab refused to open a context".into()));
         }
+        // Open explicitly enabled and on top of any other context (Photoshop, a driver panel).
+        // Drivers differ about the default state of both; a disabled or obscured context never
+        // queues a packet.
         // SAFETY: `ctx` is the context just opened.
-        let _ = unsafe { queue_size_set(ctx, QUEUE_SIZE) };
+        unsafe {
+            if let Some(enable) = enable {
+                enable(ctx, 1);
+            }
+            if let Some(overlap) = overlap {
+                overlap(ctx, 1);
+            }
+            let _ = queue_size_set(ctx, QUEUE_SIZE);
+        }
+        // The device name is the one thing that tells "no tablet" from "wrong tablet" in a report.
+        let mut name = [0u16; 256];
+        // SAFETY: `name` is a 256-wide buffer; WTInfo wants `DVC_NAME` as a NUL-terminated string.
+        let name_len = unsafe { info(WTI_DEVICES + lc.device, DVC_NAME, name.as_mut_ptr().cast()) };
+        let name_len = (usize::try_from(name_len).unwrap_or(0) / 2).min(name.len());
+        let device = String::from_utf16_lossy(&name[..name_len]).trim_end_matches('\0').to_string();
+        log::info!(
+            "tablet: WinTab context open on device {} ({:?}); pressure {}..{} in-ext {}x{} out-ext {}x{}",
+            lc.device,
+            device,
+            pressure.min,
+            pressure.max,
+            in_ext[0],
+            in_ext[1],
+            out_ext[0],
+            out_ext[1]
+        );
         Ok(Self {
             _lib: lib,
             close,
@@ -186,13 +234,18 @@ impl Monitor {
             pump: Pump::with_pressure(pressure),
             last_packet: Instant::now(),
             pen: false,
+            seen_packets: false,
+            waiting_since: Instant::now(),
             callback: Box::new(callback),
         })
     }
 
     /// Drain the packet queue, reporting each packet's sample (and `None` once the pen is gone).
+    /// Returns whether WinTab is actually the pen's source: only once a packet has arrived. Until
+    /// then the UI keeps reading winit's `WM_POINTER` force, so a driver whose context opens but
+    /// never queues packets leaves pressure working through Ink instead of switching both off.
     /// Call once per frame; cheap with no pen in use.
-    pub fn poll(&mut self) {
+    pub fn poll(&mut self) -> bool {
         let mut buf = [0u8; wintab::PACKET_BYTES * PACKETS_PER_CALL as usize];
         let started = Instant::now();
         let mut got_packets = false;
@@ -223,11 +276,21 @@ impl Monitor {
         }
         if got_packets {
             self.last_packet = started;
+            if !self.seen_packets {
+                self.seen_packets = true;
+                log::info!("tablet: WinTab packets are arriving");
+            }
         } else if self.pen && self.pump.went_away(started.duration_since(self.last_packet).as_secs_f64() * 1000.0) {
             // Out of range: a mouse painting now must not inherit the pen's last pressure.
             self.pen = false;
             (self.callback)(None);
+        } else if !self.seen_packets && self.waiting_since.elapsed().as_secs() >= 2 {
+            self.waiting_since = started;
+            log::warn!("tablet: WinTab context open but no packets yet; pressure stays on the Ink path until one arrives");
         }
+        // The reader owns the pen only while it is demonstrably feeding it. A stale or silent
+        // context hands pressure back to Ink instead of leaving both sources disabled.
+        self.seen_packets && started.saturating_duration_since(self.last_packet).as_secs_f64() < HOLD_SECS
     }
 }
 
