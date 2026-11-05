@@ -20,8 +20,9 @@ pub fn packet_mask() -> u32 {
     PK_CURSOR | PK_BUTTONS | PK_NORMAL_PRESSURE | PK_ORIENTATION
 }
 
-/// Bytes of a packet with [`packet_mask`]: four 32-bit fields plus the three-int orientation.
-pub const PACKET_BYTES: usize = 28;
+/// Bytes of a packet with [`packet_mask`]: cursor, buttons, normal pressure, then the
+/// three-int orientation. The layout must match `pktdef.h` for exactly this mask.
+pub const PACKET_BYTES: usize = 6 * 4;
 
 /// The pen fields of a WinTab packet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -49,6 +50,73 @@ impl RawPacket {
             pressure: u(8),
             orientation: [u(12) as i32, u(16) as i32, u(20) as i32],
         })
+    }
+}
+
+/// Idle time after which no packet means the pen left range: a mouse painting now must not
+/// inherit the pen's last pressure. A pen resting on the tablet still reports at the packet rate.
+pub const IDLE_MS: f64 = 250.0;
+
+/// The receiving side: turns the driver's raw packet buffers into [`Sample`]s. Keeping it here
+/// (rather than in `windows.rs`) makes the whole receive path testable on any platform: a test
+/// feeds synthetic packet bytes exactly as the driver would.
+#[derive(Clone, Debug)]
+pub struct Pump {
+    pressure: Axis,
+    /// `CSR_TYPE` per cursor, asked once and remembered.
+    cursor_types: Vec<(u32, Option<u32>)>,
+    /// A pen reported recently (packets are arriving).
+    pen: bool,
+    last_ms: f64,
+}
+
+impl Default for Pump {
+    fn default() -> Self {
+        Self { pressure: Axis { min: 0, max: 1023 }, cursor_types: Vec::new(), pen: false, last_ms: f64::NEG_INFINITY }
+    }
+}
+
+impl Pump {
+    pub fn with_pressure(pressure: Axis) -> Self {
+        Self { pressure, ..Self::default() }
+    }
+
+    /// The samples of `bytes` (a whole number of [`PACKET_BYTES`] packets), in order.
+    /// `cursor_type` supplies `CSR_TYPE` for a cursor (called once per cursor); `None` means the
+    /// driver doesn't report it and [`eraser`]'s convention applies.
+    pub fn drain(&mut self, bytes: &[u8], now_ms: f64, mut cursor_type: impl FnMut(u32) -> Option<u32>) -> Vec<Sample> {
+        let mut out = Vec::with_capacity(bytes.len() / PACKET_BYTES);
+        for chunk in bytes.chunks_exact(PACKET_BYTES) {
+            let Some(packet) = RawPacket::parse(chunk) else { continue };
+            let ty = self.cursor_type(packet.cursor, &mut cursor_type);
+            out.push(sample(&packet, self.pressure, eraser(packet.cursor, ty)));
+        }
+        if !out.is_empty() {
+            self.pen = true;
+            self.last_ms = now_ms;
+        }
+        out
+    }
+
+    /// Whether the pen left range since the last [`Self::drain`] (the caller reports `None` once,
+    /// which resets this). Time is passed in so the check is testable without waiting.
+    pub fn went_away(&mut self, now_ms: f64) -> bool {
+        if !self.pen || now_ms - self.last_ms < IDLE_MS {
+            return false;
+        }
+        self.pen = false;
+        true
+    }
+
+    fn cursor_type(&mut self, cursor: u32, lookup: &mut impl FnMut(u32) -> Option<u32>) -> Option<u32> {
+        if let Some(ty) = self.cursor_types.iter().find(|(c, _)| *c == cursor) {
+            return ty.1;
+        }
+        let ty = lookup(cursor);
+        if self.cursor_types.len() < 256 {
+            self.cursor_types.push((cursor, ty));
+        }
+        ty
     }
 }
 
@@ -151,6 +219,68 @@ mod tests {
     }
 
     #[test]
+    fn the_pump_reads_a_batch_of_packets_in_order() {
+        let mut pump = Pump::with_pressure(Axis { min: 0, max: 1023 });
+        let mut batch = Vec::new();
+        for p in [100u32, 300, 1023] {
+            batch.extend_from_slice(&bytes(&RawPacket { cursor: 1, buttons: 1, pressure: p, orientation: [0, 900, 0] }));
+        }
+        let samples = pump.drain(&batch, 0.0, |_| None);
+        assert_eq!(samples.len(), 3);
+        assert!((samples[0].pressure - 100.0 / 1023.0).abs() < 1e-6);
+        assert!(samples[1].pressure > samples[0].pressure && samples[2].pressure > samples[1].pressure);
+        assert!(!pump.went_away(IDLE_MS - 1.0), "a pen still in use");
+    }
+
+    /// A pen is in range while packets keep arriving; once they stop for `IDLE_MS` it left range,
+    /// which the caller reports as `None` exactly once.
+    #[test]
+    fn the_pump_reports_the_pen_leaving_range_once() {
+        let mut pump = Pump::with_pressure(Axis { min: 0, max: 1023 });
+        assert!(!pump.went_away(1e9), "no pen yet: nothing to retract");
+        let _ = pump.drain(&bytes(&RawPacket { cursor: 1, buttons: 1, pressure: 500, ..Default::default() }), 1_000.0, |_| None);
+        assert!(!pump.went_away(1_000.0 + IDLE_MS - 1.0));
+        assert!(pump.went_away(1_000.0 + IDLE_MS));
+        assert!(!pump.went_away(1_000.0 + IDLE_MS), "reported only once");
+        // The pen coming back starts a new contact.
+        let _ = pump.drain(&bytes(&RawPacket { cursor: 1, buttons: 1, pressure: 500, ..Default::default() }), 5_000.0, |_| None);
+        assert!(!pump.went_away(5_000.0 + IDLE_MS - 1.0));
+    }
+
+    /// The whole receive path on synthetic driver bytes: cursor types are looked up once and
+    /// cached, so an eraser stays an eraser even when the lookup stops answering.
+    #[test]
+    fn the_pump_asks_for_each_cursor_type_once_and_remembers_it() {
+        let mut pump = Pump::with_pressure(Axis { min: 0, max: 1023 });
+        let mut asked = Vec::new();
+        let mut lookup = |cursor: u32| {
+            asked.push(cursor);
+            Some(if cursor == 2 { 0x080A } else { 0x0802 })
+        };
+        let pen = bytes(&RawPacket { cursor: 1, buttons: 1, pressure: 1023, ..Default::default() });
+        let eraser = bytes(&RawPacket { cursor: 2, buttons: 1, pressure: 1023, ..Default::default() });
+        let mut batch = Vec::new();
+        batch.extend_from_slice(&pen);
+        batch.extend_from_slice(&eraser);
+        batch.extend_from_slice(&pen);
+        let samples = pump.drain(&batch, 0.0, &mut lookup);
+        assert_eq!(asked, [1, 2], "each cursor type is read once");
+        assert!(!samples[0].eraser && samples[1].eraser && !samples[2].eraser);
+        // Past the cache, a driver that stops answering changes nothing.
+        let samples = pump.drain(&eraser, 1.0, |_| panic!("cached cursors are not asked again"));
+        assert!(samples[0].eraser);
+    }
+
+    #[test]
+    fn the_pump_ignores_trailing_bytes_and_survives_an_empty_read() {
+        let mut pump = Pump::default();
+        assert!(pump.drain(&[], 0.0, |_| None).is_empty());
+        let mut short = bytes(&RawPacket { buttons: 1, pressure: 700, ..Default::default() }).to_vec();
+        short.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(pump.drain(&short, 0.0, |_| None).len(), 1, "a partial packet is dropped");
+    }
+
+    #[test]
     fn pressure_is_scaled_and_zero_while_lifted() {
         let axis = Axis { min: 0, max: 1023 };
         assert_eq!(axis.unit(0), 0.0);
@@ -211,6 +341,6 @@ mod tests {
         let s = sample(&p, Axis { min: 0, max: 1023 }, eraser(2, Some(0x080A)));
         assert!(s.eraser && (s.pressure - 0.75).abs() < 0.01 && (s.tilt_x - 45.0).abs() < 0.2 && (s.rotation - 180.0).abs() < 0.1);
         assert_eq!(packet_mask(), PK_CURSOR | PK_BUTTONS | PK_NORMAL_PRESSURE | PK_ORIENTATION);
-        assert_eq!(PACKET_BYTES, 7 * 4);
+        assert_eq!(PACKET_BYTES, 6 * 4, "cursor, buttons, pressure, then 3 orientation ints");
     }
 }

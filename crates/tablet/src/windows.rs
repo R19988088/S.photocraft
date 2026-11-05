@@ -18,11 +18,11 @@
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use libloading::Library;
 
-use crate::wintab::{self, Axis, RawPacket};
+use crate::wintab::{self, Axis, Pump};
 use crate::{Error, Sample};
 
 /// Loaded once and kept until the event loop returns; dropping it closes the context and the
@@ -33,10 +33,10 @@ pub struct Monitor {
     packets_get: unsafe extern "system" fn(*mut c_void, i32, *mut c_void) -> i32,
     info: unsafe extern "system" fn(u32, u32, *mut c_void) -> u32,
     ctx: *mut c_void,
-    pressure: Axis,
-    /// `CSR_TYPE` per cursor, read the first time a tool reports.
-    cursor_types: Vec<(u32, Option<u32>)>,
+    /// Packet bytes → samples; the same state machine the tests drive on every platform.
+    pump: Pump,
     last_packet: Instant,
+    /// Pen samples were reported: winit's touch force for the same pen must then be ignored.
     pen: bool,
     callback: Box<dyn Fn(Option<Sample>)>,
 }
@@ -125,9 +125,6 @@ struct RawAxis {
 const PACKETS_PER_CALL: i32 = 128;
 /// The packet queue requested: a few frames of a 1000 Hz pen, so a slow frame loses nothing.
 const QUEUE_SIZE: i32 = 1024;
-/// With no packets for this long the pen is gone (out of range), so a mouse paints as a mouse
-/// again; a pen resting on the tablet still reports at the packet rate.
-const IDLE_MS: u64 = 250;
 
 impl Monitor {
     /// Open a WinTab context on `hwnd`. `callback` gets `Some(sample)` for each pen packet and
@@ -186,8 +183,7 @@ impl Monitor {
             packets_get,
             info,
             ctx,
-            pressure,
-            cursor_types: Vec::new(),
+            pump: Pump::with_pressure(pressure),
             last_packet: Instant::now(),
             pen: false,
             callback: Box::new(callback),
@@ -198,7 +194,8 @@ impl Monitor {
     /// Call once per frame; cheap with no pen in use.
     pub fn poll(&mut self) {
         let mut buf = [0u8; wintab::PACKET_BYTES * PACKETS_PER_CALL as usize];
-        let mut any = false;
+        let started = Instant::now();
+        let mut got_packets = false;
         loop {
             // SAFETY: `ctx` is open and `buf` holds PACKETS_PER_CALL packets of the mask above.
             let n = unsafe { (self.packets_get)(self.ctx, PACKETS_PER_CALL, buf.as_mut_ptr().cast()) };
@@ -206,42 +203,31 @@ impl Monitor {
                 break;
             }
             let n = usize::try_from(n).unwrap_or(0).min(PACKETS_PER_CALL as usize);
-            for i in 0..n {
-                let at = i * wintab::PACKET_BYTES;
-                let Some(packet) = RawPacket::parse(&buf[at..at + wintab::PACKET_BYTES]) else { continue };
-                any = true;
+            got_packets |= n > 0;
+            // The samples of these bytes; the cursor-type lookup reaches the driver, so it runs
+            // only for cursors the pump hasn't seen.
+            let info = self.info;
+            let samples = self.pump.drain(&buf[..n * wintab::PACKET_BYTES], started.elapsed().as_secs_f64() * 1000.0, |cursor| {
+                let mut value = 0u32;
+                // SAFETY: `value` is a `CSR_TYPE` `UINT`; `info` is this context's WTInfo.
+                let read = unsafe { info(WTI_CURSORS + cursor, CSR_TYPE, (&raw mut value).cast()) };
+                (read != 0).then_some(value)
+            });
+            for sample in samples {
                 self.pen = true;
-                let eraser = self.eraser(packet.cursor);
-                let sample = wintab::sample(&packet, self.pressure, eraser);
                 (self.callback)(Some(sample));
             }
             if n < PACKETS_PER_CALL as usize {
                 break;
             }
         }
-        if any {
-            self.last_packet = Instant::now();
-        } else if self.pen && self.last_packet.elapsed() >= Duration::from_millis(IDLE_MS) {
+        if got_packets {
+            self.last_packet = started;
+        } else if self.pen && self.pump.went_away(started.duration_since(self.last_packet).as_secs_f64() * 1000.0) {
             // Out of range: a mouse painting now must not inherit the pen's last pressure.
             self.pen = false;
             (self.callback)(None);
         }
-    }
-
-    /// Is this cursor the eraser end? `CSR_TYPE` is read once per cursor.
-    fn eraser(&mut self, cursor: u32) -> bool {
-        let cached = self.cursor_types.iter().find(|(c, _)| *c == cursor).map(|(_, t)| *t);
-        let cursor_type = cached.unwrap_or_else(|| {
-            let mut value = 0u32;
-            // SAFETY: `value` is a `CSR_TYPE` `UINT`.
-            let read = unsafe { (self.info)(WTI_CURSORS + cursor, CSR_TYPE, (&raw mut value).cast()) };
-            let ty = (read != 0).then_some(value);
-            if self.cursor_types.len() < 256 {
-                self.cursor_types.push((cursor, ty));
-            }
-            ty
-        });
-        wintab::eraser(cursor, cursor_type)
     }
 }
 

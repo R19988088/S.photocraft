@@ -332,6 +332,76 @@ mod tests {
         assert_eq!(wintab::sample(&packet, pressure, false).pressure, 0.0);
     }
 
+    /// The whole WinTab receive path on synthetic driver bytes, as macOS can run it: a simulated
+    /// 1023-level pen is serialised into packet buffers exactly like the driver's, and the pump's
+    /// samples drive a real stroke. Also pins the two behaviours the driver contract depends on:
+    /// the eraser end follows `CSR_TYPE`, and the pen leaving range resets the mouse.
+    #[test]
+    fn simulated_wintab_driver_bytes_reach_the_canvas() {
+        use photocraft_tablet::wintab::{self, Axis, Pump, RawPacket};
+
+        fn packet_bytes(p: &RawPacket) -> Vec<u8> {
+            let mut out = Vec::new();
+            for v in [p.cursor, p.buttons, p.pressure, p.orientation[0] as u32, p.orientation[1] as u32, p.orientation[2] as u32] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out
+        }
+
+        // A "driver" that answers CSR_TYPE for two cursors: 1 is the pen tip, 2 the eraser.
+        let cursor_type = |cursor: u32| match cursor {
+            1 => Some(0x0802u32),
+            2 => Some(0x080A),
+            _ => None,
+        };
+        let mut pump = Pump::with_pressure(Axis { min: 0, max: 1023 });
+        let mut clock = 0.0f64;
+        let mut next = |pressure: f32| -> Option<Sample> {
+            clock += 8.0;
+            let p = RawPacket {
+                cursor: 1,
+                buttons: 1,
+                pressure: (pressure.clamp(0.0, 1.0) * 1023.0).round() as u32,
+                orientation: [900, 450, 3600],
+            };
+            let samples = pump.drain(&packet_bytes(&p), clock, cursor_type);
+            assert_eq!(samples.len(), 1, "one packet in, one sample out");
+            Some(samples[0])
+        };
+        let (light_dark, light_w, heavy_dark, heavy_w) = pressure_stroke(&mut next);
+        assert!(heavy_w > light_w * 2.0, "width responds to driver pressure: {light_w} → {heavy_w}");
+        assert!(heavy_dark > light_dark + 0.3, "opacity responds: {light_dark} → {heavy_dark}");
+        assert!(heavy_dark > 0.9, "full pressure paints (nearly) opaque: {heavy_dark}");
+
+        // Tilt and twist arrive on the same packet and survive the whole way.
+        clock += 8.0;
+        let tilted = pump.drain(&packet_bytes(&RawPacket { cursor: 1, buttons: 1, pressure: 1023, orientation: [900, 450, 3600] }), clock, cursor_type);
+        assert!((tilted[0].tilt_x - 45.0).abs() < 0.2 && tilted[0].rotation.abs() < 0.1, "{:?}", tilted[0]);
+
+        // A whole batch arrives at once (one frame's queue), in order, and each cursor keeps its
+        // own eraser state.
+        let mut batch = Vec::new();
+        batch.extend_from_slice(&packet_bytes(&RawPacket { cursor: 1, buttons: 1, pressure: 200, ..Default::default() }));
+        batch.extend_from_slice(&packet_bytes(&RawPacket { cursor: 2, buttons: 1, pressure: 900, ..Default::default() }));
+        clock += 8.0;
+        let samples = pump.drain(&batch, clock, cursor_type);
+        assert_eq!(samples.len(), 2);
+        assert!(!samples[0].eraser && samples[1].eraser);
+        assert!(samples[1].pressure > samples[0].pressure);
+
+        // One more empty frame, then no packets: the pen left range exactly once, and painting
+        // with a mouse afterwards must not inherit its pressure.
+        clock += 8.0;
+        assert!(pump.drain(&[], clock, cursor_type).is_empty());
+        // `last_ms` is where the last packets arrived; the clock has moved 8 ms since.
+        assert!(!pump.went_away(clock + wintab::IDLE_MS - 10.0), "a pen still reporting");
+        assert!(pump.went_away(clock + wintab::IDLE_MS), "the pen left range");
+        assert!(!pump.went_away(clock + wintab::IDLE_MS + 1.0), "reported once");
+        let feed = StylusFeed::default();
+        sink(feed.clone())(None);
+        assert_eq!(feed.get(), None, "the mouse paints as a mouse");
+    }
+
     /// `/proc/bus/input/devices` of a laptop with a Wacom Intuos Pro attached (64-bit longs: the
     /// pen's `KEY=1c03 0 0 0 0 0` has bit 0x140, BTN_TOOL_PEN) and of the same laptop without it.
     const WITH_PEN: &str = "I: Bus=0011 Vendor=0001 Product=0001 Version=ab83\n\
