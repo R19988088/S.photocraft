@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - main
+      - liquify-on-023
     paths:
       - 'crates/tablet/**'
       - 'apps/photocraft/**'
